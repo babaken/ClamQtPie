@@ -84,6 +84,8 @@ The ClamAV engine itself is not bundled. ClamQtPie talks to a separately install
 
 Install with `apt install clamav clamav-daemon` (Debian / Ubuntu), `pacman -S clamav` (Arch), etc., and enable the clamd and definition update services (see "Notes for Linux" below).
 
+To run the release build on an X11 desktop, also install `libxcb-cursor0` (`xcb-util-cursor` on Arch), which Qt needs. It is not needed on a Wayland desktop.
+
 ### Checking the setup
 
 On the app's "システム診断" (system diagnostics) screen, click "ヘルスチェックを実行" and make sure there are no [NG] or [注意] lines. [注意] lines point out executables that are not on the PATH and differences between the listen address in `clamd.conf` and the app's connection settings.

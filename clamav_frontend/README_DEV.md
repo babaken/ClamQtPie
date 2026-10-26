@@ -876,3 +876,15 @@ clamdの接続先・サービス名・自動起動、clamonaccの場所をconfig
 - Windowsの通知設定（アプリごとの通知のオン・オフ）は差出人の名前ごとのため、旧名で通知をオフにしていた場合は新しい名前で設定し直す必要がある
 
 確認（Windows、Python 3.15.0 / 3.14.8）: 全テスト成功（引き継ぎのテストを`tests/unit/test_legacy_migration.py`に追加）。この開発機に残っていた`clamqt:`（開発環境の`notify_activate.py`を指す）と`%LOCALAPPDATA%\clamav-frontend`を引き継ぎ処理で消し、新しい`clamqtpie:`のコマンドを実行して`%LOCALAPPDATA%\clamqtpie\show_request`が書かれることを確認。新しい差出人名でのトースト表示を確認
+
+## 38. 初回公開（v0.9.0 ベータ）とLinux配布版の起動不具合の修正
+
+公開リポジトリ（GitHub `babaken/ClamQtPie`）での最初のリリースをベータ版として v0.9.0 にした（利用者と確認済み）。`core/version.py`の`APP_VERSION`、`version_info.txt`、READMEのビルド例を0.9.0にそろえた。
+
+Linux配布版がWaylandのデスクトップで起動しない不具合（v0.9.0のビルド時に発覚。Phase 11の軽量化で入った）:
+- 原因: `ClamQtPie.spec`の`_KEEP_QT_PLUGINS`に`platforms/libqwayland.so`だけを残し、Waylandのシェル統合（`wayland-shell-integration/libxdg-shell.so`）を外していた。Qtは`No shell integration named "xdg-shell" found`でWaylandをあきらめてxcbを試し、xcbの依存ライブラリ（`libxcb-cursor0`など）が無い環境では`Could not find the Qt platform plugin`で異常終了する
+- 修正: `libxdg-shell.so`・`libwl-shell-plugin.so`、クライアント側のウィンドウ枠（`wayland-decoration-client/libbradient.so`。`libadwaita.so`はQtSvgが要るため除く）、入力メソッド（`platforminputcontexts`のIBus・compose。日本語入力に必要。virtualkeyboardはQuick/Qmlが要るため除く）を残すようにした。Zipは97.6MB→97.7MB
+- X11のデスクトップでは`libxcb-cursor0`などのシステムのライブラリが必要（Qt 6.5以降の要件）。READMEの「Linux の準備」に書いた
+- 開発時（venvから`python app.py`）はPySide6のプラグインを全部使うため起きず、テストもoffscreenで動くため見つからなかった。配布版は展開してから実際のデスクトップで起動して確かめる
+
+確認（WSL2 Ubuntu 26.04 / WSLg、Python 3.14、PySide6 6.12.0）: Zipを展開して`./ClamQtPie`がWaylandで起動し、ログに「アプリ起動シーケンス完了」が出ることを確認。WSLgにはSecret ServiceとStatusNotifierWatcherが無いため、keyringの警告とトレイのD-Busエラーが出るが、環境によるもの。Windows版はspecの変更が`.so`だけのため影響なし
