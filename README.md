@@ -82,6 +82,8 @@ ClamAV エンジン自体は同梱しません。別途インストールした 
 
 `apt install clamav clamav-daemon`（Debian / Ubuntu 系）、`pacman -S clamav`（Arch 系）などでインストールし、clamd と定義更新のサービスを有効にします（下記「Linux の注意事項」）。
 
+配布版を X11 のデスクトップで使う場合は、Qt が必要とする `libxcb-cursor0`（Arch 系は `xcb-util-cursor`）も入れてください。Wayland のデスクトップでは不要です。
+
 ### 準備の確認
 
 アプリの「システム診断」画面で「ヘルスチェックを実行」を押し、[NG] や [注意] が無いことを確認します。[注意] には、PATH に無い実行ファイルや、`clamd.conf` の待ち受け先とアプリの接続先の食い違いが表示されます。
@@ -182,7 +184,7 @@ pip install -r requirements.txt
 
 python app.py                     # 起動
 python -m pytest -q               # テスト（GUI テストはヘッドレスで実行）
-python build_release.py --version 1.0.0   # PyInstaller でビルドし、dist/ に Zip を作成
+python build_release.py --version 0.9.0   # PyInstaller でビルドし、dist/ に Zip を作成
 ```
 
 - テストは `tests/` 以下にあり、clamd は偽のサーバー（`FakeClamdServer`）で代用します。実際の clamd があれば、EICAR を使った結合テストも実行されます

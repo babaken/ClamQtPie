@@ -72,6 +72,14 @@ _KEEP_QT_PLUGINS = {
     "platforms/qwindows.dll",
     "platforms/libqxcb.so",  # Linuxビルド用
     "platforms/libqwayland.so",
+    # Waylandではシェル統合（xdg-shell）が無いとウィンドウを作れず起動できない（v0.9.0のビルドで発覚）
+    "wayland-shell-integration/libxdg-shell.so",
+    "wayland-shell-integration/libwl-shell-plugin.so",
+    # クライアント側のウィンドウ枠（GNOMEなどサーバー側で枠を描かない環境用。libadwaitaはQtSvgが要るため除く）
+    "wayland-decoration-client/libbradient.so",
+    # 日本語入力（IBus）とデッドキーの入力。virtualkeyboardはQuick/Qmlが要るため除く
+    "platforminputcontexts/libibusplatforminputcontextplugin.so",
+    "platforminputcontexts/libcomposeplatforminputcontextplugin.so",
     "styles/qmodernwindowsstyle.dll",
     "imageformats/qico.dll",
     "imageformats/libqico.so",
