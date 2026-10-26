@@ -182,7 +182,7 @@ pip install -r requirements.txt
 
 python app.py                     # 起動
 python -m pytest -q               # テスト（GUI テストはヘッドレスで実行）
-python build_release.py --version 1.0.0   # PyInstaller でビルドし、dist/ に Zip を作成
+python build_release.py --version 0.9.0   # PyInstaller でビルドし、dist/ に Zip を作成
 ```
 
 - テストは `tests/` 以下にあり、clamd は偽のサーバー（`FakeClamdServer`）で代用します。実際の clamd があれば、EICAR を使った結合テストも実行されます

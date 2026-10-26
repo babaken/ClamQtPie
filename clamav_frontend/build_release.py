@@ -4,7 +4,7 @@ build_release.py — PyInstallerビルド＋配布用Zip作成
 参照: インストーラ/パッケージング設計書2章（Zipパッケージ内容）
 
 使い方:
-    python build_release.py [--version 1.0.0]
+    python build_release.py [--version 0.9.0]
 
 実行後、dist/ClamQtPie_v<version>_<platform>.zip が生成される。
 --versionの既定値はcore/version.pyのAPP_VERSION（画面・診断レポートに表示する版）。
