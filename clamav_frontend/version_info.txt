@@ -1,0 +1,39 @@
+# UTF-8
+#
+# version_info.txt — Windows実行ファイルのバージョンリソース
+#
+# 参照: インストーラ/パッケージング設計書3.2節
+# PyInstallerのEXE(version=...)引数へ渡し、エクスプローラのプロパティから
+# バージョン情報を確認可能にする。
+#
+# 生成規則: バージョン番号を更新する場合はfilevers/prodversと
+# StringStruct内のFileVersion/ProductVersionの両方を変更すること。
+
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 0, 0, 0),
+    prodvers=(1, 0, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo(
+      [
+      StringTable(
+        u'041104b0',
+        [StringStruct(u'CompanyName', u''),
+        StringStruct(u'FileDescription', u'ClamQtPie - ClamAV フロントエンド'),
+        StringStruct(u'FileVersion', u'1.0.0.0'),
+        StringStruct(u'InternalName', u'ClamQtPie'),
+        StringStruct(u'LegalCopyright', u''),
+        StringStruct(u'OriginalFilename', u'ClamQtPie.exe'),
+        StringStruct(u'ProductName', u'ClamQtPie'),
+        StringStruct(u'ProductVersion', u'1.0.0.0')])
+      ]),
+    VarFileInfo([VarStruct(u'Translation', [1041, 1200])])
+  ]
+)

@@ -1,0 +1,28 @@
+# GUI
+PySide6>=6.6
+
+# DB / マイグレーション
+SQLAlchemy>=2.0
+alembic>=1.13
+
+# スケジューラ
+APScheduler>=3.10
+
+# パスワード安全保存
+keyring>=24.0
+
+# ファイルシステム監視（Windows: watchdog経由でReadDirectoryChangesW）
+watchdog>=4.0
+
+# パッケージング
+pyinstaller>=6.3
+
+# テスト
+pytest>=8.0
+pytest-cov>=4.1
+pytest-qt>=4.4
+freezegun>=1.4
+psutil>=6.0
+
+# Windows専用（Linux開発機ではインストール不可のため環境マーカーで制御）
+pywin32>=306; sys_platform == "win32"
