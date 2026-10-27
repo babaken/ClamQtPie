@@ -681,7 +681,7 @@ WSL2 Ubuntuの実機（実際のfreshclam）で確認した結果: 一般ユー�
 Arch Linuxの実機（glibc 2.44、ClamAV 1.5.4、実際のclamonacc・pkexec）で確認した結果:
 
 - サブフォルダの無い監視フォルダでEICARを作成→検知・隔離。clamonaccは1ファイルに対してFOUND行を5回出力したが、通知・隔離は1回（重複の抑止が有効）
-- `/home/babaken`を監視（アプリのlogs等を除外）→ 約10秒後に`can't exclude`を検出してclamonaccを停止し、対処方法付きのE2005。clamonaccのプロセスは残らない
+- ホームフォルダ（`/home/<利用者名>`）を監視（アプリのlogs等を除外）→ 約10秒後に`can't exclude`を検出してclamonaccを停止し、対処方法付きのE2005。clamonaccのプロセスは残らない
 - 認証なしで判定する項目: OnAccessExcludeUnameの無いclamd.conf→E2005（clamonaccを起動しない）、OnAccessDisableDDD→E2005、`/tmp`のみ監視→E2006、LocalSocketの無いclamd.conf→`--stream`、実機のclamd.conf→`--fdpass`
 
 ### テスト結果
