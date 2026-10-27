@@ -601,9 +601,11 @@ def test_only_unwatchable_targets_does_not_start(env):
     assert errors[0].code == "E2006"
 
 
-def test_default_temporary_directory_is_tmp(env):
+def test_default_temporary_directory_is_tmp(env, monkeypatch):
     env["watch_target_service"].add("/tmp")
     manager = env["build"]()  # TemporaryDirectory未指定
+    # /tmpが実在するかに左右されないようにする（Windowsでは、今のドライブに\tmpがあるかで結果が変わっていた。CIで発見）
+    monkeypatch.setattr(manager, "_check_target", lambda path: True)
     errors = []
     manager.scan_error.connect(errors.append)
     assert manager.start() is False
