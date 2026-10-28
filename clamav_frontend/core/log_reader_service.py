@@ -142,11 +142,29 @@ class LogReaderService:
         return result
 
     def export_csv(self, entries: list[LogEntry], output_path: Path) -> None:
-        """CSV出力（画面設計書7章、UTF-8 BOM付き）"""
+        """CSV出力（画面設計書7章、UTF-8 BOM付き）
+
+        メッセージには検知したファイル名などの外部から来る文字列が入るため、表計算ソフトで開いたときに
+        数式として扱われないようにする（_csv_safe）。
+        """
         with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["日時", "レベル", "カテゴリ", "メッセージ"])
             for e in entries:
                 writer.writerow(
-                    [e.datetime.strftime("%Y-%m-%d %H:%M:%S"), e.level, e.category, e.message]
+                    [
+                        e.datetime.strftime("%Y-%m-%d %H:%M:%S"),
+                        _csv_safe(e.level),
+                        _csv_safe(e.category),
+                        _csv_safe(e.message),
+                    ]
                 )
+
+
+#: 表計算ソフトが数式の始まりとして扱う文字
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value: str) -> str:
+    """数式として扱われる文字で始まる値の先頭に「'」を付ける（CSVインジェクション対策）"""
+    return f"'{value}" if value.startswith(_CSV_FORMULA_PREFIXES) else value

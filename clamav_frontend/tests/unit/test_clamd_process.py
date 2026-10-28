@@ -10,6 +10,7 @@ import pytest
 from core.clamd_process import ClamdServiceController, ClamdStarter
 from core.config_model import ClamdConfig
 from core.exceptions import ClamdProcessError
+from core.exec_path import system_tool
 
 
 def _runner(returncode=0, stdout="", stderr=""):
@@ -26,7 +27,7 @@ def _runner(returncode=0, stdout="", stderr=""):
 def test_windows_starts_clamd_service_with_sc():
     run = _runner()
     assert ClamdServiceController(ClamdConfig(), system="Windows", runner=run).start() is True
-    assert run.calls == [["sc", "start", "clamd"]]
+    assert run.calls == [[system_tool("sc", "Windows"), "start", "clamd"]]
 
 
 def test_windows_already_running_is_success():
@@ -50,7 +51,7 @@ def test_linux_uses_pkexec_systemctl_and_custom_service_name(monkeypatch):
         which=lambda name: "/usr/bin/pkexec",
     )
     controller.start()
-    assert run.calls == [["/usr/bin/pkexec", "systemctl", "start", "clamd@scan"]]
+    assert run.calls == [["/usr/bin/pkexec", system_tool("systemctl", "Linux"), "start", "clamd@scan"]]
 
 
 def test_starter_reports_failure_in_background(qtbot):
@@ -81,7 +82,7 @@ def test_starter_passes_through_process_error(qtbot):
 def test_windows_stops_clamd_service_with_sc():
     run = _runner()
     assert ClamdServiceController(ClamdConfig(), system="Windows", runner=run).stop() is True
-    assert run.calls == [["sc", "stop", "clamd"]]
+    assert run.calls == [[system_tool("sc", "Windows"), "stop", "clamd"]]
 
 
 def test_windows_stop_when_not_active_is_success():
@@ -96,7 +97,7 @@ def test_linux_stop_uses_pkexec_systemctl(monkeypatch):
         ClamdConfig(), system="Linux", runner=run, which=lambda name: f"/usr/bin/{name}"
     )
     assert controller.stop() is True
-    assert run.calls == [["/usr/bin/pkexec", "systemctl", "stop", "clamav-daemon"]]
+    assert run.calls == [["/usr/bin/pkexec", system_tool("systemctl", "Linux"), "stop", "clamav-daemon"]]
 
 
 def test_stop_failure_raises_e8003():
@@ -190,3 +191,15 @@ def test_windows_sc_japanese_output_still_detects_already_state(action, code):
 
     controller = ClamdServiceController(ClamdConfig(), system="Windows", runner=run)
     assert getattr(controller, action)() is True
+
+
+@pytest.mark.parametrize("name", ["-h", "clamd stop", "", "a;b"])
+def test_invalid_service_name_is_not_passed_to_command(name):
+    # サービス名はscやsystemctlの引数になるため、オプションとして解釈され得る名前等は使わない
+    calls = []
+    controller = ClamdServiceController(
+        ClamdConfig(service_name=name or " "), system="Windows", runner=lambda *a, **k: calls.append(a)
+    )
+    with pytest.raises(ClamdProcessError):
+        controller.start()
+    assert calls == []

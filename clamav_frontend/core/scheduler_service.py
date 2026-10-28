@@ -356,6 +356,10 @@ class SchedulerService:
                 note = "スキップ（OSのサービスが更新）"
             else:
                 note = ""
+            # スキャンで検査できなかったファイル（サイズの上限・権限等）があれば件数を残す
+            errors = (getattr(outcome, "errors", 0) or 0) if record.scan_type == "scan" else 0
+            if errors:
+                note = f"{note}、未検査 {errors}件" if note else f"未検査 {errors}件"
             self._update_last_run(record.id, now_iso, success=not failed, note=note)
         except Exception as exc:  # noqa: BLE001
             logger.error(

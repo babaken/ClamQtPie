@@ -143,3 +143,53 @@ def test_last_run_records_skipped_update(env):
     scheduler.run_now(record.id)
 
     assert scheduler.list_all()[0].last_run.endswith("(スキップ（OSのサービスが更新）)")
+
+
+def test_only_scanned_file_is_quarantined_when_response_names_another_file(env, fake_clamd_server, tmp_path):
+    # 隔離するのは検査したファイルだけ。応答に別のファイルのパスが書かれていても、そのファイルには触れない
+    bystander = tmp_path / "bystander.txt"
+    bystander.write_text("keep")
+    fake_clamd_server.response_map["SCAN"] = f"{bystander}: Eicar-Test-Signature FOUND"
+
+    result = _run(env, action="quarantine")
+
+    assert result.detections == [(str(env["infected"]), "Eicar-Test-Signature")]
+    assert bystander.exists()
+    assert [row.original_path for row in env["quarantine_service"].list_all()] == [str(env["infected"])]
+
+
+def test_multiline_response_quarantines_nothing(env, fake_clamd_server, tmp_path):
+    # 応答が複数の結果になった場合はERRORとして扱い、どのファイルも隔離しない
+    bystander = tmp_path / "bystander.txt"
+    bystander.write_text("keep")
+    fake_clamd_server.response_map["SCAN"] = f"{env['infected']}\n{bystander}: Eicar-Test-Signature FOUND"
+
+    result = _run(env, action="quarantine")
+
+    assert result.detected == 0
+    assert result.errors == 1
+    assert bystander.exists()
+    assert env["infected"].exists()
+    assert env["quarantine_service"].list_all() == []
+
+
+def test_limits_exceeded_file_is_not_quarantined(env, fake_clamd_server):
+    # 上限を超えたという報告（検知ではない）で、大きいだけのファイルを隔離しない
+    fake_clamd_server.response_map["SCAN"] = f"{env['infected']}: Heuristics.Limits.Exceeded.MaxScanSize FOUND"
+
+    result = _run(env, action="quarantine")
+
+    assert result.detected == 0
+    assert result.errors == 1
+    assert env["infected"].exists()
+    assert env["quarantine_service"].list_all() == []
+
+
+def test_last_run_records_unscanned_file_count(env, fake_clamd_server):
+    fake_clamd_server.response_map["SCAN"] = f"{env['infected']}: Heuristics.Limits.Exceeded.MaxFileSize FOUND"
+    scheduler = _scheduler(env, run_scan=lambda target, name: _run(env))
+    record = scheduler.add_job("日次スキャン", "scan", "0 3 * * *", target=str(env["target"]))
+
+    scheduler.run_now(record.id)
+
+    assert scheduler.list_all()[0].last_run.endswith("(未検査 1件)")

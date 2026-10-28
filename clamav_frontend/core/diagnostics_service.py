@@ -32,8 +32,9 @@ from pathlib import Path
 from typing import Callable
 
 from core.clamd_conf import DEFAULT_CLAMD_CONF_CANDIDATES, find_clamd_conf, load_clamd_conf
-from core.clamd_process import ClamdServiceController, console_text_kwargs, no_window_kwargs
+from core.clamd_process import ClamdServiceController, console_text_kwargs, is_valid_service_name, no_window_kwargs
 from core.config_model import ConfigModel
+from core.exec_path import system_tool
 from core.version import APP_NAME, APP_VERSION
 
 REPORT_TITLE = f"{APP_NAME} 診断レポート"
@@ -257,9 +258,11 @@ class DiagnosticsService:
         （Windows実機の検証で、正常に動作しているのに「定義ファイルが見つかりません」とNGになったため）。
         """
         name = ClamdServiceController(self.config.clamd, system=self._system).service_name
+        if not is_valid_service_name(name):
+            return None, None
         try:
             completed = self._run(
-                ["sc", "qc", name],
+                [system_tool("sc", self._system), "qc", name],
                 capture_output=True,
                 timeout=15,
                 **console_text_kwargs(self._system),
@@ -349,7 +352,12 @@ class DiagnosticsService:
     def _service_state(self) -> str:
         # サービス名の決め方（OSごとの既定値）はエンジン サービス画面の停止・起動と同じものを使う
         name = ClamdServiceController(self.config.clamd, system=self._system).service_name
-        command = ["sc", "query", name] if self._system == "Windows" else ["systemctl", "is-active", name]
+        if not is_valid_service_name(name):
+            return f"{name!r}: サービス名に使えない文字が含まれているため確認しません"
+        if self._system == "Windows":
+            command = [system_tool("sc", self._system), "query", name]
+        else:
+            command = [system_tool("systemctl", self._system), "is-active", name]
         try:
             completed = self._run(
                 command,
@@ -434,6 +442,14 @@ class DiagnosticsService:
         report.sections.append(("ClamAV コンポーネント", component_items))
         if clamd_conf is not None:
             checks.append(CheckResult(LEVEL_OK, f"clamd.conf を読み込みました: {clamd_conf_path}"))
+            if not clamd_conf.is_enabled("AlertExceedsMax"):
+                # 無効だと、上限を超えたファイルは検査されないまま「OK」と応答され、検査できなかったことが分からない
+                checks.append(CheckResult(
+                    LEVEL_WARN,
+                    "AlertExceedsMax が clamd.conf で有効になっていません。サイズ等の上限（MaxFileSize・MaxScanSize 等）を"
+                    "超えたファイルが、検査されないまま「問題なし」になります。AlertExceedsMax yes にすると、"
+                    "スキャン結果に「未検査（サイズの上限）」として表示されます",
+                ))
         else:
             checks.append(CheckResult(LEVEL_WARN, "clamd.conf が見つからないか、読み込めません"))
         # 3. clamd（エンジン サービス）。定義ファイルの判定に応答の有無を使うため先に確認する

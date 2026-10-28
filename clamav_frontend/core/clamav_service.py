@@ -25,6 +25,53 @@ logger = logging.getLogger("clamav_frontend")
 
 #: スキャンの前にファイルが削除・移動されていた場合のERRORの詳細
 FILE_VANISHED_DETAIL = "ファイルが見つかりません（スキャンの前に削除または移動されました）"
+#: 1ファイルのSCANに対して、clamdの応答が1件の結果として解釈できなかった場合のERRORの詳細
+UNEXPECTED_RESPONSE_DETAIL = "clamdの応答を1件の結果として解釈できませんでした"
+#: サイズ等の上限を超えて検査していないファイルのERRORの詳細の先頭
+SIZE_LIMIT_DETAIL_PREFIX = "サイズ等の上限を超えたため検査していません"
+#: clamdがスキャンの上限（MaxFileSize等）を超えたファイルを報告するときの名前（clamd.confのAlertExceedsMax yes）。
+#: マルウェアと判定したわけではないため、検知ではなく「上限を超えて未検査」として扱う（大きいだけの正常な
+#: ファイルを自動で隔離しないため）
+_LIMITS_EXCEEDED_PREFIX = "Heuristics.Limits.Exceeded"
+
+#: スキャンのERRORの理由（スキャン結果の画面・ログで区別して表示する）
+ERROR_REASON_SIZE_LIMIT = "size_limit"
+ERROR_REASON_PERMISSION = "permission"
+ERROR_REASON_VANISHED = "vanished"
+ERROR_REASON_OTHER = "other"
+
+
+def error_reason(detail: str) -> str:
+    """ERRORの結果の詳細から、検査できなかった理由を返す（ERROR_REASON_*）"""
+    if detail == FILE_VANISHED_DETAIL:
+        return ERROR_REASON_VANISHED
+    if detail.startswith(SIZE_LIMIT_DETAIL_PREFIX):
+        return ERROR_REASON_SIZE_LIMIT
+    if "denied" in detail.lower():
+        return ERROR_REASON_PERMISSION
+    return ERROR_REASON_OTHER
+
+
+def _limits_exceeded_as_unscanned(results: list[ScanResult]) -> list[ScanResult]:
+    """clamdの「上限を超えた」報告（Heuristics.Limits.Exceeded.*のFOUND）を、上限を超えて未検査のERRORにする"""
+    return [
+        ScanResult(path=r.path, status="ERROR", detail=f"{SIZE_LIMIT_DETAIL_PREFIX}（{r.detail}）")
+        if r.status == "FOUND" and r.detail.startswith(_LIMITS_EXCEEDED_PREFIX)
+        else r
+        for r in results
+    ]
+
+
+def _bind_to_requested_path(results: list[ScanResult], path: str | Path) -> list[ScanResult]:
+    """1ファイルのSCANの結果を、検査を依頼したパスの結果に置き換える
+
+    応答に含まれるパスは、検査を依頼したファイルと一致する保証がないため使わない。隔離・通知・ログは
+    呼び出し側が知っているパスで行う（FILDESのscan_fdが表示用のパスに置き換えているのと同じ）。
+    1ファイルの検査なのに結果が1件でない場合は、どの結果がそのファイルのものか分からないためERRORとする。
+    """
+    if len(results) != 1:
+        return [ScanResult(path=str(path), status="ERROR", detail=UNEXPECTED_RESPONSE_DETAIL)]
+    return [ScanResult(path=str(path), status=results[0].status, detail=results[0].detail)]
 
 
 def _is_permission_error(result: ScanResult) -> bool:
@@ -143,7 +190,7 @@ class ClamAVService:
         on_start: 接続枠を確保してclamdとの通信を始める直前に呼ばれる（応答待ち時間の計測開始用）
         """
         if priority:
-            return self._scan_file(path)
+            return _limits_exceeded_as_unscanned(self._scan_file(path))
         if not self._ondemand_semaphore.acquire(blocking=False):
             if on_wait is not None:
                 on_wait()
@@ -153,7 +200,7 @@ class ClamAVService:
         try:
             if on_start is not None:
                 on_start()
-            return self._scan_file(path)
+            return _limits_exceeded_as_unscanned(self._scan_file(path))
         finally:
             self._ondemand_semaphore.release()
 
@@ -176,8 +223,8 @@ class ClamAVService:
                 result = self._scan_by_fdpass(path)
                 if result is not None:
                     return [result]
-            results = self._client.scan_path(path, multi=False)
-            if len(results) == 1 and _is_permission_error(results[0]):
+            results = _bind_to_requested_path(self._client.scan_path(path, multi=False), path)
+            if _is_permission_error(results[0]):
                 return [self._scan_by_stream(path, results[0])]
             return results
 
@@ -217,11 +264,18 @@ class ClamAVService:
         except ClamdStreamSizeError as exc:
             # INSTREAMの送信上限（clamd.max_stream_size_mb）超過。一括スキャン中に毎回例外で
             # 中断させないよう、ファイル単位のERROR結果として返す
-            return ScanResult(path=str(path), status="ERROR", detail=f"{original.detail} / {exc.message}")
+            return ScanResult(
+                path=str(path), status="ERROR", detail=f"{SIZE_LIMIT_DETAIL_PREFIX}（{exc.message}。{original.detail}）"
+            )
         return ScanResult(path=str(path), status=result.status, detail=result.detail)
 
     def scan_directory(self, path: str | Path) -> list[ScanResult]:
-        """ディレクトリスキャン（MULTISCAN、2.1節）"""
+        """ディレクトリスキャン（MULTISCAN、2.1節）
+
+        注意: 結果のパスはclamdの応答をそのまま返す。隔離などの操作に使う場合は、パスが依頼した
+        ディレクトリの配下にあり、実在する通常のファイルであることを呼び出し側で確かめること
+        （現在はScanDispatcherが1ファイルずつscan_fileを呼ぶため、どこからも使っていない）。
+        """
         with self._semaphore:
             return self._client.scan_path(path, multi=True)
 

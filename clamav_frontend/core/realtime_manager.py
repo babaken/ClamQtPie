@@ -33,7 +33,7 @@ from PySide6.QtCore import QObject, Signal
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from core.clamav_service import ClamAVService
+from core.clamav_service import ERROR_REASON_SIZE_LIMIT, ClamAVService, error_reason
 from core.config_model import RealtimeConfig
 from core.exclude_service import ExcludeService, is_under_any_folder
 from core.logger import CATEGORY_REALTIME, log_event
@@ -312,7 +312,7 @@ class RealtimeManager(QObject):
                 # 警告にしない（以前はPermission deniedのE2004が大量に記録されていた）
                 logger.debug(f"スキャンの前にファイルが削除・移動されました: {path}")
                 return
-            if result.status == "ERROR" and not retried:
+            if result.status == "ERROR" and not retried and error_reason(result.detail) != ERROR_REASON_SIZE_LIMIT:
                 # 6.2節: ファイルロック等のエラーは1回だけ1秒後リトライする
                 time.sleep(self.config.lock_retry_wait_sec)
                 self._scan_one(path, retried=True)

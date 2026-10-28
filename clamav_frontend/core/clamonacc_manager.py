@@ -18,8 +18,13 @@ watchdog（inotify）との違い:
   （rootプロセスの取り残しを防ぐ）。
 
 検知の取得:
-  clamonaccの--logに指定したファイルを末尾から読み、「<パス>: <ウイルス名> FOUND」行を
-  検知として扱う。以降の検知時アクション（自動隔離／通知のみ）はwatchdog実装と共通。
+  rootシェルがroot専用の一時フォルダ（mktemp -d、0700）を作り、clamonaccのログ・監視リスト・除外リストを
+  そこに置く。ログはrootシェルがtail -Fで標準出力へ流し、アプリはrootシェルの標準出力（パイプ）だけを読む。
+  一般ユーザーが書けるファイルを検知の受け取りに使わず、rootが一般ユーザーの場所に書き込むこともない。
+  監視リスト・除外リストはコマンドライン引数で渡し、rootシェルが一時フォルダに書き出す。
+  「<パス>: <ウイルス名> FOUND」行は検知の候補として扱い、パスが監視対象の配下にあることを確かめたうえで、
+  アプリがclamdで検査し直してFOUNDになった場合だけ検知時アクション（自動隔離／通知のみ、watchdog実装と共通）を
+  行う。検査し直せない場合（ファイルが消えた・読めない・clamdに接続できない）は通知だけを行う。
 
 既知の制限:
   - clamonaccの除外はフォルダ単位のみ（--exclude-list）。ファイル・拡張子の除外は
@@ -45,7 +50,9 @@ from __future__ import annotations
 import logging
 import os
 import posixpath
+import queue
 import re
+import secrets
 import shutil
 import subprocess
 import threading
@@ -55,6 +62,7 @@ from typing import Callable
 
 from PySide6.QtCore import QObject, Signal
 
+from core.clamav_service import ClamAVService
 from core.config_model import RealtimeConfig
 from core.clamd_conf import (
     DEFAULT_CLAMD_CONF_CANDIDATES,
@@ -62,7 +70,8 @@ from core.clamd_conf import (
     ClamdConf,
     load_clamd_conf,
 )
-from core.exceptions import ClamonaccError, ClamonaccTargetError
+from core.exceptions import AppError, ClamonaccError, ClamonaccTargetError, UnsafeExecutablePathError
+from core.exec_path import validate_executable, validate_trusted_file
 from core.exclude_service import ExcludeService, is_under_any_folder
 from core.logger import CATEGORY_REALTIME, log_event
 from core.quarantine_service import QuarantineService
@@ -75,13 +84,27 @@ logger = logging.getLogger("clamav_frontend")
 #: clamonaccはLinux専用だが、テストをWindows上でも実行できるようドライブレター付きパスも許容する
 _FOUND_RE = re.compile(r"(?P<path>(?:[A-Za-z]:)?[\\/].*): (?P<virus>\S+) FOUND\s*$")
 
-#: rootシェルとして実行するスクリプト。$@ がclamonaccのコマンドライン。
-#: 非対話シェルでは「&」で起動したコマンドの標準入力が/dev/nullになるため、
-#: 元の標準入力をfd3へ複製してから監視用サブシェルに渡す。
+#: rootシェルとして実行するスクリプト。引数は「終了マーカーの識別子、監視リストの件数、監視リスト…、
+#: 除外リストの件数、除外リスト…、clamonaccのコマンドライン…」の順（build_commandが組み立てる）。
+#: - root専用の一時フォルダ（mktemp -d、0700）に監視リスト・除外リスト・ログを置き、終了時に消す
+#: - ログはtail -Fで標準出力へ流す（アプリはこのパイプだけを読む）
+#: - 非対話シェルでは「&」で起動したコマンドの標準入力が/dev/nullになるため、元の標準入力をfd3へ複製してから
+#:   監視用サブシェルに渡す。アプリが標準入力を閉じるとclamonaccを停止する
+#: - 終了マーカーには起動ごとの識別子を付ける（clamonaccの出力に含まれるファイル名で偽装されないように）
 _SUPERVISOR_SCRIPT = (
-    'exec 3<&0; "$@" & pid=$!; '
+    'exec 3<&0; nonce=$1; shift; '
+    'd=$(mktemp -d /tmp/clamqtpie-onacc.XXXXXXXX) || { echo "__CLAMONACC_EXIT__$nonce 125"; exit 125; }; '
+    'trap \'rm -rf "$d"\' EXIT; '
+    'n=$1; shift; : > "$d/watch-list"; '
+    'while [ "$n" -gt 0 ]; do printf "%s\\n" "$1" >> "$d/watch-list"; shift; n=$((n-1)); done; '
+    'n=$1; shift; : > "$d/exclude-list"; '
+    'while [ "$n" -gt 0 ]; do printf "%s\\n" "$1" >> "$d/exclude-list"; shift; n=$((n-1)); done; '
+    ': > "$d/clamonacc.log"; '
+    'tail -n +1 -F "$d/clamonacc.log" 2>/dev/null & tailpid=$!; '
+    '"$@" --log="$d/clamonacc.log" --watch-list="$d/watch-list" --exclude-list="$d/exclude-list" & pid=$!; '
     '( read _unused <&3; kill "$pid" 2>/dev/null ) & '
-    'wait "$pid"; echo "__CLAMONACC_EXIT__ $?"'
+    'wait "$pid"; code=$?; sleep 1; kill "$tailpid" 2>/dev/null; '
+    'echo "__CLAMONACC_EXIT__$nonce $code"'
 )
 _EXIT_MARKER = "__CLAMONACC_EXIT__"
 
@@ -163,6 +186,10 @@ def _is_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
+def _has_line_break(text: str) -> bool:
+    return "\n" in text or "\r" in text
+
+
 class ClamonaccRealtimeManager(QObject):
     """RealtimeManager（watchdog実装）と同じインターフェースを持つclamonacc実装"""
 
@@ -175,35 +202,43 @@ class ClamonaccRealtimeManager(QObject):
 
     def __init__(
         self,
+        clamav_service: ClamAVService,
         watch_target_service: WatchTargetService,
         exclude_service: ExcludeService,
         quarantine_service: QuarantineService,
         config: RealtimeConfig,
-        work_dir: Path,
         extra_exclude_dirs: list[Path] | None = None,
         popen: Callable[..., subprocess.Popen] = subprocess.Popen,
         which: Callable[[str], str | None] = shutil.which,
-        log_poll_interval_sec: float = 0.5,
         clamd_conf_candidates: tuple[str, ...] = DEFAULT_CLAMD_CONF_CANDIDATES,
+        validate_exec: Callable[..., str] = validate_executable,
+        validate_file: Callable[..., str] = validate_trusted_file,
     ) -> None:
         """
-        work_dir: watch-list/exclude-list/ログファイルを置くディレクトリ（ポータブル構成のアプリ配下）
+        clamav_service: clamonaccが検知したファイルを、検知時アクションの前に検査し直すために使う
         extra_exclude_dirs: 常に除外するフォルダ（アプリ自身のログ・隔離フォルダ等。自己検査の防止）
-        popen, which, clamd_conf_candidates: テスト用の差し替え口
+        popen, which, clamd_conf_candidates, validate_exec, validate_file: テスト用の差し替え口
         """
         super().__init__()
+        self._clamav_service = clamav_service
         self._watch_target_service = watch_target_service
         self._exclude_service = exclude_service
         self._quarantine_service = quarantine_service
         self.config = config
-        self._work_dir = work_dir
         self._extra_exclude_dirs = extra_exclude_dirs or []
         self._popen = popen
         self._which = which
-        self._log_poll_interval_sec = log_poll_interval_sec
         self._clamd_conf_candidates = clamd_conf_candidates
+        self._validate_exec = validate_exec
+        self._validate_file = validate_file
         self._clamd_conf: ClamdConf | None = None
         self._recent_detections: dict[str, float] = {}
+        #: 起動中の監視対象（検知の行のパスが監視対象の配下にあるかの確認に使う）
+        self._targets: list[str] = []
+        #: clamd.confのOnAccessMountPathでマウントポイント全体を監視しているか（監視対象の配下の確認を省く）
+        self._mount_mode = False
+        #: rootシェルの終了マーカー（起動ごとの識別子付き）
+        self._exit_marker = _EXIT_MARKER
 
         self._process: subprocess.Popen | None = None
         # clamonaccの終了を検知済みか（rootシェル自体の終了より先に立てて、is_runningへ即反映する）
@@ -211,18 +246,9 @@ class ClamonaccRealtimeManager(QObject):
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
         self._stopping = False
-
-    @property
-    def watch_list_path(self) -> Path:
-        return self._work_dir / "watch-list.txt"
-
-    @property
-    def exclude_list_path(self) -> Path:
-        return self._work_dir / "exclude-list.txt"
-
-    @property
-    def log_path(self) -> Path:
-        return self._work_dir / "clamonacc.log"
+        # 検知の候補（パス, ウイルス名）。検査し直しに時間がかかってもrootシェルの出力の読み取りを
+        # 止めないよう、別のスレッドで処理する
+        self._detections: queue.Queue = queue.Queue()
 
     @property
     def is_running(self) -> bool:
@@ -247,6 +273,15 @@ class ClamonaccRealtimeManager(QObject):
         if clamonacc is None:
             self._emit_error(f"clamonaccが見つかりません ({self.config.clamonacc_path})")
             return False
+        # clamonaccとその設定ファイルはrootで実行・読み込むため、root以外が書き換えられる場所のものは使わない
+        try:
+            clamonacc = self._validate_exec(clamonacc, ("clamonacc",))
+            if self.config.clamonacc_config_file:
+                self._validate_file(self.config.clamonacc_config_file)
+        except UnsafeExecutablePathError as exc:
+            logger.error(f"{exc.message} (detail: {exc.detail})", extra={"error_code": exc.code})
+            self.scan_error.emit(exc)  # E6005のまま知らせる（設定画面で場所を直す必要があるため）
+            return False
 
         # clamd.confの前提設定を確認する（不足していると認証後に失敗するため、認証の前に止める）
         self._clamd_conf = load_clamd_conf(self.config.clamonacc_config_file, self._clamd_conf_candidates)
@@ -259,14 +294,11 @@ class ClamonaccRealtimeManager(QObject):
             self._emit_target_error(rejected)
             return False
 
-        self._work_dir.mkdir(parents=True, exist_ok=True)
-        self._write_lists(targets)
-        # ログファイルは事前に一般ユーザー所有で作成しておく（root側は追記のみ行うため所有者が変わらず読める）
-        self.log_path.touch(exist_ok=True)
-        log_offset = self.log_path.stat().st_size
-
-        command = self.build_command(clamonacc)
-        logger.info(f"clamonaccを起動します: {' '.join(command)}")
+        self._targets = targets
+        self._mount_mode = bool(self._clamd_conf and self._clamd_conf.get_all("OnAccessMountPath"))
+        self._exit_marker = f"{_EXIT_MARKER}{secrets.token_hex(8)}"
+        command = self.build_command(clamonacc, targets, self._exclude_dirs())
+        logger.info(f"clamonaccを起動します: {clamonacc}（監視対象: {', '.join(targets)}）")
         try:
             self._process = self._popen(
                 command,
@@ -285,9 +317,10 @@ class ClamonaccRealtimeManager(QObject):
         self._stopping = False
         self._exited.clear()
         self._stop_event.clear()
+        self._detections = queue.Queue()
         self._threads = [
-            threading.Thread(target=self._tail_log, args=(log_offset,), daemon=True),
             threading.Thread(target=self._watch_process_output, daemon=True),
+            threading.Thread(target=self._detection_worker, daemon=True),
         ]
         for t in self._threads:
             t.start()
@@ -314,6 +347,7 @@ class ClamonaccRealtimeManager(QObject):
             except subprocess.TimeoutExpired:
                 logger.warning("clamonaccの停止待ちがタイムアウトしました")
         self._stop_event.set()
+        self._detections.put(None)  # 検知の処理スレッドを終わらせる
         for t in self._threads:
             if t is not threading.current_thread():
                 t.join(timeout=2)
@@ -341,19 +375,22 @@ class ClamonaccRealtimeManager(QObject):
             self.start()
 
     # -- コマンド・設定ファイル生成 ------------------------------------------
-    def build_command(self, clamonacc: str) -> list[str]:
-        args = [
-            clamonacc,
-            "--foreground",
-            f"--log={self.log_path}",
-            f"--watch-list={self.watch_list_path}",
-            f"--exclude-list={self.exclude_list_path}",
-        ]
+    def build_command(self, clamonacc: str, targets: list[str], exclude_dirs: list[str]) -> list[str]:
+        """rootシェルのコマンドを組み立てる。監視リスト・除外リストは引数で渡し、rootシェルがroot専用の
+        一時フォルダに書き出す（_SUPERVISOR_SCRIPT）。--log・--watch-list・--exclude-listもrootシェルが付ける"""
+        args = [clamonacc, "--foreground"]
         if self.config.clamonacc_config_file:
             args.append(f"--config-file={self.config.clamonacc_config_file}")
         args.append("--fdpass" if self._use_fdpass() else "--stream")
 
-        supervisor = ["/bin/sh", "-c", _SUPERVISOR_SCRIPT, "clamonacc-supervisor", *args]
+        nonce = self._exit_marker[len(_EXIT_MARKER):]
+        supervisor = [
+            "/bin/sh", "-c", _SUPERVISOR_SCRIPT, "clamonacc-supervisor",
+            nonce,
+            str(len(targets)), *targets,
+            str(len(exclude_dirs)), *exclude_dirs,
+            *args,
+        ]
         if _is_root():
             return supervisor
         return [self._which("pkexec") or "pkexec", *supervisor]
@@ -415,18 +452,28 @@ class ClamonaccRealtimeManager(QObject):
         log_event(CATEGORY_REALTIME, f"{error.message} ({detail})", level=logging.WARNING, error_code=error.code)
         self.scan_error.emit(error)
 
-    def _write_lists(self, targets: list[str]) -> None:
-        self.watch_list_path.write_text("\n".join(targets) + "\n", encoding="utf-8")
-
+    def _exclude_dirs(self) -> list[str]:
+        """clamonaccの--exclude-listに渡すフォルダ（アプリ自身のフォルダ＋フォルダ除外）"""
         exclude_dirs = [str(p) for p in self._extra_exclude_dirs]
         exclude_dirs += [
             r.value for r in self._exclude_service.list_all() if r.enabled and r.type == "folder"
         ]
-        self.exclude_list_path.write_text(
-            "".join(f"{d}\n" for d in dict.fromkeys(exclude_dirs)), encoding="utf-8"
-        )
+        result = []
+        for d in dict.fromkeys(exclude_dirs):
+            if _has_line_break(d):
+                # リストは1行1件のため、改行を含むパスは別の行として解釈されてしまう
+                logger.warning(f"改行を含むフォルダは除外リストに渡せないため無視します: {d!r}")
+                continue
+            result.append(d)
+        return result
 
     def _check_target(self, path: str) -> bool:
+        if _has_line_break(path):
+            # 監視リストは1行1件のため、改行を含むパスは渡さない（別の行として解釈されてしまう）
+            log_event(CATEGORY_REALTIME, f"改行を含むフォルダは監視できないため監視対象から外しました: {path!r}", level=logging.WARNING, error_code="E2001")
+            self.watch_target_lost.emit(path)
+            self._watch_target_service.disable_by_path(path)
+            return False
         if Path(path).exists():
             return True
         log_event(CATEGORY_REALTIME, f"監視対象フォルダが見つからないため監視を停止しました: {path}", level=logging.WARNING, error_code="E2001")
@@ -435,32 +482,28 @@ class ClamonaccRealtimeManager(QObject):
         return False
 
     # -- バックグラウンド処理 ---------------------------------------------
-    def _tail_log(self, offset: int) -> None:
-        """clamonaccのログを追記分だけ読み、検知行を処理する"""
-        pending = ""
-        try:
-            with open(self.log_path, encoding="utf-8", errors="replace") as f:
-                f.seek(offset)
-                while not self._stop_event.is_set():
-                    chunk = f.read()
-                    if not chunk:
-                        time.sleep(self._log_poll_interval_sec)
-                        continue
-                    pending += chunk
-                    *lines, pending = pending.split("\n")  # 書き込み途中の最終行は次回へ持ち越す
-                    for line in lines:
-                        self._handle_log_line(line)
-        except OSError as exc:
-            self._emit_error(f"clamonaccのログを読み取れません: {exc}")
-
-    def _handle_log_line(self, line: str) -> None:
+    def _handle_output_line(self, line: str) -> None:
+        """rootシェルの出力（clamonaccの出力とログ）の1行を処理する"""
         match = _FOUND_RE.search(line)
         if match is not None:
-            self._handle_detection(match.group("path"), match.group("virus"))
+            # 検知の候補。検査し直してから検知時アクションを行う（_detection_worker）
+            self._detections.put((match.group("path"), match.group("virus")))
         elif any(marker in line for marker in _MONITORING_FAILED_MARKERS):
             self._fail_monitoring(line.strip())
         elif "ERROR" in line:
             logger.warning(f"clamonacc: {line.strip()}", extra={"error_code": "E2005"})
+        else:
+            logger.info(f"clamonacc: {line}")
+
+    def _detection_worker(self) -> None:
+        while True:
+            item = self._detections.get()
+            if item is None:
+                return
+            try:
+                self._handle_detection(*item)
+            except Exception as exc:  # noqa: BLE001 - 1件の失敗で以降の検知の処理を止めない
+                logger.error(f"リアルタイム検知の処理に失敗しました (detail: {exc})")
 
     def _fail_monitoring(self, line: str) -> None:
         """clamonaccが監視を設定できなかった。プロセスは監視なしで動き続けるため停止して通知する"""
@@ -490,17 +533,18 @@ class ClamonaccRealtimeManager(QObject):
             return
         exit_code: int | None = None
         output_tail: list[str] = []
+        marker = self._exit_marker + " "
         for line in process.stdout:
             line = line.rstrip()
-            if line.startswith(_EXIT_MARKER):
+            if line.startswith(marker):
                 try:
-                    exit_code = int(line.split()[1])
-                except (IndexError, ValueError):
+                    exit_code = int(line[len(marker):])
+                except ValueError:
                     exit_code = -1
                 break
             if line:
                 output_tail = (output_tail + [line])[-5:]
-                logger.info(f"clamonacc: {line}")
+                self._handle_output_line(line)
 
         if exit_code is None:
             # マーカー無しで終了 = pkexec段階で終了（認証キャンセル等）
@@ -545,18 +589,27 @@ class ClamonaccRealtimeManager(QObject):
             logger.info(f"同じファイルの検知が続いたため重複として扱います: {path} ({virus_name})")
             return
         self._recent_detections[path] = now
+        if not self._mount_mode and not is_under_any_folder(path, self._targets):
+            logger.warning(f"監視対象の外のパスの検知行のため、検知時アクションを行いません: {path!r} ({virus_name})")
+            return
         # clamonaccの除外はフォルダ単位のみのため、ファイル・拡張子除外はここで反映する
         if self._exclude_service is not None and self._exclude_service.is_excluded(path):
             logger.info(f"除外対象のため検知時アクションを行いません: {path} ({virus_name})")
             return
+
+        verdict, virus_name = self._verify_detection(path, virus_name)
+        if verdict == "refuted":
+            return
+        confirmed = verdict == "confirmed"
+        note = "" if confirmed else "（ファイルを検査し直せなかったため、通知のみ行います）"
         log_event(
             CATEGORY_REALTIME,
-            f"ウイルスを検知しました: {path} ({virus_name}) [リアルタイム監視]",
+            f"ウイルスを検知しました: {path} ({virus_name}) [リアルタイム監視]{note}",
             level=logging.WARNING,
         )
         self.detected.emit(path, virus_name)
         quarantined = False
-        if self.config.default_action == "quarantine":
+        if confirmed and self.config.default_action == "quarantine":
             try:
                 self._quarantine_service.quarantine(path, virus_name)
                 quarantined = True
@@ -564,6 +617,40 @@ class ClamonaccRealtimeManager(QObject):
                 logger.error(f"リアルタイム検知の自動隔離に失敗しました (detail: {exc})")
         # 通知は隔離を試した後の実際の結果で送る（RealtimeManagerと同じ）
         self.detection_handled.emit(path, virus_name, quarantined)
+
+    def _verify_detection(self, path: str, virus_name: str) -> tuple[str, str]:
+        """clamonaccが検知したファイルを検査し直す。(判定, ウイルス名) を返す
+
+        判定:
+          "confirmed": 検査し直してもFOUND（検知時アクションを行う。ウイルス名は検査し直した結果のもの）
+          "unverified": 検査し直せなかった（ファイルが消えた・読めない・clamdに接続できない）→ 通知のみ
+          "refuted": 検査し直すとFOUNDにならない、または通常のファイルでない → 何もしない
+        検知の行に含まれるパスだけを根拠に、ファイルを隔離しないため。
+        """
+        if os.path.islink(path):
+            logger.warning(f"検知の行のパスがシンボリックリンクのため、検知時アクションを行いません: {path!r}")
+            return "refuted", virus_name
+        if not os.path.lexists(path):
+            return "unverified", virus_name
+        if not os.path.isfile(path):
+            logger.warning(f"検知の行のパスが通常のファイルでないため、検知時アクションを行いません: {path!r}")
+            return "refuted", virus_name
+        try:
+            results = self._clamav_service.scan_file(path, priority=True)
+        except AppError as exc:
+            logger.warning(f"clamonaccが検知したファイルを検査し直せませんでした: {path} (detail: {exc})")
+            return "unverified", virus_name
+        result = results[0] if results else None
+        if result is not None and result.status == "FOUND":
+            return "confirmed", result.detail or virus_name
+        if result is not None and result.status == "OK":
+            logger.warning(
+                f"clamonaccの検知行のファイルを検査し直したところ検知されなかったため、検知時アクションを行いません: {path} ({virus_name})"
+            )
+            return "refuted", virus_name
+        detail = result.detail if result is not None else "結果なし"
+        logger.warning(f"clamonaccが検知したファイルを検査し直せませんでした: {path} ({detail})")
+        return "unverified", virus_name
 
     def _emit_error(self, detail: str) -> None:
         error = ClamonaccError(detail=detail)

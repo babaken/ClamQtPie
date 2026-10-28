@@ -19,8 +19,9 @@ from pathlib import Path
 
 import pytest
 
+from core.clamav_service import ClamAVService
 from core.clamonacc_manager import ClamonaccRealtimeManager
-from core.config_model import RealtimeConfig
+from core.config_model import ClamdConfig, RealtimeConfig
 from core.exclude_service import ExcludeService
 from core.quarantine_service import QuarantineService
 from core.watch_target_service import WatchTargetService
@@ -51,13 +52,15 @@ def services(tmp_path):
 
 
 def _build(services, tmp_path, **config_overrides):
+    # clamonaccが検知したファイルは、実際のclamdで検査し直してから隔離する
+    clamav_service = ClamAVService(ClamdConfig(connection_type="unix", unix_socket_path=str(_CLAMD_SOCKET)))
     return ClamonaccRealtimeManager(
+        clamav_service,
         services["watch_target_service"],
         services["exclude_service"],
         services["quarantine_service"],
         RealtimeConfig(**config_overrides),
-        work_dir=tmp_path / "clamonacc",
-        extra_exclude_dirs=[tmp_path / "quarantine", tmp_path / "clamonacc"],
+        extra_exclude_dirs=[tmp_path / "quarantine"],
     )
 
 
@@ -142,16 +145,19 @@ def test_real_clamonacc_stop_leaves_no_clamonacc_process(services, tmp_path, qtb
     manager = _build(services, tmp_path)
 
     assert manager.start() is True
+    nonce = manager._exit_marker.removeprefix("__CLAMONACC_EXIT__").encode()
     qtbot.wait(3000)
     manager.stop()
-    qtbot.wait(1000)
+    qtbot.wait(2000)
 
-    # 本テストが起動したclamonacc（watch-listのパスで識別）が残っていないこと
+    # 本テストが起動したrootシェル（終了マーカーの識別子で識別）と、root専用の一時フォルダを使う
+    # clamonacc・tailが残っていないこと
     remaining = [
         p for p in Path("/proc").glob("[0-9]*/cmdline")
-        if str(manager.watch_list_path).encode() in _safe_read(p)
+        if nonce in _safe_read(p) or b"clamqtpie-onacc." in _safe_read(p)
     ]
     assert remaining == []
+    assert list(Path("/tmp").glob("clamqtpie-onacc.*")) == []  # 一時フォルダは終了時に消す
 
 
 def _safe_read(path: Path) -> bytes:

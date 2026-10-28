@@ -101,22 +101,25 @@ On the app's "システム診断" (system diagnostics) screen, click "ヘルス�
 
 There is no installer; ClamQtPie is distributed as a portable Zip.
 
-1. Extract the release Zip into any writable folder
-   - Recommended: a writable location such as `C:\Tools\ClamQtPie\`
-   - Not recommended: protected system locations such as `C:\Windows` (settings may fail to save)
+1. Extract the release Zip
+   - **Windows: extract it to a location that only administrators can write to, such as `C:\Program Files\ClamQtPie\`** (extracting there needs administrator rights). The app runs with administrator rights, so if it sits in a folder that standard users can modify, changes to its files or settings could be abused with administrator rights
+   - Places to avoid on Windows: Desktop, Downloads, Documents, USB drives, and folders you created directly under `C:\` (such as `C:\Tools`; by default, standard users can write to them)
+   - Linux: extract it to a location only you can write to, such as under your home folder (avoid shared folders that other users can write to)
+   - On both systems, **do not put it in a synced folder** such as OneDrive, Dropbox or Google Drive. Quarantined files (`quarantine/`) would spread to the cloud and to your other PCs. Also exclude `quarantine/` from backups
 2. Run `ClamQtPie.exe` (Windows) or `ClamQtPie` (Linux)
 
 ### Portable layout
 
 - On first launch, `config.json`, `app.db`, `logs/` and `quarantine/` are created next to the executable
-- Copy the whole folder to another PC or a USB drive to take your settings with you
+- Copy the whole folder to another PC to take your settings with you (the destination must also meet the conditions above)
 - **Only the SMTP password has to be entered again on the new machine**, because it is stored in the OS keychain (Windows: Credential Manager, Linux: Secret Service)
 
 ### Notes for Windows
 
 - The app **always runs with administrator rights**, so a UAC prompt appears every time it starts. Administrator rights are needed for quarantine (changing file permissions), real-time protection, and the auto-start setting (writing to the registry)
 - If you enable "OS起動時自動起動" (start with the OS) in Settings, **the UAC prompt also appears at every OS start**. This is how Windows works. If you choose "No", protection does not run for that session
-- Real-time protection scans and quarantines a file **after** it has been saved. It cannot block a file before it is opened, so use it alongside Windows Defender if you need that
+- Real-time protection scans and quarantines a file **after** it has been saved. It cannot block a file before it is opened
+- **Keep Microsoft Defender enabled and use ClamQtPie alongside it.** ClamQtPie is meant as an additional layer. If Defender flags files in the quarantine folder (`quarantine/`), add only the quarantine folder to Defender's exclusions (do not exclude the whole ClamQtPie folder)
 
 ### Notes for Linux
 
@@ -225,6 +228,8 @@ The design documents are in `docs/` (Japanese). Main ones:
 ## Reporting issues
 
 Please open an [issue](https://github.com/babaken/ClamQtPie/issues) and include the error code shown in the error dialog (e.g. `E1001`) and a CSV exported from the Log screen.
+
+Please do not report security problems (vulnerabilities) in public issues. Follow [SECURITY.md](SECURITY.md) and use GitHub's private vulnerability reporting instead.
 
 ## License
 

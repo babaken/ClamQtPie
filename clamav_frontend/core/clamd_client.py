@@ -27,6 +27,9 @@ from core.exceptions import (
 
 ScanStatus = Literal["OK", "FOUND", "ERROR"]
 
+#: 1回の応答で受け取る上限（スキャンは1ファイルずつ行うため、通常の応答はこれよりずっと小さい）
+MAX_RESPONSE_BYTES = 1024 * 1024
+
 _SCAN_LINE_RE = re.compile(r"^(?P<path>.*): (?:(?P<ok>OK)|(?P<detail>.+) (?P<status>FOUND|ERROR))$")
 
 
@@ -125,11 +128,16 @@ class ClamdClient:
 
     def _recv_until_close(self, sock: socket.socket) -> bytes:
         chunks: list[bytes] = []
+        received = 0
         try:
             while True:
                 data = sock.recv(4096)
                 if not data:
                     break
+                received += len(data)
+                if received > MAX_RESPONSE_BYTES:
+                    # 相手が応答を送り続けた場合に、メモリを使い果たさないよう打ち切る
+                    raise ClamdProtocolError(detail=f"clamdの応答が上限（{MAX_RESPONSE_BYTES}バイト）を超えました")
                 chunks.append(data)
         except socket.timeout as exc:
             raise ClamdTimeoutError(detail=str(exc)) from exc

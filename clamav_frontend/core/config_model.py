@@ -83,6 +83,8 @@ class UpdateConfig:
     interval_hours: int = 4
     #: freshclamの実行ファイル名（PATHから探す）またはフルパス（コードレビューで追加。PATHに無い環境向け）
     freshclam_path: str = "freshclam"
+    #: 定義データベースがこの日数より古くなったら警告する（ホーム画面・トレイ・通知。1〜30）
+    stale_days: int = 3
 
 
 @dataclass
@@ -183,6 +185,10 @@ def validate_and_fix(model: ConfigModel, warn) -> ConfigModel:
     if not isinstance(model.update.freshclam_path, str) or not model.update.freshclam_path.strip():
         warn(f"update.freshclam_path が不正な値です ({model.update.freshclam_path!r})。freshclamへ自動補正します。")
         model.update.freshclam_path = "freshclam"
+
+    if not isinstance(model.update.stale_days, int) or not (1 <= model.update.stale_days <= 30):
+        warn(f"update.stale_days が範囲外です ({model.update.stale_days!r})。既定値3へ補正します。")
+        model.update.stale_days = 3
 
     if not (1 <= model.clamd.tcp_port <= 65535):
         warn(f"clamd.tcp_port が範囲外です ({model.clamd.tcp_port})。既定値3310へ補正します。")

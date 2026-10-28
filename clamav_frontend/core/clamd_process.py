@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 from typing import Callable
@@ -24,12 +25,21 @@ from core.background_task import BackgroundTask
 from core.clamav_service import ClamAVService
 from core.config_model import ClamdConfig
 from core.exceptions import AppError, ClamdConnectionError, ClamdProcessError
+from core.exec_path import system_tool
 
 _DEFAULT_SERVICE_NAMES = {"Windows": "clamd", "Linux": "clamav-daemon"}
 #: sc start の「既に開始されています」（ERROR_SERVICE_ALREADY_RUNNING）
 _WIN_ALREADY_RUNNING = "1056"
 #: sc stop の「サービスは開始されていません」（ERROR_SERVICE_NOT_ACTIVE）
 _WIN_NOT_ACTIVE = "1062"
+
+
+#: OSのサービス名として受け付ける形（先頭は英数字等。「-」で始まるとコマンドのオプションとして解釈され得る）
+_SERVICE_NAME_RE = re.compile(r"[A-Za-z0-9_.@][A-Za-z0-9_.@-]{0,255}")
+
+
+def is_valid_service_name(name: str) -> bool:
+    return bool(_SERVICE_NAME_RE.fullmatch(name))
 
 
 def no_window_kwargs(system: str) -> dict:
@@ -82,10 +92,14 @@ class ClamdServiceController:
         return self._control("stop", _WIN_NOT_ACTIVE)
 
     def _control(self, action: str, win_ok_code: str) -> bool:
+        if not is_valid_service_name(self.service_name):
+            # sc / systemctl の引数として渡すため、オプションとして解釈され得る名前等は使わない
+            raise ClamdProcessError(detail=f"サービス名に使えない文字が含まれています: {self.service_name!r}")
+        # OSのコマンドは絶対パスで起動する（core/exec_path.py。相対名だとexeのフォルダ等からも探されるため）
         if self._system == "Windows":
-            command = ["sc", action, self.service_name]
+            command = [system_tool("sc", self._system), action, self.service_name]
         else:
-            command = ["systemctl", action, self.service_name]
+            command = [system_tool("systemctl", self._system), action, self.service_name]
             if not (hasattr(os, "geteuid") and os.geteuid() == 0):
                 command = [self._which("pkexec") or "pkexec", *command]
         try:

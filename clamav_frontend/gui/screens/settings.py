@@ -374,6 +374,12 @@ class SettingsScreen(BaseScreen):
         layout.addRow("送信元アドレス", self.smtp_from_edit)
         layout.addRow("宛先アドレス", self.smtp_to_edit)
         layout.addRow("暗号化方式", self.smtp_encryption_combo)
+        self.smtp_encryption_note = QLabel(
+            "none（暗号化なし）では、パスワードを平文で送らないよう認証を行いません。"
+            "認証が必要なサーバーでは ssl か starttls を選んでください。"
+        )
+        self.smtp_encryption_note.setWordWrap(True)
+        layout.addRow("", self.smtp_encryption_note)
         layout.addRow(self.smtp_test_button)
         return tab
 

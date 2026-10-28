@@ -5,6 +5,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 from core.config_service import ConfigService
+from core.exec_path import system_tool
 from core.notification_service import NotificationService
 
 
@@ -141,7 +142,7 @@ def test_desktop_notification_uses_notify_send_on_linux(tmp_path):
 
     mock_run.assert_called_once()
     args = mock_run.call_args[0][0]
-    assert args[0] == "notify-send"
+    assert args[0] == system_tool("notify-send", "Linux")
     assert "ウイルスを検知しました" in args[1]
 
 
@@ -159,7 +160,7 @@ def test_desktop_notification_uses_powershell_toast_on_windows(tmp_path):
 
     mock_run.assert_called_once()
     args = mock_run.call_args[0][0]
-    assert args[0] == "powershell"
+    assert args[0] == system_tool("powershell", "Windows")
     assert "ToastNotificationManager" in args[-1]
     # 検知内容はスクリプトに埋め込まず、環境変数で渡す（コード注入の防止）
     assert "ウイルスを検知しました" not in args[-1]
@@ -362,3 +363,39 @@ def test_toast_passes_title_and_body_only_via_env(tmp_path):
     # 既存の環境変数を引き継ぎつつ、通知用の2つを追加している
     assert env["CLAMQT_TEST_INHERITED"] == "1"
     assert set(["CLAMQTPIE_TOAST_TITLE", "CLAMQTPIE_TOAST_BODY"]).issubset(env)
+
+
+def test_notify_send_text_is_escaped_so_markup_is_shown_literally(tmp_path):
+    # ファイル名に含まれる<・>・&が、通知デーモンにマークアップとして解釈されないこと
+    service, _ = _service_for(tmp_path)
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+        service._send_linux_notify_send("検知 <b>", '/tmp/<a href="http://x">a</a>&b.txt: Eicar')
+    args = mock_run.call_args[0][0]
+    assert args[1] == "検知 &lt;b&gt;"
+    assert args[2] == '/tmp/&lt;a href="http://x"&gt;a&lt;/a&gt;&amp;b.txt: Eicar'
+
+
+def test_smtp_without_encryption_does_not_send_password(tmp_path):
+    # 暗号化しない接続では、パスワードを平文で送らないよう認証しない（送信自体は行う）
+    service, config_service = _service_for(tmp_path)
+    _smtp_config(config_service, "none", port=25)
+    calls = []
+
+    class _FakeSMTP:
+        def __init__(self, *a, **k):
+            pass
+
+        def login(self, *a):
+            calls.append("login")
+
+        def sendmail(self, *a):
+            calls.append("sendmail")
+
+        def quit(self):
+            pass
+
+    with patch("smtplib.SMTP", _FakeSMTP):
+        service._smtp_send(config_service.current.smtp, "pw", "s", "b")
+
+    assert calls == ["sendmail"]

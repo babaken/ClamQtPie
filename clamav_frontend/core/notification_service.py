@@ -8,6 +8,7 @@ NotificationService — デスクトップ通知・メール通知
 """
 from __future__ import annotations
 
+import html
 import logging
 import os
 import platform
@@ -21,6 +22,8 @@ from core.config_model import ConfigModel
 from core.config_service import ConfigService
 from core.detection_aggregator import DetectionAggregator, DetectionEvent
 from core.exceptions import DesktopNotifyError, KeyringUnavailableError, MailSendError
+from core.exec_path import system_tool
+from core.text_safety import visible_controls
 from core.version import APP_ID, APP_NAME
 
 logger = logging.getLogger("clamav_frontend")
@@ -91,9 +94,10 @@ class NotificationService:
             self._rebuild_aggregator()
         from datetime import datetime, timezone
 
+        # ファイル名・ウイルス名の制御文字（改行など）で、通知・メールの本文が別の行に分かれないようにする
         event = DetectionEvent(
-            path=path,
-            virus_name=virus_name,
+            path=visible_controls(path),
+            virus_name=visible_controls(virus_name),
             detected_at=datetime.now(timezone.utc).isoformat(),
             quarantined=quarantined,
         )
@@ -127,6 +131,15 @@ class NotificationService:
         if not self.config.notification.on_update_fail:
             return
         self._send_desktop_notification("定義データベースの更新に失敗しました", detail)
+
+    def notify_definitions_stale(self, age_days: int) -> None:
+        """定義データベースが古くなった（update.stale_daysを超えた）ことを知らせる。定義更新の失敗と同じ設定に従う"""
+        if not self.config.notification.on_update_fail:
+            return
+        self._send_desktop_notification(
+            "ウイルス定義が古くなっています",
+            f"定義データベースが {age_days} 日更新されていません。定義更新を実行してください",
+        )
 
     def notify_job_failure(self, job_name: str, detail: str) -> None:
         if not self.config.notification.on_job_fail:
@@ -179,7 +192,7 @@ class NotificationService:
         env = {**os.environ, "CLAMQTPIE_TOAST_TITLE": title, "CLAMQTPIE_TOAST_BODY": body}
         try:
             subprocess.run(
-                ["powershell", "-NoProfile", "-Command", script],
+                [system_tool("powershell", "Windows"), "-NoProfile", "-Command", script],
                 check=True,
                 capture_output=True,
                 timeout=10,
@@ -189,7 +202,14 @@ class NotificationService:
             raise DesktopNotifyError(detail=str(exc)) from exc
 
     def _send_linux_notify_send(self, title: str, body: str) -> None:
-        cmd = ["notify-send", title, body, "--urgency=critical"]
+        # 多くの通知デーモンは本文の一部のマークアップ（<b>・<a href>等）を解釈するため、ファイル名などに
+        # 含まれる<・>・&をエスケープして、文字どおりに表示させる
+        cmd = [
+            system_tool("notify-send", "Linux"),
+            html.escape(title, quote=False),
+            html.escape(body, quote=False),
+            "--urgency=critical",
+        ]
         if self._icon_path:
             cmd.append(f"--icon={self._icon_path}")
         try:
@@ -255,7 +275,12 @@ class NotificationService:
             if smtp.encryption == "starttls":
                 server.starttls(context=context)
             if smtp.user and password:
-                server.login(smtp.user, password)
+                if smtp.encryption == "none":
+                    # 暗号化しない接続では、パスワードが平文で送られるため認証しない
+                    # （認証が必要なサーバーでは、ssl か starttls を使う）
+                    logger.warning("SMTPの暗号化が「none」のため、認証を行わずに送信します（パスワードを平文で送らないため）")
+                else:
+                    server.login(smtp.user, password)
             server.sendmail(smtp.from_address, [smtp.to_address], msg.as_string())
         finally:
             server.quit()

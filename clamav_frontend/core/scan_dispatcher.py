@@ -24,7 +24,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal
 
-from core.clamav_service import ClamAVService
+from core.clamav_service import ERROR_REASON_SIZE_LIMIT, ClamAVService, error_reason
 from core.exceptions import AppError, ClamdConnectionError
 from core.exclude_service import ExcludeService
 from core.logger import CATEGORY_SCAN, log_event
@@ -148,23 +148,27 @@ class ScanWorker(QObject):
             if self._stop_requested:
                 break  # 接続枠の空き待ち・応答待ちの途中で停止された
 
+            # 検知・エラーの記録と通知（隔離に使われる）には、列挙したパスを使う。clamdの応答に含まれる
+            # パスは、検査を依頼したファイルと一致する保証がないため使わない（ClamAVService._bind_to_requested_path）
             for result in results:
                 if result.status == "FOUND":
                     detected += 1
                     log_event(
                         CATEGORY_SCAN,
-                        f"ウイルスを検知しました: {result.path} ({result.detail}) [{self._label}]",
+                        f"ウイルスを検知しました: {path} ({result.detail}) [{self._label}]",
                         level=logging.WARNING,
                     )
                 elif result.status == "ERROR":
                     errors += 1
-                    # システムファイル等で大量に出得るため、個別のエラーはDEBUGに留め件数を完了ログに出す
+                    # システムファイル等で大量に出得るため、個別のエラーはDEBUGに留め件数を完了ログに出す。
+                    # サイズ等の上限で検査していないファイルは、見落とされないようINFOで残す
+                    size_limit = error_reason(result.detail) == ERROR_REASON_SIZE_LIMIT
                     log_event(
                         CATEGORY_SCAN,
-                        f"スキャンできませんでした: {result.path} ({result.detail})",
-                        level=logging.DEBUG,
+                        f"スキャンできませんでした: {path} ({result.detail})",
+                        level=logging.INFO if size_limit else logging.DEBUG,
                     )
-                self.file_scanned.emit(result.path, result.status, result.detail, _now_iso())
+                self.file_scanned.emit(str(path), result.status, result.detail, _now_iso())
 
             scanned += 1
 

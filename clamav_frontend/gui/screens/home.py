@@ -27,10 +27,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from core.definitions import definitions_age_days
 from core.logger import CATEGORY_QUARANTINE, CATEGORY_REALTIME, CATEGORY_SCAN, CATEGORY_UPDATE
 from gui import icons
 from gui.screens.base import BaseScreen, make_card, wrap_layout
-from gui.theme import COLOR_NG, COLOR_OK, COLOR_TEXT_MUTED, set_accent, set_variant
+from gui.theme import COLOR_NG, COLOR_OK, COLOR_TEXT_MUTED, COLOR_WARN, set_accent, set_variant
 
 #: 直近アクティビティの最大件数（画面設計書1章）
 ACTIVITY_LIMIT = 10
@@ -54,6 +55,8 @@ class AppStatus:
     db_date: str = ""
     realtime_running: bool = False
     engine_version: str = ""  # 例: "ClamAV 1.5.4"（エンジン サービス画面で表示）
+    definitions_age_days: int | None = None  # 定義の日付からの経過日数（不明ならNone）
+    definitions_stale: bool = False  # 定義が古い（update.stale_daysより古い）
 
 
 class _StatusCard(QFrame):
@@ -176,6 +179,7 @@ class HomeScreen(BaseScreen):
         self._on_update_now = None
         self._on_toggle_realtime = None
         self._on_navigate = None
+        self._stale_days = lambda: 3
 
     # -- サービス層との結線 -----------------------------------------------------
     def bind_services(
@@ -187,11 +191,13 @@ class HomeScreen(BaseScreen):
         on_toggle_realtime,
         log_reader_service=None,
         on_navigate=None,
+        stale_days=None,
     ) -> None:
         """
         on_quick_scan / on_update_now / on_toggle_realtime / on_navigate:
             他画面への遷移と実処理起動はMainWindow（app.py）側のコールバックに委譲する
             （画面間の直接依存を避けるため）。
+        stale_days: 定義が古いと判断する日数を返す関数（設定 update.stale_days。保存後の値を毎回読む）
         """
         self._clamav_service = clamav_service
         self._realtime_manager = realtime_manager
@@ -200,6 +206,8 @@ class HomeScreen(BaseScreen):
         self._on_update_now = on_update_now
         self._on_toggle_realtime = on_toggle_realtime
         self._on_navigate = on_navigate
+        if stale_days is not None:
+            self._stale_days = stale_days
         self.refresh_status()
 
     @property
@@ -227,9 +235,19 @@ class HomeScreen(BaseScreen):
             except Exception:  # noqa: BLE001
                 self._status.clamd_running = False
             if self._status.clamd_running:
+                age = definitions_age_days(self._status.db_date)
+                self._status.definitions_age_days = age
+                self._status.definitions_stale = age is not None and age > self._stale_days()
                 self.clamd_status_card.set_value("稼働中", COLOR_OK)
-                self.db_version_card.set_value(f"{self._status.db_version} / {self._status.db_date}")
+                db_text = f"{self._status.db_version} / {self._status.db_date}"
+                if self._status.definitions_stale:
+                    self.db_version_card.set_value(f"{db_text}（{age}日前）", COLOR_WARN)
+                else:
+                    self.db_version_card.set_value(db_text)
             else:
+                # clamdが応答しない間は定義の日付が分からないため、古さの警告もしない
+                self._status.definitions_age_days = None
+                self._status.definitions_stale = False
                 self.clamd_status_card.set_value("停止", COLOR_NG)
                 self.db_version_card.set_value("-")
             self.refresh_activity()
@@ -253,6 +271,14 @@ class HomeScreen(BaseScreen):
             title = "ClamAV エンジン サービスが停止しています"
             detail = "スキャンとリアルタイム監視の検査ができません。[エンジンの操作] から clamd を起動してください。"
             color = COLOR_NG
+        elif status.definitions_stale:
+            title = "ウイルス定義が古くなっています"
+            detail = (
+                f"定義データベースが {status.definitions_age_days} 日更新されていません。"
+                "[定義を更新] から更新してください。Linux で OS のサービスに更新を任せている場合は、"
+                "clamav-freshclam サービスが動いているか確認してください。"
+            )
+            color = COLOR_WARN
         elif status.realtime_running:
             title = "保護されています"
             detail = "clamd が稼働中で、リアルタイム監視も有効です。"

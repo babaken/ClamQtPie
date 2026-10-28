@@ -361,6 +361,7 @@ def main() -> int:
         _on_toggle_realtime,
         log_reader_service=log_reader_service,
         on_navigate=lambda key: (window.navigate_to(key), window.show_from_tray()),
+        stale_days=lambda: config_service.current.update.stale_days,
     )
 
     def _on_clamd_stop_requested() -> None:
@@ -389,11 +390,22 @@ def main() -> int:
     # 稼働状態の定期更新: ホーム画面のカード・ステータスバー・トレイアイコンを同じ状態で更新する
     # （画面設計書「共通仕様」のステータスバー、タスクトレイ常駐アプリプロセス設計書5.2節の状態表現）。
     # 従来はステータスバーが一度も更新されず「clamd: 確認中...」のままだった（Windows実機テストで発見）
+    definitions_state = {"stale": False}
+
     def _on_status_refreshed(status) -> None:
         window.update_status_bar(status)
         engine_screen.apply_status(status)
         tray_icon.set_state(TrayIconState.ERROR, status.clamd_running is False)
         tray_icon.set_state(TrayIconState.MONITORING, status.realtime_running)
+        # 定義が古い間はトレイのツールチップで知らせ、古くなった時点で1回だけ通知する（core/definitions.py）
+        if status.definitions_stale:
+            tray_icon.set_warning(f"ウイルス定義が {status.definitions_age_days} 日更新されていません")
+            if not definitions_state["stale"]:
+                notification_service.notify_definitions_stale(status.definitions_age_days)
+        elif status.clamd_running is not None:
+            tray_icon.set_warning(None)
+        if status.clamd_running:
+            definitions_state["stale"] = status.definitions_stale
         realtime_screen.sync_toggle_state(status.realtime_running)
         # clamd停止を検知したら1回だけ自動起動を試みる（復旧後に再び停止した場合はもう1回）
         if status.clamd_running:

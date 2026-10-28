@@ -888,3 +888,29 @@ Linux配布版がWaylandのデスクトップで起動しない不具合（v0.9.
 - 開発時（venvから`python app.py`）はPySide6のプラグインを全部使うため起きず、テストもoffscreenで動くため見つからなかった。配布版は展開してから実際のデスクトップで起動して確かめる
 
 確認（WSL2 Ubuntu 26.04 / WSLg、Python 3.14、PySide6 6.12.0）: Zipを展開して`./ClamQtPie`がWaylandで起動し、ログに「アプリ起動シーケンス完了」が出ることを確認。WSLgにはSecret ServiceとStatusNotifierWatcherが無いため、keyringの警告とトレイのD-Busエラーが出るが、環境によるもの。Windows版はspecの変更が`.so`だけのため影響なし
+
+## 39. セキュリティの改善（v0.9.1 に向けて）
+
+本体（`core/`）の安全性を見直し、次の点を改善した。サービス化（今後の版）でも同じ `core/` を使う。
+
+| 対象 | 変更 |
+|---|---|
+| スキャン結果 | 1ファイルの `SCAN` の結果は、clamd の応答に含まれるパスではなく、検査を依頼したパスの結果として扱う。応答が1件の結果として解釈できなければ ERROR（`ClamAVService._bind_to_requested_path`）。`ScanWorker` の通知・ログも列挙したパスで行う |
+| Linux のリアルタイム監視（clamonacc） | root シェルが root 専用の一時フォルダ（`mktemp -d`）にログ・監視リスト・除外リストを置き、ログを `tail -F` で標準出力へ流す。アプリはそのパイプだけを読む。リストは引数で渡す（改行を含むパスは渡さない）。検知の行は、監視対象の配下にあることを確かめ、`ClamAVService` で検査し直して FOUND の場合だけ隔離する（検査し直せなければ通知のみ）。終了マーカーに起動ごとの識別子を付けた。`ClamonaccRealtimeManager` の引数に `clamav_service` を追加し、`work_dir` をなくした |
+| 隔離・復元 | ファイル移動をリンク（ジャンクション・シンボリックリンク）をたどらずに行う（新規 `core/safe_fs.py`）。Windows は `FILE_FLAG_OPEN_REPARSE_POINT` で開いて実際のパスを確かめ、ハンドルに対して名前を変える。Linux 等はルートから1段ずつ `O_NOFOLLOW` で開いたフォルダの fd を基準に操作する。復元先に既にあるものがリンク・フォルダなら上書きの指定があっても置き換えない |
+| 外部コマンド | 絶対パスで起動する（新規 `core/exec_path.py`）。Windows の `sc`・`powershell` は `GetSystemDirectoryW` のフォルダ、Linux の `systemctl` 等は決まったディレクトリから探す。freshclam（Windows）は ClamAV の導入先 → PATH の絶対パスの項目の順に探し、カレントディレクトリは探さない |
+| 実行ファイルの場所 | 管理者・root で実行する freshclam・clamonacc と clamonacc の設定ファイルは、実行の直前に、絶対パス・想定どおりの名前・ファイルと親フォルダに管理者（root）以外が書き込めないことを確かめ、満たさなければ実行しない（新しいエラーコード E6005 `UnsafeExecutablePathError`）。clamd のサービス名は安全な形だけを受け付ける |
+| 多重起動防止 | ミューテックス（Linux はロックファイル）を取れないとき、同じ実行ファイルの別のプロセスが動いているかを確かめ、動いていなければ WARNING を記録して起動を続ける |
+| ログ・通知 | ファイル名などの制御文字（改行など）を `\n` のような見える形に置き換える（新規 `core/text_safety.py`。ログのフィルタで一括、検知の通知・メールにも適用）。Linux の notify-send の本文はエスケープする。ログの CSV 出力で数式として扱われる値の先頭に `'` を付ける |
+| clamd との通信 | 応答の受信を 1 MiB までにした |
+| SMTP | 暗号化が「none」のときは認証しない（パスワードを平文で送らない）。設定画面に注意書きを追加 |
+| 検査できなかったファイル | ERROR の理由（サイズ等の上限・権限・削除済み・その他）を分類して画面に表示し、件数と完了時の注意を出す。スケジュールの最終実行結果に「未検査 N件」。clamd の `Heuristics.Limits.Exceeded.*`（`AlertExceedsMax yes` のときの「上限を超えた」報告）は検知ではなく、上限を超えて未検査として扱う（大きいだけのファイルを自動で隔離しない）。診断で `AlertExceedsMax` が無効なら注意を出す |
+| 定義データベースの古さ | 新しい設定 `update.stale_days`（既定3日）より古ければ、ホーム画面に警告、トレイのツールチップに注意、古くなった時点で1回通知（新規 `core/definitions.py`） |
+| README | Windows では管理者だけが書き込める場所（`C:\Program Files\ClamQtPie\` など）に展開し、一般ユーザーが書き込める場所・USB メモリ・同期フォルダを避けるよう案内。Microsoft Defender との併用と、脆弱性の報告方法（SECURITY.md）を追記 |
+
+動作の変わる点:
+- ClamAV を一般ユーザーが書き込める場所に置いている場合、定義更新・clamonacc の起動が E6005 で止まる（管理者だけが書き込める場所へ置き直す）
+- SMTP の暗号化を「none」にして認証が必要なサーバーを使っている場合、メールが届かなくなる（ssl か starttls にする）
+- 開発時（`python app.py`）は、他の `python.exe` のプロセスがあると、従来どおり多重起動として終了することがある（配布版は実行ファイルのフルパスで判定する）
+
+確認（Windows 11、Python 3.15.1 / WSL2 Ubuntu、Python 3.14）: 全テスト成功（Windows 506件、Linux 512件）。WSL の実機 clamonacc（root）で `tests/integration/test_real_clamonacc.py` 成功。この開発機の freshclam（Chocolatey で導入）が場所の検証を通ることを確認

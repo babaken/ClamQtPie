@@ -17,6 +17,7 @@ import stat
 from pathlib import Path
 
 from core.exceptions import AppError
+from core.text_safety import visible_controls
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)s]%(error_code_tag)s%(category_tag)s %(message)s"
 
@@ -79,6 +80,13 @@ class _ErrorCodeFilter(logging.Filter):
         record.error_code_tag = f" [{code}]" if code else ""
         category = getattr(record, "category", None)
         record.category_tag = f" <{category}>" if category else ""
+        # メッセージに含まれるファイル名等の制御文字（改行など）で、1件の記録が複数の行に分かれないようにする。
+        # 例外のトレースバック（exc_info）は別の属性のため、複数行のまま残る
+        message = record.getMessage()
+        safe = visible_controls(message)
+        if safe != message:
+            record.msg = safe
+            record.args = None
         return True
 
 

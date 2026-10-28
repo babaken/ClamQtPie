@@ -26,6 +26,8 @@ from typing import Callable
 from PySide6.QtCore import QObject, QThread, Signal
 
 from core.clamav_service import ClamAVService
+from core.exceptions import UnsafeExecutablePathError
+from core.exec_path import find_program, system_tool, validate_executable, windows_clamav_dirs
 from core.logger import CATEGORY_UPDATE, log_event
 from db.database import DatabaseService
 from db.models import UpdateHistory
@@ -82,14 +84,17 @@ class UpdateService:
         system: str | None = None,
         which: Callable[[str], str | None] = shutil.which,
         runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+        validate_exec: Callable[..., str] = validate_executable,
     ) -> None:
-        """system/which/runner: テスト用の差し替え口（OS判定・コマンド検索・systemctlの実行）"""
+        """system/which/runner/validate_exec: テスト用の差し替え口（OS判定・コマンド検索・systemctlの実行・
+        実行ファイルの場所の検証）"""
         self.db = db
         self.clamav_service = clamav_service
         self.freshclam_path = freshclam_path
         self._system = system or platform.system()
         self._which = which
         self._runner = runner
+        self._validate_exec = validate_exec
 
     def update_now(
         self, on_output: Callable[[str], None] | None = None, interactive: bool = True
@@ -107,8 +112,14 @@ class UpdateService:
         """
         before_version = self._safe_get_db_version()
 
-        command, reason = self._freshclam_command(interactive)
+        try:
+            command, reason = self._freshclam_command(interactive)
+        except UnsafeExecutablePathError as exc:
+            # 管理者・rootの権限で実行するfreshclamが、一般ユーザーの書き換えられる場所にある（E6005）
+            return self._fail(before_version, f"{exc.message} ({exc.detail})")
         if command is None:
+            if reason == "not_found":
+                return self._fail(before_version, f"{_FRESHCLAM_NOT_FOUND_MESSAGE} ({self.freshclam_path})")
             if reason == "service":
                 message = f"定義DBの更新はOSの{_FRESHCLAM_SERVICE}サービスが行っているため、アプリからの自動更新は行いません"
                 log_event(CATEGORY_UPDATE, message)
@@ -173,16 +184,25 @@ class UpdateService:
     def _freshclam_service_active(self) -> bool:
         try:
             completed = self._runner(
-                ["systemctl", "is-active", "--quiet", f"{_FRESHCLAM_SERVICE}.service"], timeout=10
+                [system_tool("systemctl", self._system), "is-active", "--quiet", f"{_FRESHCLAM_SERVICE}.service"],
+                timeout=10,
             )
         except (OSError, subprocess.TimeoutExpired):
             return False
         return completed.returncode == 0
 
     def _freshclam_command(self, interactive: bool) -> tuple[list[str] | None, str]:
-        """実行するコマンドを決める。実行しない場合は(None, 理由)。理由: "service" | "no_permission" """
+        """実行するコマンドを決める。実行しない場合は(None, 理由)。理由: "service" | "no_permission" | "not_found" """
         if self._system != "Linux":
-            return [self.freshclam_path], ""
+            # 名前だけの場合も相対名では起動しない（WindowsのCreateProcessはexeのフォルダやカレント
+            # ディレクトリからも探すため）。ClamAVの導入先→PATHの絶対パスの項目の順に探す（core/exec_path.py）
+            freshclam = find_program(self.freshclam_path, windows_clamav_dirs(), system=self._system)
+            if freshclam is None and os.path.isabs(self.freshclam_path):
+                freshclam = self.freshclam_path  # 絶対パスの指定はそのまま起動し、無ければ起動の失敗として知らせる
+            if freshclam is None or not os.path.isfile(freshclam):
+                return None, "not_found"
+            # アプリは管理者権限で動くため、管理者だけが書き込める場所にあるfreshclamだけを実行する
+            return [self._validate_exec(freshclam, ("freshclam",), self._system)], ""
         service_active = self._freshclam_service_active()
         if self._is_linux_user() and not interactive:
             return None, "service" if service_active else "no_permission"
@@ -191,12 +211,17 @@ class UpdateService:
         # ログは別ファイルにする（出力はアプリのログ・画面に残る）
         log_args = [_FRESHCLAM_LOG_OVERRIDE] if service_active else []
         if not self._is_linux_user():
-            return [self.freshclam_path, *log_args], ""
+            return [self._trusted_freshclam(), *log_args], ""  # アプリ自体がrootで動いている
         pkexec = self._which("pkexec")
         if pkexec is None:
             return [self.freshclam_path, *log_args], ""  # 失敗時の詳細でサービスの有効化を案内する
-        # pkexecは実行ファイルのフルパスが必要
-        return [pkexec, self._which(self.freshclam_path) or self.freshclam_path, *log_args], ""
+        # pkexecは実行ファイルのフルパスが必要。rootで実行するため、root以外が書き換えられる場所のものは実行しない
+        return [pkexec, self._trusted_freshclam(), *log_args], ""
+
+    def _trusted_freshclam(self) -> str:
+        """rootで実行するfreshclamの絶対パス（場所を検証したもの）。問題があればUnsafeExecutablePathError"""
+        path = self._which(self.freshclam_path) or self.freshclam_path
+        return self._validate_exec(path, ("freshclam",), self._system)
 
     def _fail(self, before_version: str, detail: str) -> UpdateHistoryRecord:
         record = self._record_history("failure", before_version, before_version)
