@@ -1,0 +1,3 @@
+# 起動スクリプトの改行コードを固定する（core.autocrlf の設定に左右されないように）
+*.sh  text eol=lf
+*.bat text eol=crlf

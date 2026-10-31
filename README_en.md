@@ -192,6 +192,7 @@ python -m pytest -q               # run tests (GUI tests run headless)
 python build_release.py --version 0.9.1   # build with PyInstaller and create a Zip in dist/
 ```
 
+- `scripts/run_ClamQtPie.bat` (Windows) and `scripts/run_ClamQtPie.sh` (Linux) at the repository root start the app with the Python in `clamav_frontend/.venv` from any folder (on Linux, set `CLAMQTPIE_PYTHON` to the Python path if your venv is elsewhere). To run it as administrator on Windows, right-click the `.bat` and choose "Run as administrator"
 - Tests live under `tests/` and use a fake clamd (`FakeClamdServer`). If a real clamd is available, the EICAR integration tests run too
 - To run the EICAR tests with Windows Defender enabled, add `clamav_frontend\.pytest_eicar` to Defender's exclusions and run `python -m pytest --basetemp=.pytest_eicar`
 - Integration tests against a real clamonacc on Linux: `sudo QT_QPA_PLATFORM=offscreen <venv>/bin/python -m pytest tests/integration/test_real_clamonacc.py`
@@ -210,6 +211,7 @@ ClamQtPie/
 │   ├── scripts/          icon generation and performance measurement scripts
 │   ├── tests/            unit / integration tests
 │   └── README_DEV.md     per-phase implementation notes, design decisions and bugs found (Japanese)
+├── scripts/              scripts to start the app from the development environment
 └── docs/                 requirements, design documents and test specification (Japanese)
 ```
 
