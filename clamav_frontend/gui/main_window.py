@@ -43,6 +43,7 @@ from gui.screens.schedule import ScheduleScreen
 from gui.screens.settings import SettingsScreen
 from gui.screens.update import UpdateScreen
 from gui.theme import COLOR_NG, COLOR_OK, COLOR_TEXT_MUTED
+from gui.plain_text import plain
 
 _NAV_KEY_ROLE = Qt.ItemDataRole.UserRole
 _NAV_LABEL_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -181,7 +182,7 @@ class MainWindow(QMainWindow):
         self.app_version_label = QLabel(f"{APP_NAME} {APP_VERSION}")
         status_bar.addWidget(self.app_version_label)
         self.clamd_status_label = QLabel("clamd: 確認中...")
-        self.db_update_label = QLabel("定義DB更新: -")
+        self.db_update_label = plain(QLabel("定義DB更新: -"))
         self.realtime_status_label = QLabel("リアルタイム監視: OFF")
         for label in (self.clamd_status_label, self.db_update_label, self.realtime_status_label):
             status_bar.addPermanentWidget(label)

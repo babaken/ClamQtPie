@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from core.config_model import ConfigModel
+from core.exec_path import system_tool
 from core.diagnostics_service import (
     LEVEL_NG,
     LEVEL_OK,
@@ -335,7 +336,7 @@ def test_service_state_uses_os_default_service_name():
         _config_service(), _clamav(), system="Linux", which=lambda name: None, runner=run, environ={}
     )
     service.run()
-    assert ["systemctl", "is-active", "clamav-daemon"] in calls
+    assert [system_tool("systemctl", "Linux"), "is-active", "clamav-daemon"] in calls
 
 
 def test_reads_latest_config_on_each_run():
@@ -355,14 +356,14 @@ def test_reads_latest_config_on_each_run():
     config_service.current = new_config
 
     service.run()
-    assert ["sc", "query", "ClamAV-Custom"] in calls
+    assert [system_tool("sc", "Windows"), "query", "ClamAV-Custom"] in calls
 
 
 def _sc_runner(binary_path_name):
     """sc query / sc qc を模す（qcはBINARY_PATH_NAMEを返す）"""
 
     def run(command, **kwargs):
-        if command[:2] == ["sc", "qc"]:
+        if command[:2] == [system_tool("sc", "Windows"), "qc"]:
             return subprocess.CompletedProcess(command, 0, f"        BINARY_PATH_NAME   : {binary_path_name}\r\n", "")
         return subprocess.CompletedProcess(command, 0, "STATE : 4  RUNNING", "")
 
@@ -419,3 +420,19 @@ def test_missing_definitions_is_ng_when_clamd_does_not_respond():
     )
     report = service.run()
     assert any(c.level == LEVEL_NG and "定義ファイルが見つかりません" in c.message for c in report.checks)
+
+
+@pytest.mark.parametrize("conf_line, warned", [("", True), ("AlertExceedsMax no\n", True), ("AlertExceedsMax yes\n", False)])
+def test_alert_exceeds_max_is_checked(tmp_path, conf_line, warned):
+    # 上限を超えたファイルが検査されないまま「問題なし」にならないよう、AlertExceedsMaxを確かめる
+    conf = tmp_path / "clamd.conf"
+    conf.write_text(f"DatabaseDirectory {tmp_path}\n{conf_line}", encoding="utf-8")
+    service = DiagnosticsService(
+        _config_service(), _clamav(), system="Linux", which=lambda name: f"/usr/bin/{name}",
+        runner=_runner("active"), environ={},
+    )
+    service._conf_candidates = lambda conf_name, clamd_path: (str(conf),)
+
+    report = service.run()
+
+    assert any("AlertExceedsMax" in c.message for c in report.checks) is warned

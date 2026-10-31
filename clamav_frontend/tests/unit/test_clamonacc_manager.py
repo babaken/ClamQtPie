@@ -3,14 +3,19 @@ ClamonaccRealtimeManager（Linuxリアルタイム監視: clamonacc連携）の�
 
 clamonacc/pkexecはLinux専用でroot権限も必要なため、プロセスはFakeProcessで差し替える。
 FakeProcessはrootシェル（_SUPERVISOR_SCRIPT）の振る舞い（標準入力を閉じると
-clamonaccを止めて終了マーカーを出力する）を模擬する。
+clamonaccを止めて終了マーカーを出力する。clamonaccの出力・ログは標準出力に流れる）を模擬する。
+検知の行を受け取ったファイルは、_FakeScannerで検査し直す（FAKE_INFECTED_CONTENTを含めばFOUND）。
 """
+import os
 import queue
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
+from core.clamav_service import FILE_VANISHED_DETAIL
+from core.clamd_client import ScanResult
 from core.clamonacc_manager import (
     _FOUND_RE,
     _SUPERVISOR_SCRIPT,
@@ -18,6 +23,7 @@ from core.clamonacc_manager import (
     is_clamonacc_available,
 )
 from core.config_model import RealtimeConfig
+from core.exceptions import ClamdConnectionError
 from core.exclude_service import ExcludeService
 from core.quarantine_service import QuarantineService
 from core.realtime_factory import create_realtime_manager
@@ -30,9 +36,23 @@ from tests.conftest import FAKE_INFECTED_CONTENT
 #: clamonaccの前提を満たすclamd.conf（テストが実機の/etc/clamav/clamd.confに左右されないよう明示する）
 _GOOD_CLAMD_CONF = "LocalSocket /run/clamav/clamd.ctl\nUser clamav\nOnAccessExcludeUname clamav\n"
 
+#: rootシェル（_SUPERVISOR_SCRIPT）を実際に動かすテスト。clamonaccはLinux専用で、Windowsのsh（Git Bash等）では
+#: プロセスの停止の挙動が異なり結果が安定しないため、POSIXの環境だけで実行する
+requires_posix_sh = pytest.mark.skipif(
+    os.name != "posix" or shutil.which("sh") is None, reason="POSIXのshで動かすテスト（clamonaccはLinux専用）"
+)
+
 
 def _which(name):
-    return {"clamonacc": "/usr/sbin/clamonacc", "pkexec": "/usr/bin/pkexec"}.get(name)
+    return {"clamonacc": "/usr/sbin/clamonacc"}.get(name)
+
+
+@pytest.fixture(autouse=True)
+def _linux_pkexec(monkeypatch):
+    """pkexecは決まった場所から探す（find_system_tool）。Windowsでもテストできるよう、Linuxの場所にある扱いにする"""
+    monkeypatch.setattr(
+        "core.clamonacc_manager.find_system_tool", lambda name, system=None: f"/usr/bin/{name}"
+    )
 
 
 class _FakeStdin:
@@ -66,9 +86,13 @@ class FakeProcess:
         self.stdin = _FakeStdin(self)
         self.stdout = _FakeStdout()
 
+    @property
+    def nonce(self):
+        return self.command[self.command.index("clamonacc-supervisor") + 1]
+
     def finish(self, clamonacc_exit_code, marker=True):
         if marker:
-            self.stdout.lines.put(f"__CLAMONACC_EXIT__ {clamonacc_exit_code}\n")
+            self.stdout.lines.put(f"__CLAMONACC_EXIT__{self.nonce} {clamonacc_exit_code}\n")
         self.stdout.lines.put(None)
         self.returncode = 0 if marker else clamonacc_exit_code
 
@@ -77,6 +101,25 @@ class FakeProcess:
 
     def wait(self, timeout=None):
         return self.returncode
+
+
+class _FakeScanner:
+    """ClamAVService.scan_fileの代わり。FAKE_INFECTED_CONTENTを含むファイルはFOUND"""
+
+    def __init__(self):
+        self.error = None
+        self.scanned = []
+
+    def scan_file(self, path, priority=False):
+        self.scanned.append((path, priority))
+        if self.error is not None:
+            raise self.error
+        target = Path(path)
+        if not target.exists():
+            return [ScanResult(path=str(path), status="ERROR", detail=FILE_VANISHED_DETAIL)]
+        if FAKE_INFECTED_CONTENT in target.read_text(encoding="utf-8", errors="ignore"):
+            return [ScanResult(path=str(path), status="FOUND", detail="Eicar-Test-Signature")]
+        return [ScanResult(path=str(path), status="OK")]
 
 
 @pytest.fixture
@@ -88,6 +131,7 @@ def env(tmp_path):
     quarantine_service = QuarantineService(db_service, tmp_path / "quarantine")
     watched = tmp_path / "watched"
     watched.mkdir()
+    scanner = _FakeScanner()
 
     processes = []
 
@@ -105,22 +149,25 @@ def env(tmp_path):
             candidates = (str(conf_path),)
         config = RealtimeConfig(**config_overrides)
         return ClamonaccRealtimeManager(
+            scanner,
             watch_target_service,
             exclude_service,
             quarantine_service,
             config,
-            work_dir=tmp_path / "clamonacc",
             extra_exclude_dirs=[tmp_path / "logs"],
             popen=popen,
             which=_which,
-            log_poll_interval_sec=0.05,
             clamd_conf_candidates=candidates,
+            # 実行ファイル・設定ファイルの場所の検証は、偽のパスを使うため差し替える（検証自体はtest_exec_path.py）
+            validate_exec=lambda path, names, system=None: path,
+            validate_file=lambda path, system=None: path,
         )
 
     yield {
         "build": build,
         "processes": processes,
         "watched": watched,
+        "scanner": scanner,
         "watch_target_service": watch_target_service,
         "exclude_service": exclude_service,
         "quarantine_service": quarantine_service,
@@ -129,9 +176,21 @@ def env(tmp_path):
     db_service.close()
 
 
-def _append_log(manager, text):
-    with open(manager.log_path, "a", encoding="utf-8") as f:
-        f.write(text)
+def _emit(manager, text):
+    """rootシェルの標準出力に行を出す（clamonaccの出力・tail -Fで流れるログ）"""
+    for line in text.splitlines(keepends=True):
+        manager._process.stdout.lines.put(line)
+
+
+def _supervisor_args(command):
+    """build_commandの引数を (識別子, 監視リスト, 除外リスト, clamonaccのコマンドライン) に分ける"""
+    rest = command[command.index("clamonacc-supervisor") + 1:]
+    nonce, rest = rest[0], rest[1:]
+    count, rest = int(rest[0]), rest[1:]
+    watch, rest = rest[:count], rest[count:]
+    count, rest = int(rest[0]), rest[1:]
+    exclude, rest = rest[:count], rest[count:]
+    return nonce, watch, exclude, rest
 
 
 def test_start_without_targets_returns_false(env):
@@ -151,20 +210,19 @@ def test_start_writes_lists_and_builds_pkexec_command(env, monkeypatch):
 
     assert manager.start() is True
     try:
-        assert manager.watch_list_path.read_text(encoding="utf-8").splitlines() == [str(env["watched"])]
-        assert manager.exclude_list_path.read_text(encoding="utf-8").splitlines() == [
-            str(env["tmp_path"] / "logs"),
-            "/home/user/ignored",
-        ]
         command = env["processes"][0].command
         assert command[:3] == ["/usr/bin/pkexec", "/bin/sh", "-c"]
-        clamonacc_args = command[command.index("/usr/sbin/clamonacc"):]
+        nonce, watch, exclude, clamonacc_args = _supervisor_args(command)
+        assert len(nonce) == 16
+        # 監視リスト・除外リストは引数で渡し、rootシェルがroot専用の一時フォルダに書き出す
+        assert watch == [str(env["watched"])]
+        assert exclude == [str(env["tmp_path"] / "logs"), "/home/user/ignored"]
+        assert clamonacc_args[0] == "/usr/sbin/clamonacc"
         assert "--foreground" in clamonacc_args
-        assert f"--log={manager.log_path}" in clamonacc_args
-        assert f"--watch-list={manager.watch_list_path}" in clamonacc_args
-        assert f"--exclude-list={manager.exclude_list_path}" in clamonacc_args
         assert f"--config-file={conf_path}" in clamonacc_args
         assert "--fdpass" in clamonacc_args
+        # --log・--watch-list・--exclude-listはrootシェルが一時フォルダのパスで付ける
+        assert not any(a.startswith(("--log", "--watch-list", "--exclude-list")) for a in clamonacc_args)
         assert manager.is_running is True
     finally:
         manager.stop()
@@ -193,7 +251,7 @@ def test_found_line_in_log_triggers_detection_and_quarantine(env, qtbot):
     manager.start()
     try:
         with qtbot.waitSignal(manager.detected, timeout=3000) as blocker:
-            _append_log(manager, f"Mon Oct 19 12:00:00 2026 -> {infected}: Eicar-Test-Signature FOUND\n")
+            _emit(manager, f"Mon Oct 19 12:00:00 2026 -> {infected}: Eicar-Test-Signature FOUND\n")
         assert blocker.args == [str(infected), "Eicar-Test-Signature"]
         # 隔離はファイル移動→DB登録の順のため、ファイルが消えた時点ではまだDB未登録のことがある
         qtbot.waitUntil(lambda: len(env["quarantine_service"].list_all()) == 1, timeout=3000)
@@ -202,33 +260,122 @@ def test_found_line_in_log_triggers_detection_and_quarantine(env, qtbot):
         manager.stop()
 
 
-def test_log_lines_written_before_start_are_ignored(env, qtbot):
+def test_found_line_for_clean_file_is_ignored(env, qtbot):
+    # 検知の行だけを根拠に隔離しない。検査し直して検知されなければ、何もしない
     env["watch_target_service"].add(str(env["watched"]))
+    clean = env["watched"] / "clean.txt"
+    clean.write_text("clean")
     manager = env["build"]()
-    manager.log_path.parent.mkdir(parents=True, exist_ok=True)
-    _append_log(manager, "/old/file: Old-Signature FOUND\n")
-
     detected = []
     manager.detected.connect(lambda p, v: detected.append(p))
     manager.start()
     try:
-        with qtbot.waitSignal(manager.detected, timeout=3000):
-            _append_log(manager, "/new/file: New-Signature FOUND\n")
-        assert detected == ["/new/file"]
+        _emit(manager, f"{clean}: Eicar-Test-Signature FOUND\n")
+        qtbot.waitUntil(lambda: env["scanner"].scanned == [(str(clean), True)], timeout=3000)
+        qtbot.wait(100)
+        assert detected == []
+        assert clean.exists()
+        assert env["quarantine_service"].list_all() == []
     finally:
         manager.stop()
 
 
-def test_partial_line_is_processed_after_completion(env, qtbot):
+def test_found_line_outside_watch_targets_is_ignored(env, qtbot):
     env["watch_target_service"].add(str(env["watched"]))
-    manager = env["build"](default_action="notify_only")
+    outside = env["tmp_path"] / "outside.txt"
+    outside.write_text(FAKE_INFECTED_CONTENT)
+    manager = env["build"]()
+    detected = []
+    manager.detected.connect(lambda p, v: detected.append(p))
     manager.start()
     try:
-        with qtbot.waitSignal(manager.detected, timeout=3000) as blocker:
-            _append_log(manager, "/home/user/split")
-            qtbot.wait(150)  # 書き込み途中の行は処理されないこと
-            _append_log(manager, ".txt: Split-Signature FOUND\n")
-        assert blocker.args == ["/home/user/split.txt", "Split-Signature"]
+        _emit(manager, f"{outside}: Eicar-Test-Signature FOUND\n")
+        inside = env["watched"] / "inside.txt"
+        inside.write_text(FAKE_INFECTED_CONTENT)
+        with qtbot.waitSignal(manager.detected, timeout=3000):
+            _emit(manager, f"{inside}: Eicar-Test-Signature FOUND\n")
+        assert detected == [str(inside)]
+        assert outside.exists()
+        assert env["scanner"].scanned == [(str(inside), True)]
+    finally:
+        manager.stop()
+
+
+def test_unverifiable_detection_is_notified_without_quarantine(env, qtbot):
+    # 検査し直せない場合（ファイルが消えた・clamdに接続できない）は通知だけ行い、隔離しない
+    env["watch_target_service"].add(str(env["watched"]))
+    manager = env["build"]()
+    handled = []
+    manager.detection_handled.connect(lambda p, v, q: handled.append((p, v, q)))
+    manager._targets = [str(env["watched"])]
+
+    missing = env["watched"] / "missing.bin"
+    manager._handle_detection(str(missing), "X-Signature")
+    infected = env["watched"] / "infected.bin"
+    infected.write_text(FAKE_INFECTED_CONTENT)
+    env["scanner"].error = ClamdConnectionError()
+    manager._handle_detection(str(infected), "Y-Signature")
+
+    assert handled == [(str(missing), "X-Signature", False), (str(infected), "Y-Signature", False)]
+    assert infected.exists()
+    assert env["quarantine_service"].list_all() == []
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="シンボリックリンクを作れない環境")
+def test_found_line_for_symlink_is_ignored(env, tmp_path):
+    env["watch_target_service"].add(str(env["watched"]))
+    manager = env["build"]()
+    manager._targets = [str(env["watched"])]
+    real = tmp_path / "real.txt"
+    real.write_text(FAKE_INFECTED_CONTENT)
+    link = env["watched"] / "link.txt"
+    try:
+        os.symlink(real, link)
+    except OSError:
+        pytest.skip("シンボリックリンクを作る権限がない")
+    detected = []
+    manager.detected.connect(lambda p, v: detected.append(p))
+
+    manager._handle_detection(str(link), "X")
+
+    assert detected == []
+    assert real.exists()
+
+
+def test_exit_marker_without_nonce_does_not_stop_monitoring(env, qtbot):
+    # 終了マーカーは起動ごとの識別子付き。clamonaccの出力に識別子のないマーカーが含まれても停止しない
+    env["watch_target_service"].add(str(env["watched"]))
+    manager = env["build"]()
+    errors = []
+    manager.scan_error.connect(errors.append)
+    manager.start()
+    try:
+        _emit(manager, "__CLAMONACC_EXIT__ 0\n")
+        _emit(manager, "__CLAMONACC_EXIT__0000000000000000 0\n")
+        qtbot.wait(200)
+        assert manager.is_running is True
+        assert errors == []
+    finally:
+        manager.stop()
+
+
+def test_watch_target_with_line_break_is_not_passed(env, qtbot):
+    # 監視リストは1行1件のため、改行を含むフォルダは渡さずに監視対象から外す
+    odd = env["tmp_path"] / "odd"
+    odd.mkdir()
+    env["watch_target_service"].add(str(env["watched"]))
+    env["watch_target_service"].add(str(odd) + "\n" + str(env["tmp_path"]))
+    env["exclude_service"].add("folder", "/home/user/a\nb")
+    manager = env["build"]()
+    lost = []
+    manager.watch_target_lost.connect(lost.append)
+
+    assert manager.start() is True
+    try:
+        _, watch, exclude, _ = _supervisor_args(env["processes"][0].command)
+        assert watch == [str(env["watched"])]
+        assert "/home/user/a\nb" not in exclude
+        assert lost == [str(odd) + "\n" + str(env["tmp_path"])]
     finally:
         manager.stop()
 
@@ -243,9 +390,9 @@ def test_excluded_extension_skips_detection_action(env, qtbot):
     manager.start()
     try:
         with qtbot.waitSignal(manager.detected, timeout=3000):
-            _append_log(manager, "/home/user/app.log: X-Signature FOUND\n")
-            _append_log(manager, "/home/user/app.bin: Y-Signature FOUND\n")
-        assert detected == ["/home/user/app.bin"]
+            _emit(manager, f"{env['watched'] / 'app.log'}: X-Signature FOUND\n")
+            _emit(manager, f"{env['watched'] / 'app.bin'}: Y-Signature FOUND\n")
+        assert detected == [str(env["watched"] / "app.bin")]
     finally:
         manager.stop()
 
@@ -258,7 +405,7 @@ def test_notify_only_does_not_quarantine(env, qtbot):
     manager.start()
     try:
         with qtbot.waitSignal(manager.detected, timeout=3000):
-            _append_log(manager, f"{infected}: Eicar-Test-Signature FOUND\n")
+            _emit(manager, f"{infected}: Eicar-Test-Signature FOUND\n")
         assert infected.exists()
         assert env["quarantine_service"].list_all() == []
     finally:
@@ -336,7 +483,7 @@ def test_add_target_while_running_restarts_clamonacc(env):
     try:
         assert len(env["processes"]) == 2
         assert env["processes"][0].stdin.closed is True
-        assert str(other) in manager.watch_list_path.read_text(encoding="utf-8")
+        assert str(other) in _supervisor_args(env["processes"][1].command)[1]
     finally:
         manager.stop()
 
@@ -384,40 +531,79 @@ def test_factory_respects_linux_backend_watchdog(env):
 
 def test_availability_requires_pkexec_when_not_root(monkeypatch):
     monkeypatch.setattr("core.clamonacc_manager._is_root", lambda: False)
+    monkeypatch.setattr("core.clamonacc_manager.find_system_tool", lambda name, system=None: None)
+    # PATHにpkexecがあっても、決まった場所に無ければ使えない扱いにする
     available, reason = is_clamonacc_available(
-        RealtimeConfig(), lambda name: "/usr/sbin/clamonacc" if name == "clamonacc" else None
+        RealtimeConfig(), lambda name: {"clamonacc": "/usr/sbin/clamonacc", "pkexec": "/home/u/bin/pkexec"}.get(name)
     )
     assert available is False
     assert "pkexec" in reason
 
 
+def test_pkexec_is_not_taken_from_path(env, monkeypatch):
+    # 昇格に使うpkexecは、PATH（利用者が変えられる）で見つかるものではなく、決まった場所の絶対パスで起動する
+    monkeypatch.setattr("core.clamonacc_manager._is_root", lambda: False)
+    manager = env["build"]()
+    manager._which = lambda name: {"clamonacc": "/usr/sbin/clamonacc", "pkexec": "/home/u/bin/pkexec"}.get(name)
+    command = manager.build_command("/usr/sbin/clamonacc", ["/w"], [])
+    assert command[0] == "/usr/bin/pkexec"
+
+
 # -- rootシェル（_SUPERVISOR_SCRIPT）の実動作 -----------------------------------
-@pytest.mark.skipif(shutil.which("sh") is None, reason="POSIX shが無い環境")
+@requires_posix_sh
 def test_supervisor_script_stops_child_when_stdin_closes():
     # clamonaccの代わりにsleepを監視させ、標準入力を閉じたら終了マーカーが出ることを確認
+    # （rootシェルが付ける--log等は、sh -cの位置引数として渡るだけで無視される）
+    # （子はexecでsleepに置き換え、1つのプロセスとして止める。shによっては最後のコマンドをexecしないため）
     process = subprocess.Popen(
-        [shutil.which("sh"), "-c", _SUPERVISOR_SCRIPT, "supervisor", "sleep", "30"],
+        [shutil.which("sh"), "-c", _SUPERVISOR_SCRIPT, "supervisor", "n1", "0", "0", "sh", "-c", "exec sleep 30"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
     )
     process.stdin.close()
     out, _ = process.communicate(timeout=10)
-    assert out.startswith("__CLAMONACC_EXIT__ ")
-    assert out.split()[1] != "0"  # killされている
+    last = out.splitlines()[-1]
+    assert last.startswith("__CLAMONACC_EXIT__n1 ")
+    assert last.split()[1] != "0"  # killされている
 
 
-@pytest.mark.skipif(shutil.which("sh") is None, reason="POSIX shが無い環境")
+@requires_posix_sh
+def test_supervisor_script_streams_log_and_writes_lists():
+    # 監視リスト・除外リストを一時フォルダに書き出してclamonaccに渡し、ログをtail -Fで標準出力へ流す
+    child = (
+        'for a; do case "$a" in --log=*) log=${a#--log=};; --watch-list=*) w=${a#--watch-list=};; '
+        '--exclude-list=*) e=${a#--exclude-list=};; esac; done; '
+        # clamonaccと同じく1つのプロセスとして止められるよう、最後はexecでsleepに置き換える
+        'cat "$w" "$e" >> "$log"; echo "/w/x: Fake-Signature FOUND" >> "$log"; exec sleep 30'
+    )
+    process = subprocess.Popen(
+        [shutil.which("sh"), "-c", _SUPERVISOR_SCRIPT, "supervisor", "n1",
+         "2", "/watch/a", "/watch/b c", "1", "/excluded", "sh", "-c", child, "child"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        lines = [process.stdout.readline().rstrip("\n") for _ in range(4)]
+        assert lines == ["/watch/a", "/watch/b c", "/excluded", "/w/x: Fake-Signature FOUND"]
+    finally:
+        process.stdin.close()
+        out, _ = process.communicate(timeout=10)
+    assert out.splitlines()[-1].startswith("__CLAMONACC_EXIT__n1 ")
+
+
+@requires_posix_sh
 def test_supervisor_script_reports_child_exit_code():
     process = subprocess.Popen(
-        [shutil.which("sh"), "-c", _SUPERVISOR_SCRIPT, "supervisor", "sh", "-c", "exit 3"],
+        [shutil.which("sh"), "-c", _SUPERVISOR_SCRIPT, "supervisor", "n1", "0", "0", "sh", "-c", "exit 3"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
     )
     try:
         line = process.stdout.readline()
-        assert line.strip() == "__CLAMONACC_EXIT__ 3"
+        assert line.strip() == "__CLAMONACC_EXIT__n1 3"
     finally:
         process.stdin.close()  # 監視用サブシェルを終了させる
         process.wait(timeout=10)
@@ -434,7 +620,7 @@ def test_folder_exclude_change_restarts_but_extension_change_does_not(env):
         env["exclude_service"].add("folder", "/home/user/new-excluded")
         manager.on_excludes_changed("folder")  # --exclude-listの再生成に再起動が必要
         assert len(env["processes"]) == 2
-        assert "/home/user/new-excluded" in manager.exclude_list_path.read_text(encoding="utf-8")
+        assert "/home/user/new-excluded" in _supervisor_args(env["processes"][1].command)[2]
     finally:
         manager.stop()
 
@@ -458,8 +644,8 @@ def test_monitoring_setup_failure_stops_clamonacc_and_emits_e2005(env, qtbot, ma
     process = env["processes"][0]
 
     with qtbot.waitSignal(manager.scan_error, timeout=3000) as blocker:
-        _append_log(manager, "ClamInotif: watching '/home/user' (and all sub-directories)\n")
-        _append_log(manager, marker_line + "\n")
+        _emit(manager, "ClamInotif: watching '/home/user' (and all sub-directories)\n")
+        _emit(manager, marker_line + "\n")
 
     error = blocker.args[0]
     assert error.code == "E2005"
@@ -476,7 +662,7 @@ def test_monitoring_setup_failure_hints(env, qtbot):
     manager = env["build"]()
     manager.start()
     with qtbot.waitSignal(manager.scan_error, timeout=3000) as blocker:
-        _append_log(manager, "ERROR: ClamInotif: can't exclude '/home/user/app/logs'\n")
+        _emit(manager, "ERROR: ClamInotif: can't exclude '/home/user/app/logs'\n")
     assert "Issue #1797" in blocker.args[0].detail
     assert "watchdog" in blocker.args[0].detail
     manager.stop()
@@ -487,7 +673,7 @@ def test_can_restart_after_monitoring_setup_failure(env, qtbot):
     manager = env["build"]()
     manager.start()
     with qtbot.waitSignal(manager.scan_error, timeout=3000):
-        _append_log(manager, "ERROR: ClamInotif: can't exclude '/x'\n")
+        _emit(manager, "ERROR: ClamInotif: can't exclude '/x'\n")
 
     assert manager.start() is True
     try:
@@ -581,7 +767,7 @@ def test_clamd_temporary_directory_and_root_are_not_watched(env, qtbot):
 
     assert manager.start() is True
     try:
-        assert manager.watch_list_path.read_text(encoding="utf-8").splitlines() == [str(env["watched"])]
+        assert _supervisor_args(env["processes"][0].command)[1] == [str(env["watched"])]
         assert errors[0].code == "E2006"
         assert manager.is_running is True  # 外したフォルダ以外は監視を続ける
         # 監視対象の設定自体は残す（watchdog方式に切り替えれば監視できるため）
@@ -601,9 +787,11 @@ def test_only_unwatchable_targets_does_not_start(env):
     assert errors[0].code == "E2006"
 
 
-def test_default_temporary_directory_is_tmp(env):
+def test_default_temporary_directory_is_tmp(env, monkeypatch):
     env["watch_target_service"].add("/tmp")
     manager = env["build"]()  # TemporaryDirectory未指定
+    # /tmpが実在するかに左右されないようにする（Windowsでは、今のドライブに\tmpがあるかで結果が変わっていた。CIで発見）
+    monkeypatch.setattr(manager, "_check_target", lambda path: True)
     errors = []
     manager.scan_error.connect(errors.append)
     assert manager.start() is False
@@ -621,12 +809,13 @@ def test_duplicate_found_for_same_file_is_handled_once(env, qtbot):
     manager.start()
     try:
         with qtbot.waitSignal(manager.detected, timeout=3000):
-            _append_log(manager, f"{infected}: Eicar-Test-Signature FOUND\n")
+            _emit(manager, f"{infected}: Eicar-Test-Signature FOUND\n")
         qtbot.waitUntil(lambda: len(env["quarantine_service"].list_all()) == 1, timeout=3000)
-        _append_log(manager, f"{infected}: Eicar-Test-Signature FOUND\n")
+        _emit(manager, f"{infected}: Eicar-Test-Signature FOUND\n")
+        other = env["watched"] / "other.bin"
         with qtbot.waitSignal(manager.detected, timeout=3000):
-            _append_log(manager, "/home/user/other.bin: Other-Signature FOUND\n")
-        assert detected == [str(infected), "/home/user/other.bin"]
+            _emit(manager, f"{other}: Other-Signature FOUND\n")
+        assert detected == [str(infected), str(other)]
         assert len(env["quarantine_service"].list_all()) == 1
     finally:
         manager.stop()
@@ -639,14 +828,16 @@ def test_same_file_is_detected_again_after_window(env, qtbot, monkeypatch):
     monkeypatch.setattr("core.clamonacc_manager.time.monotonic", lambda: clock["now"])
     detected = []
     manager.detected.connect(lambda p, v: detected.append(p))
+    manager._targets = [str(env["watched"])]
+    target = str(env["watched"] / "a.bin")
 
-    manager._handle_detection("/home/user/a.bin", "X")
+    manager._handle_detection(target, "X")
     clock["now"] += 5
-    manager._handle_detection("/home/user/a.bin", "X")
+    manager._handle_detection(target, "X")
     clock["now"] += 10
-    manager._handle_detection("/home/user/a.bin", "X")
+    manager._handle_detection(target, "X")
 
-    assert detected == ["/home/user/a.bin", "/home/user/a.bin"]
+    assert detected == [target, target]
 
 
 def test_factory_passes_app_dirs_to_watchdog_manager(env):
@@ -663,9 +854,10 @@ def test_detection_handled_reports_actual_quarantine_result(env, qtbot):
     manager = env["build"](default_action="quarantine")
     handled = []
     manager.detection_handled.connect(lambda p, v, q: handled.append((p, q)))
+    manager._targets = [str(env["watched"])]
 
     infected = env["watched"] / "infected.bin"
-    infected.write_bytes(b"x")
+    infected.write_text(FAKE_INFECTED_CONTENT)
     manager._handle_detection(str(infected), "X")
     missing = env["watched"] / "missing.bin"  # 隔離できない（ファイルが無い）
     manager._handle_detection(str(missing), "X")
@@ -678,8 +870,11 @@ def test_detection_handled_is_false_for_notify_only(env, qtbot):
     manager = env["build"](default_action="notify_only")
     handled = []
     manager.detection_handled.connect(lambda p, v, q: handled.append(q))
+    manager._targets = [str(env["watched"])]
+    infected = env["watched"] / "a.bin"
+    infected.write_text(FAKE_INFECTED_CONTENT)
 
-    manager._handle_detection("/home/user/a.bin", "X")
+    manager._handle_detection(str(infected), "X")
     assert handled == [False]
 
 
@@ -688,8 +883,45 @@ def test_detection_inside_app_dir_is_ignored(env, qtbot):
     manager = env["build"](default_action="notify_only")
     detected = []
     manager.detected.connect(lambda p, v: detected.append(p))
+    manager._targets = [str(env["watched"]), str(env["tmp_path"])]
+    target = str(env["watched"] / "a.bin")
 
     manager._handle_detection(str(env["tmp_path"] / "logs" / "x.bin"), "X")
-    manager._handle_detection("/home/user/a.bin", "X")
+    manager._handle_detection(target, "X")
 
-    assert detected == ["/home/user/a.bin"]
+    assert detected == [target]
+
+
+def test_clamonacc_in_user_writable_folder_is_not_started(env, tmp_path):
+    # clamonaccはrootで実行するため、root以外が書き換えられる場所のものは起動しない（E6005）
+    from core.exec_path import validate_executable
+
+    planted = tmp_path / "bin" / "clamonacc"
+    planted.parent.mkdir()
+    planted.write_bytes(b"")
+    env["watch_target_service"].add(str(env["watched"]))
+    manager = env["build"]()
+    manager._which = lambda name: str(planted) if name == "clamonacc" else "/usr/bin/pkexec"
+    manager._validate_exec = validate_executable
+    errors = []
+    manager.scan_error.connect(errors.append)
+
+    assert manager.start() is False
+    assert env["processes"] == []
+    assert errors[0].code == "E6005"
+
+
+def test_clamonacc_config_file_in_user_writable_folder_is_not_used(env, tmp_path):
+    from core.exec_path import validate_trusted_file
+
+    conf = tmp_path / "my-clamd.conf"
+    conf.write_text(_GOOD_CLAMD_CONF, encoding="utf-8")
+    env["watch_target_service"].add(str(env["watched"]))
+    manager = env["build"](clamonacc_config_file=str(conf))
+    manager._validate_file = validate_trusted_file
+    errors = []
+    manager.scan_error.connect(errors.append)
+
+    assert manager.start() is False
+    assert env["processes"] == []
+    assert errors[0].code == "E6005"

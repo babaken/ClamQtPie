@@ -21,6 +21,7 @@ from gui import icons
 from gui.error_dialog import show_confirm_dialog, show_error_dialog
 from gui.screens.base import BaseScreen, wrap_layout
 from gui.theme import COLOR_NG, COLOR_OK, COLOR_TEXT_MUTED, set_accent, set_variant
+from gui.plain_text import plain
 
 class EngineScreen(BaseScreen):
     screen_title = "ClamAV エンジン サービス (clamd)"
@@ -38,10 +39,10 @@ class EngineScreen(BaseScreen):
         self.state_label = QLabel("確認中...")
         self.state_label.setObjectName("heroTitle")
         self.state_label.setWordWrap(True)
-        self.endpoint_label = QLabel("接続先: -")
-        self.engine_label = QLabel("エンジンのバージョン: -")
-        self.database_label = QLabel("定義データベース: -")
-        self.service_label = QLabel("OSのサービス名: -")
+        self.endpoint_label = plain(QLabel("接続先: -"))
+        self.engine_label = plain(QLabel("エンジンのバージョン: -"))
+        self.database_label = plain(QLabel("定義データベース: -"))
+        self.service_label = plain(QLabel("OSのサービス名: -"))
         text_box.addWidget(self.state_label)
         for label in (self.endpoint_label, self.engine_label, self.database_label, self.service_label):
             label.setObjectName("cardText")

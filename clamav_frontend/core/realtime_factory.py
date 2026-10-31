@@ -44,11 +44,11 @@ def create_realtime_manager(
         available, reason = is_clamonacc_available(config, which)
         if available:
             return ClamonaccRealtimeManager(
+                clamav_service,
                 watch_target_service,
                 exclude_service,
                 quarantine_service,
                 config,
-                work_dir=app_dir / "clamonacc",
                 extra_exclude_dirs=app_dirs,
                 which=which,
             )

@@ -5,6 +5,7 @@ gui/screens/scan.py のサービス層結線に関するテスト
 from unittest.mock import MagicMock
 
 from gui.screens.scan import ScanScreen
+from tests.conftest import tooltip_text
 
 
 def _make_screen(qtbot):
@@ -51,8 +52,8 @@ def test_file_scanned_signal_updates_counters_and_table(qtbot):
     screen._on_file_scanned("/tmp/eicar.txt", "FOUND", "Eicar-Test-Signature", "2026-07-14T00:00:01")
 
     # 非機能要件2.3節: 件数表示は200ms間隔でまとめて更新される（ファイルごとには再描画しない）
-    assert screen.counter_label.text() == "検知件数: 0 / スキャン件数: 0"
-    qtbot.waitUntil(lambda: screen.counter_label.text() == "検知件数: 1 / スキャン件数: 2", timeout=1000)
+    assert screen.counter_label.text() == "検知件数: 0 / 検査できなかったファイル: 0 / スキャン件数: 0"
+    qtbot.waitUntil(lambda: screen.counter_label.text() == "検知件数: 1 / 検査できなかったファイル: 0 / スキャン件数: 2", timeout=1000)
     assert screen.result_table.rowCount() == 1  # FOUNDのみ一覧表示
     assert screen.result_table.item(0, 0).text() == "/tmp/eicar.txt"
 
@@ -154,8 +155,8 @@ def test_error_results_are_listed_and_state_shows_cancelled(qtbot):
     screen._on_finished({"scanned": 2, "detected": 0, "errors": 1, "cancelled": True})
 
     assert screen.result_table.rowCount() == 1
-    assert screen.result_table.item(0, 1).text() == "エラー"
-    assert screen.state_label.text() == "状態: 中断"
+    assert screen.result_table.item(0, 1).text() == "未検査（権限なし）"
+    assert screen.state_label.text().startswith("状態: 中断（検査できなかったファイルが 1 件あります")
 
 
 def test_ignore_removes_only_detection_rows(qtbot):
@@ -180,7 +181,7 @@ def test_activity_shows_queued_and_stalled_states(qtbot):
     screen._on_activity("stalled", "/data/big.iso", 25)
     assert "応答待ち（25秒）" in screen.state_label.text()
     assert "big.iso" in screen.state_label.text()
-    assert screen.state_label.toolTip() == "/data/big.iso"
+    assert tooltip_text(screen.state_label.toolTip()) == "/data/big.iso"
 
     screen._on_activity("scanning", "", 0)
     assert screen.state_label.text() == "状態: スキャン中"
@@ -188,3 +189,21 @@ def test_activity_shows_queued_and_stalled_states(qtbot):
     screen.stop_button.setEnabled(False)  # 終了後に遅れて届いた通知は無視する
     screen._on_activity("stalled", "/x", 30)
     assert screen.state_label.text() == "状態: スキャン中"
+
+
+def test_unscanned_files_are_labeled_by_reason_and_counted(qtbot):
+    # 検査できなかったファイルは理由ごとに表示し、サイズの上限で検査していないものを区別する
+    from core.clamav_service import FILE_VANISHED_DETAIL, SIZE_LIMIT_DETAIL_PREFIX
+
+    screen, _ = _bound_screen(qtbot)
+    screen._on_file_scanned("/big.zip", "ERROR", f"{SIZE_LIMIT_DETAIL_PREFIX}（Heuristics.Limits.Exceeded.MaxFileSize）", "t")
+    screen._on_file_scanned("/gone.tmp", "ERROR", FILE_VANISHED_DETAIL, "t")
+    screen._on_file_scanned("/odd", "ERROR", "Can't open file or directory", "t")
+    screen._on_finished({"scanned": 3, "detected": 0, "errors": 3, "cancelled": False})
+
+    labels = [screen.result_table.item(r, 1).text() for r in range(screen.result_table.rowCount())]
+    assert labels == ["未検査（サイズの上限）", "未検査（削除済み）", "エラー"]
+    assert screen.counter_label.text() == "検知件数: 0 / 検査できなかったファイル: 3 / スキャン件数: 3"
+    assert "検査できなかったファイルが 3 件" in screen.state_label.text()
+    screen.result_table.selectAll()  # 検知以外の行は「隔離する」の対象にならない
+    assert screen._selected_detection_rows() == []

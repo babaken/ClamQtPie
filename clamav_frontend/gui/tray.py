@@ -103,3 +103,7 @@ class TrayIcon(QSystemTrayIcon):
         current = max(self._states, key=lambda s: _STATE_PRIORITY[s])
         self.setIcon(self._icon_for(current))
         self.toggle_realtime_action.setChecked(TrayIconState.MONITORING in self._states)
+
+    def set_warning(self, text: str | None) -> None:
+        """ツールチップに注意を出す（Noneで消す）。定義が古いなど、アイコンの状態にはしない注意に使う"""
+        self.setToolTip(f"{APP_NAME}\n{text}" if text else APP_NAME)

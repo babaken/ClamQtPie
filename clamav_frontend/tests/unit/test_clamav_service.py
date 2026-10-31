@@ -7,7 +7,8 @@ import time
 
 import pytest
 
-from core.clamav_service import FILE_VANISHED_DETAIL, ClamAVService
+from core.clamav_service import FILE_VANISHED_DETAIL, UNEXPECTED_RESPONSE_DETAIL, ClamAVService
+from core.clamd_client import ScanResult
 from core.config_model import ClamdConfig
 
 
@@ -165,7 +166,7 @@ def test_realtime_scan_has_reserved_slot_over_ondemand(fake_clamd_server, monkey
 
     def fake_scan(path):
         if path == "realtime":
-            return ["realtime-done"]
+            return [ScanResult(path="realtime", status="OK", detail="realtime-done")]
         with lock:
             running["ondemand"] += 1
             running["max_ondemand"] = max(running["max_ondemand"], running["ondemand"])
@@ -181,7 +182,7 @@ def test_realtime_scan_has_reserved_slot_over_ondemand(fake_clamd_server, monkey
     time.sleep(0.2)
 
     # オンデマンドが詰まっていてもリアルタイムは待たずに実行できる
-    assert service.scan_file("realtime", priority=True) == ["realtime-done"]
+    assert [r.detail for r in service.scan_file("realtime", priority=True)] == ["realtime-done"]
     assert running["max_ondemand"] == 1
 
     release.set()
@@ -305,3 +306,54 @@ def test_tcp_connection_does_not_use_fdpass(fake_clamd_server, tmp_path):
 
     assert results[0].status == "OK"
     assert fake_clamd_server.commands == ["SCAN"]
+
+
+def test_scan_file_result_uses_requested_path_not_response_path(fake_clamd_server, tmp_path):
+    # 応答に含まれるパスは使わず、検査を依頼したパスの結果として返す（隔離・通知は依頼したパスで行う）
+    target = tmp_path / "a.txt"
+    target.write_text("x")
+    other = tmp_path / "other.txt"
+    fake_clamd_server.response_map["SCAN"] = f"{other}: Eicar-Test-Signature FOUND"
+
+    results = _service_for(fake_clamd_server).scan_file(str(target))
+
+    assert [(r.path, r.status, r.detail) for r in results] == [(str(target), "FOUND", "Eicar-Test-Signature")]
+
+
+def test_scan_file_multiline_response_becomes_single_error(fake_clamd_server, tmp_path):
+    # 1ファイルの検査で応答が複数の結果になった場合は、どれがそのファイルの結果か分からないためERRORにする
+    target = tmp_path / "a.txt"
+    target.write_text("x")
+    other = tmp_path / "other.txt"
+    fake_clamd_server.response_map["SCAN"] = f"{target}\n{other}: Eicar-Test-Signature FOUND"
+
+    results = _service_for(fake_clamd_server).scan_file(str(target))
+
+    assert [(r.path, r.status, r.detail) for r in results] == [(str(target), "ERROR", UNEXPECTED_RESPONSE_DETAIL)]
+
+
+def test_limits_exceeded_report_is_unscanned_not_detection(fake_clamd_server, tmp_path):
+    # clamdが上限を超えたファイルを報告した場合（AlertExceedsMax yes）は、検知ではなく「上限を超えて未検査」にする
+    from core.clamav_service import ERROR_REASON_SIZE_LIMIT, error_reason
+
+    target = tmp_path / "big.iso"
+    target.write_text("x")
+    fake_clamd_server.response_map["SCAN"] = f"{target}: Heuristics.Limits.Exceeded.MaxFileSize FOUND"
+
+    results = _service_for(fake_clamd_server).scan_file(str(target))
+
+    assert results[0].status == "ERROR"
+    assert error_reason(results[0].detail) == ERROR_REASON_SIZE_LIMIT
+    assert "Heuristics.Limits.Exceeded.MaxFileSize" in results[0].detail
+
+
+def test_stream_size_over_is_classified_as_size_limit(fake_clamd_server, tmp_path):
+    from core.clamav_service import ERROR_REASON_SIZE_LIMIT, error_reason
+
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * (1024 * 1024 + 1))
+    fake_clamd_server.response_map["SCAN"] = f"{big}: Access denied. ERROR"
+
+    results = _service_for(fake_clamd_server, max_stream_size_mb=1).scan_file(str(big))
+
+    assert error_reason(results[0].detail) == ERROR_REASON_SIZE_LIMIT

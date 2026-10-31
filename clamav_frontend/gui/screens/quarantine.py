@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from core.exceptions import AppError, QuarantineWriteError
 from gui.error_dialog import show_confirm_dialog, show_error_dialog
+from gui.plain_text import plain, plain_tooltip
 from gui.screens.base import BaseScreen, wrap_layout
 
 STATUS_QUARANTINED = "隔離中"
@@ -136,7 +137,7 @@ class QuarantineScreen(BaseScreen):
                 item = QTableWidgetItem(text)
                 item.setData(_ID_ROLE, record.id)
                 if tooltip:
-                    item.setToolTip(tooltip)
+                    item.setToolTip(plain_tooltip(tooltip))
                 self.quarantine_table.setItem(row, col, item)
 
     def _on_filter_changed(self, *_args) -> None:
@@ -196,7 +197,7 @@ class QuarantineScreen(BaseScreen):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("復元先に同名のファイルがあります")
-        box.setText(f"復元先に同じ名前のファイルがあります。\n{path}")
+        plain(box).setText(f"復元先に同じ名前のファイルがあります。\n{path}")  # ファイル名を文字のまま表示する
         overwrite_button = box.addButton("上書き", QMessageBox.ButtonRole.DestructiveRole)
         rename_button = box.addButton("別名で保存", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("キャンセル", QMessageBox.ButtonRole.RejectRole)
@@ -236,9 +237,8 @@ class QuarantineScreen(BaseScreen):
         if not records:
             return
         r = records[0]
-        QMessageBox.information(
-            self,
-            "隔離ファイルの詳細",
+        box = plain(QMessageBox(QMessageBox.Icon.Information, "隔離ファイルの詳細", "", parent=self))
+        box.setText(
             "\n".join(
                 [
                     f"元ファイルパス: {r.original_path}",
@@ -251,6 +251,7 @@ class QuarantineScreen(BaseScreen):
                 ]
             ),
         )
+        box.exec()
 
     def _add_hlayout(self, layout: QHBoxLayout) -> None:
         self.add_layout_widget(wrap_layout(layout))

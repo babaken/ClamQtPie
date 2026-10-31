@@ -34,6 +34,7 @@ from core.exceptions import AppError
 from gui.error_dialog import show_error_dialog
 from gui.screens.base import BaseScreen, wrap_layout
 from gui.theme import COLOR_NG, COLOR_OK, set_variant
+from gui.plain_text import plain
 
 _IS_WINDOWS = sys.platform == "win32"
 #: 空欄で保存したときに戻す既定値
@@ -275,7 +276,7 @@ class SettingsScreen(BaseScreen):
         self.connection_test_button = QPushButton("接続テスト")
         self.connection_test_button.setToolTip("入力中の接続先へ PING を送ります（保存前に試せます）")
         self.connection_test_button.clicked.connect(self._on_connection_test_clicked)
-        self.connection_test_label = QLabel("")
+        self.connection_test_label = plain(QLabel(""))
         self.connection_test_label.setWordWrap(True)
         test_layout = QHBoxLayout()
         test_layout.addWidget(self.connection_test_button)
@@ -374,6 +375,12 @@ class SettingsScreen(BaseScreen):
         layout.addRow("送信元アドレス", self.smtp_from_edit)
         layout.addRow("宛先アドレス", self.smtp_to_edit)
         layout.addRow("暗号化方式", self.smtp_encryption_combo)
+        self.smtp_encryption_note = QLabel(
+            "none（暗号化なし）では、パスワードを平文で送らないよう認証を行いません。"
+            "認証が必要なサーバーでは ssl か starttls を選んでください。"
+        )
+        self.smtp_encryption_note.setWordWrap(True)
+        layout.addRow("", self.smtp_encryption_note)
         layout.addRow(self.smtp_test_button)
         return tab
 

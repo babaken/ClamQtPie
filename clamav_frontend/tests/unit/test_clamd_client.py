@@ -191,3 +191,13 @@ def test_check_connection_raises_when_ping_is_not_pong(fake_clamd_server):
 
     with pytest.raises(ClamdConnectionError):
         check_connection(config)
+
+
+def test_oversized_response_is_rejected(fake_clamd_server):
+    # 応答が上限を超えたら、受信を打ち切ってプロトコルエラーにする（メモリを使い果たさないため）
+    from core.clamd_client import MAX_RESPONSE_BYTES
+    from core.exceptions import ClamdProtocolError
+
+    fake_clamd_server.response_map["VERSION"] = "x" * (MAX_RESPONSE_BYTES + 1)
+    with pytest.raises(ClamdProtocolError):
+        _client_for(fake_clamd_server).get_version()

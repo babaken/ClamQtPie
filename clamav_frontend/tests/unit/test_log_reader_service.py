@@ -112,3 +112,25 @@ def test_read_entries_since_skips_older_rotated_files(tmp_path):
 
     # ファイル名の日付の翌日未明の行が含まれ得るため、1日前のファイルまで読む
     assert [e.message for e in service.read_entries(since=date(2026, 7, 14))] == ["2026-07-13", "2026-07-14", "当日"]
+
+
+def test_export_csv_neutralizes_formula_like_values(tmp_path):
+    # 表計算ソフトで開いたときに、メッセージ（検知したファイル名などを含む）が数式として扱われないこと
+    from datetime import datetime
+
+    from core.log_reader_service import LogEntry
+
+    service = LogReaderService(tmp_path / "app.log")
+    messages = ["=HYPERLINK(\"x\")", "+1", "-1", "@SUM(A1)", "\tTAB", "通常のメッセージ"]
+    entries = [
+        LogEntry(datetime=datetime(2026, 10, 27, 12, 0, 0), level="WARNING", category="スキャン", message=m, error_code="")
+        for m in messages
+    ]
+    output_path = tmp_path / "export.csv"
+    service.export_csv(entries, output_path)
+
+    import csv
+
+    with open(output_path, encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.reader(f))[1:]
+    assert [row[3] for row in rows] == ["'=HYPERLINK(\"x\")", "'+1", "'-1", "'@SUM(A1)", "'\tTAB", "通常のメッセージ"]

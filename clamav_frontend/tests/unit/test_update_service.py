@@ -25,6 +25,8 @@ def update_service(tmp_path, fake_clamd_server):
 
     # OS固有の分岐（Linuxのpkexec等）は下のLinux用テストで確認する。ここではfreshclamを直接実行する経路に固定
     service = UpdateService(db_service, clamav_service, system="Windows")
+    # 実行ファイルの場所の検証は、テスト用の偽のfreshclamを使うため差し替える（検証自体は専用のテストで確認する）
+    service._validate_exec = lambda path, names, system=None: path
     yield service, db_service
     db_service.close()
 
@@ -77,6 +79,7 @@ def test_update_failure_exit_code_records_failure(update_service, tmp_path, fake
     fake_clamd_server.response_map["VERSION"] = "ClamAV 1.3.1/27200/Mon Jan  6 08:00:00 2026"
 
     fake_cmd = _make_fake_freshclam(tmp_path, exit_code=1, lines=["ERROR: connection failed"])
+    service.freshclam_path = fake_cmd.split(" ")[0]  # 絶対パス（名前だけだとClamAVの導入先から探す）
 
     import subprocess as sp
 
@@ -138,7 +141,10 @@ def linux_service(update_service, monkeypatch):
 
     monkeypatch.setattr("core.update_service.subprocess.Popen", fake_popen)
     service._system = "Linux"
-    service._which = lambda name: {"pkexec": "/usr/bin/pkexec", "freshclam": "/usr/bin/freshclam"}.get(name)
+    service._which = lambda name: {"freshclam": "/usr/bin/freshclam"}.get(name)
+    # pkexecは決まった場所から探す（find_system_tool）。Windowsでもテストできるよう、Linuxの場所にある扱いにする
+    monkeypatch.setattr("core.update_service.find_system_tool", lambda name, system=None: f"/usr/bin/{name}")
+    service._validate_exec = lambda path, names, system=None: path
     service._runner = fake_runner
     return service, calls
 
@@ -173,7 +179,7 @@ def test_linux_root_update_avoids_log_lock_when_freshclam_service_runs(linux_ser
 
     service.update_now(interactive=False)
 
-    assert calls["popen"] == [["freshclam", "--log=/dev/null"]]
+    assert calls["popen"] == [["/usr/bin/freshclam", "--log=/dev/null"]]
 
 
 def test_linux_pkexec_auth_cancel(linux_service):
@@ -207,9 +213,10 @@ def test_linux_scheduled_update_without_service_fails_with_hint(linux_service):
     assert "systemctl enable --now clamav-freshclam" in record.detail
 
 
-def test_linux_without_pkexec_runs_freshclam_and_explains_failure(linux_service):
+def test_linux_without_pkexec_runs_freshclam_and_explains_failure(linux_service, monkeypatch):
     service, calls = linux_service
     service._which = lambda name: None
+    monkeypatch.setattr("core.update_service.find_system_tool", lambda name, system=None: None)
     calls["process"] = _FakeProcess(
         ["ERROR: Failed to open log file /var/log/clamav/freshclam.log: Permission denied"], 2
     )
@@ -219,3 +226,71 @@ def test_linux_without_pkexec_runs_freshclam_and_explains_failure(linux_service)
     assert calls["popen"] == [["freshclam"]]
     assert "Permission denied" in record.detail
     assert "systemctl enable --now clamav-freshclam" in record.detail
+
+
+def test_windows_does_not_run_freshclam_from_current_directory(update_service, tmp_path, monkeypatch):
+    # 名前だけのfreshclamを、カレントディレクトリやPATHの相対パスの項目からは起動しない
+    service, _ = update_service
+    planted = tmp_path / "freshclam.exe"
+    planted.write_bytes(b"")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", ".")
+    monkeypatch.setattr("core.update_service.windows_clamav_dirs", lambda: [])
+    started = []
+    monkeypatch.setattr("core.update_service.subprocess.Popen", lambda *a, **k: started.append(a))
+
+    record = service.update_now()
+
+    assert started == []
+    assert record.result == "failure"
+    assert "freshclamが見つかりません" in record.detail
+
+
+def test_freshclam_in_user_writable_folder_is_not_run(update_service, tmp_path, monkeypatch):
+    # アプリは管理者権限で動くため、一般ユーザーが書き換えられる場所のfreshclamは実行しない（E6005）
+    from core.exec_path import validate_executable
+
+    service, _ = update_service
+    service._validate_exec = validate_executable
+    planted = tmp_path / "freshclam.exe"
+    planted.write_bytes(b"")
+    service.freshclam_path = str(planted)
+    started = []
+    monkeypatch.setattr("core.update_service.subprocess.Popen", lambda *a, **k: started.append(a))
+
+    record = service.update_now()
+
+    assert started == []
+    assert record.result == "failure"
+    assert "実行ファイルの場所が安全でない" in record.detail
+
+
+def test_linux_pkexec_is_not_taken_from_path(linux_service, monkeypatch):
+    # 昇格に使うpkexecは、PATH（利用者が変えられる）で見つかるものではなく、決まった場所の絶対パスで起動する
+    service, calls = linux_service
+    service._which = lambda name: {"freshclam": "/usr/bin/freshclam", "pkexec": "/home/u/bin/pkexec"}.get(name)
+    calls["process"] = _FakeProcess([], 0)
+
+    service.update_now(interactive=True)
+
+    assert calls["popen"][0][0] == "/usr/bin/pkexec"
+
+
+def test_windows_freshclam_does_not_inherit_user_environment(update_service, monkeypatch, tmp_path):
+    # 管理者権限で起動するfreshclamには、利用者が変えられる環境変数を引き継がない
+    service, _ = update_service
+    freshclam = tmp_path / "freshclam.exe"
+    freshclam.write_bytes(b"")
+    service.freshclam_path = str(freshclam)
+    monkeypatch.setenv("CLAMQTPIE_TEST_USER_VARIABLE", "1")
+    received = []
+
+    def fake_popen(command, **kwargs):
+        received.append(kwargs.get("env"))
+        raise OSError("起動しない（渡す環境変数だけを確かめる）")
+
+    monkeypatch.setattr("core.update_service.subprocess.Popen", fake_popen)
+    service.update_now(interactive=True)
+
+    assert received and received[0] is not None
+    assert "CLAMQTPIE_TEST_USER_VARIABLE" not in received[0]

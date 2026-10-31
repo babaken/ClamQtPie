@@ -28,8 +28,16 @@ from PySide6.QtWidgets import (
 )
 
 from core import scan_targets
+from core.clamav_service import (
+    ERROR_REASON_OTHER,
+    ERROR_REASON_PERMISSION,
+    ERROR_REASON_SIZE_LIMIT,
+    ERROR_REASON_VANISHED,
+    error_reason,
+)
 from core.logger import CATEGORY_SCAN, log_event
 from gui.error_dialog import show_confirm_dialog, show_error_dialog
+from gui.plain_text import plain, plain_tooltip
 from gui.screens.base import BaseScreen, wrap_layout
 from gui.theme import set_variant
 
@@ -38,6 +46,14 @@ _VIEW_UPDATE_INTERVAL_MS = 200
 #: 判定列の表示（画面設計書2章: 正常・検知・エラー）
 _STATUS_LABELS = {"FOUND": "検知", "ERROR": "エラー", "OK": "正常"}
 _QUARANTINED_LABEL = "隔離済み"
+#: 検査できなかったファイルの判定列の表示。サイズの上限で検査していないものは、
+#: 検査済みと誤解されないよう、ほかのエラーと区別して表示する
+_ERROR_REASON_LABELS = {
+    ERROR_REASON_SIZE_LIMIT: "未検査（サイズの上限）",
+    ERROR_REASON_PERMISSION: "未検査（権限なし）",
+    ERROR_REASON_VANISHED: "未検査（削除済み）",
+    ERROR_REASON_OTHER: "エラー",
+}
 
 
 class ScanScreen(BaseScreen):
@@ -87,7 +103,7 @@ class ScanScreen(BaseScreen):
         self.stop_button.setEnabled(False)
         self.start_button.clicked.connect(self._on_start_clicked)
         self.stop_button.clicked.connect(self._on_stop_clicked)
-        self.state_label = QLabel("状態: 待機中")
+        self.state_label = plain(QLabel("状態: 待機中"))
         control_layout.addWidget(self.start_button)
         control_layout.addWidget(self.stop_button)
         control_layout.addWidget(self.state_label)
@@ -95,8 +111,8 @@ class ScanScreen(BaseScreen):
         self._add_hlayout(control_layout)
 
         self.progress_bar = QProgressBar()
-        self.current_file_label = QLabel("")
-        self.counter_label = QLabel("検知件数: 0 / スキャン件数: 0")
+        self.current_file_label = plain(QLabel(""))  # ファイル名を文字のまま表示する
+        self.counter_label = QLabel(_counter_text(0, 0, 0))
         self.add_layout_widget(self.progress_bar)
         self.add_layout_widget(self.current_file_label)
         self.add_layout_widget(self.counter_label)
@@ -118,6 +134,7 @@ class ScanScreen(BaseScreen):
 
         self._scanned_count = 0
         self._detected_count = 0
+        self._error_count = 0
         self._scan_dispatcher = None
         self._quarantine_service = None
         # 非機能要件詳細2.3節: 進捗・件数の画面更新は最短200ms間隔でまとめて反映する
@@ -185,8 +202,9 @@ class ScanScreen(BaseScreen):
         self.result_table.setRowCount(0)
         self._scanned_count = 0
         self._detected_count = 0
+        self._error_count = 0
         self.progress_bar.setRange(0, 0)  # 対象ファイルの列挙中は不確定表示
-        self.counter_label.setText("検知件数: 0 / スキャン件数: 0")
+        self.counter_label.setText(_counter_text(0, 0, 0))
         self.state_label.setText("状態: スキャン中")
 
         self.start_button.setEnabled(False)
@@ -228,6 +246,8 @@ class ScanScreen(BaseScreen):
         self._scanned_count += 1
         if status == "FOUND":
             self._detected_count += 1
+        elif status == "ERROR":
+            self._error_count += 1
         if status in ("FOUND", "ERROR"):
             self._add_result_row(path, status, detail, detected_at)
         self._schedule_view_update()
@@ -242,7 +262,7 @@ class ScanScreen(BaseScreen):
             self.state_label.setText(
                 f"状態: 応答待ち（{elapsed_sec}秒）: {Path(path).name}　※「停止」で中断できます"
             )
-            self.state_label.setToolTip(path)
+            self.state_label.setToolTip(plain_tooltip(path))
         else:
             self.state_label.setText("状態: スキャン中")
             self.state_label.setToolTip("")
@@ -259,9 +279,7 @@ class ScanScreen(BaseScreen):
                 self.progress_bar.setRange(0, total)
                 self.progress_bar.setValue(scanned)
             self.current_file_label.setText(current_path)
-        self.counter_label.setText(
-            f"検知件数: {self._detected_count} / スキャン件数: {self._scanned_count}"
-        )
+        self.counter_label.setText(_counter_text(self._detected_count, self._error_count, self._scanned_count))
 
     def _on_finished(self, summary: dict) -> None:
         self._flush_view()
@@ -272,7 +290,10 @@ class ScanScreen(BaseScreen):
             self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(self.progress_bar.maximum())
         self.current_file_label.setText("")
-        self.state_label.setText("状態: 中断" if summary.get("cancelled") else "状態: 完了")
+        state = "状態: 中断" if summary.get("cancelled") else "状態: 完了"
+        if self._error_count:
+            state += f"（検査できなかったファイルが {self._error_count} 件あります。スキャン結果の一覧を確認してください）"
+        self.state_label.setText(state)
 
     def _on_scan_error(self, error) -> None:
         show_error_dialog(self, error)
@@ -280,9 +301,15 @@ class ScanScreen(BaseScreen):
     def _add_result_row(self, path: str, status: str, detail: str, detected_at: str) -> None:
         row = self.result_table.rowCount()
         self.result_table.insertRow(row)
-        values = [path, _STATUS_LABELS.get(status, status), detail, detected_at]
+        if status == "ERROR":
+            label = _ERROR_REASON_LABELS[error_reason(detail)]
+        else:
+            label = _STATUS_LABELS.get(status, status)
+        values = [path, label, detail, detected_at]
         for col, value in enumerate(values):
-            self.result_table.setItem(row, col, QTableWidgetItem(value))
+            item = QTableWidgetItem(value)
+            item.setToolTip(plain_tooltip(value))  # 列の幅で切れた内容（検査できなかった理由等）も読めるようにする
+            self.result_table.setItem(row, col, item)
 
     def _selected_detection_rows(self) -> list[int]:
         rows = sorted({idx.row() for idx in self.result_table.selectedIndexes()})
@@ -325,3 +352,7 @@ class ScanScreen(BaseScreen):
 
     def _add_hlayout(self, layout: QHBoxLayout) -> None:
         self.add_layout_widget(wrap_layout(layout))
+
+
+def _counter_text(detected: int, errors: int, scanned: int) -> str:
+    return f"検知件数: {detected} / 検査できなかったファイル: {errors} / スキャン件数: {scanned}"

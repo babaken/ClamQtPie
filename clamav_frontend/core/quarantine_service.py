@@ -4,12 +4,11 @@ QuarantineService — ファイルの隔離・復元・完全削除
 参照: 要件定義書3章、画面設計書5章、エラーコード一覧・例外設計書4.3節
 - 隔離: UUID名にリネーム、読み取り専用・実行不可権限、DBへメタデータ登録
 - DB登録失敗時はファイル操作もロールバックする（E3004）
+- 隔離・復元のファイル移動はリンク（ジャンクション・シンボリックリンク）をたどらずに行う（core/safe_fs.py）
 """
 from __future__ import annotations
 
-import hashlib
 import os
-import shutil
 import stat
 import uuid
 from datetime import datetime, timezone
@@ -24,16 +23,9 @@ from core.exceptions import (
     QuarantineRestoreError,
     QuarantineWriteError,
 )
+from core.safe_fs import quarantine_move, restore_move
 
 _READONLY_NO_EXEC = stat.S_IRUSR  # 読み取り専用・実行不可（オーナーのみ読み取り可）
-
-
-def _sha256_of(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
 
 
 def _now_iso() -> str:
@@ -59,11 +51,10 @@ class QuarantineService:
 
         file_uuid = str(uuid.uuid4())
         dest_path = self.quarantine_dir / file_uuid
-        sha256 = _sha256_of(original_path)
-        size = original_path.stat().st_size
 
         try:
-            shutil.move(str(original_path), str(dest_path))
+            # 開いたファイル自体を移し、移した内容のSHA-256と大きさを得る（確認から移動までの間の置き換え対策）
+            sha256, size = quarantine_move(original_path, dest_path)
         except OSError as exc:
             raise QuarantineWriteError(detail=str(exc)) from exc
 
@@ -101,7 +92,7 @@ class QuarantineService:
         try:
             if dest_path.exists():
                 os.chmod(dest_path, stat.S_IRUSR | stat.S_IWUSR)
-                shutil.move(str(dest_path), str(original_path))
+                restore_move(dest_path, original_path, overwrite=False)
         except OSError:
             pass  # ロールバック自体の失敗はログ側の責務（呼び出し元でログ記録想定）
 
@@ -124,17 +115,19 @@ class QuarantineService:
 
             if not source.exists():
                 raise QuarantineRestoreError(detail=f"隔離ファイルが見つかりません: {source}")
-            if target.exists() and not overwrite:
+            if os.path.lexists(target) and not overwrite:
                 raise QuarantineRestoreError(
                     "復元先に同じ名前のファイルがあります", detail=str(target)
                 )
 
             try:
-                if target.exists():
-                    target.unlink()
-                target.parent.mkdir(parents=True, exist_ok=True)
                 os.chmod(source, stat.S_IRUSR | stat.S_IWUSR)
-                shutil.move(str(source), str(target))
+                # 復元先のフォルダをリンクをたどらずに開いて置く。既にあるものがリンク・フォルダ等なら置き換えない
+                restore_move(source, target, overwrite)
+            except FileExistsError as exc:
+                raise QuarantineRestoreError(
+                    "復元先に同じ名前のファイルがあります", detail=str(target)
+                ) from exc
             except OSError as exc:
                 raise QuarantineRestoreError(detail=str(exc)) from exc
 
