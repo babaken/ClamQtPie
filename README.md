@@ -187,7 +187,7 @@ pip install -r requirements.txt
 
 python app.py                     # 起動
 python -m pytest -q               # テスト（GUI テストはヘッドレスで実行）
-python build_release.py --version 0.9.1   # PyInstaller でビルドし、dist/ に Zip を作成
+python build_release.py --version 0.9.2   # PyInstaller でビルドし、dist/ に Zip を作成
 ```
 
 - リポジトリ直下の `scripts/run_ClamQtPie.bat`（Windows）・`scripts/run_ClamQtPie.sh`（Linux）で、どこからでも `clamav_frontend/.venv` の Python でアプリを起動できます（Linux で venv が別の場所にあるときは `CLAMQTPIE_PYTHON` に Python のパスを指定）。Windows で管理者として動かすときは、`.bat` を右クリックして「管理者として実行」を選びます

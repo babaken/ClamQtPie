@@ -959,3 +959,9 @@ Linux配布版がWaylandのデスクトップで起動しない不具合（v0.9.
 2026-10-31 に公開された watchdog 7.0.0 で、Windows のテスト（`test_realtime_manager.py` の 4 件）が CI で失敗した。7.0.0 の Windows の監視（`WindowsApiEmitter`／`DirectoryChangeReader.get_events(timeout)`）は、`timeout`（既定 1 秒）の間に新しいイベントが来なくなるまで待ってからまとめて渡すため、ファイルの変更から検知まで約 1 秒遅れていた（6.0.0 では即座に届く。イベントは失われない）。テストがそれより短い時間しか待たないため失敗していた。Linux（inotify）では差が出ない。
 
 `RealtimeManager` で `Observer(timeout=0.1)`（`_OBSERVER_TIMEOUT_SEC`）にして、7.0.0 でも約 0.1 秒で届くようにした。6 系では待ちの間隔が変わるだけで、届くまでの時間は変わらない。版は固定しない（`watchdog>=4.0` のまま）。確認: watchdog 6.0.0・7.0.0 の両方で、Windows・WSL の全テスト成功。v0.9.1 の配布版は 6.0.0 でビルドしている。
+
+## 44. v0.9.2 の公開
+
+§42・§43 の修正と開発環境からの起動スクリプト（リポジトリ直下の `scripts/`）を v0.9.2 として公開する。`core/version.py`の`APP_VERSION`、`version_info.txt`、READMEと`build_release.py`のビルド例を0.9.2にそろえた。
+
+確認: 全テスト（Windows 11 / WSL2 Ubuntu / Linux 実機）成功。Linux 実機（glibc 2.44、watchdog 7.0.0）で、通知の差出人とアイコン、clamonacc のログが1回ずつであること、停止の行、定義更新の履歴の文言、watchdog 方式での検知、終了ログと終了確認の文言を確認した。

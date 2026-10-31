@@ -189,7 +189,7 @@ pip install -r requirements.txt
 
 python app.py                     # run the app
 python -m pytest -q               # run tests (GUI tests run headless)
-python build_release.py --version 0.9.1   # build with PyInstaller and create a Zip in dist/
+python build_release.py --version 0.9.2   # build with PyInstaller and create a Zip in dist/
 ```
 
 - `scripts/run_ClamQtPie.bat` (Windows) and `scripts/run_ClamQtPie.sh` (Linux) at the repository root start the app with the Python in `clamav_frontend/.venv` from any folder (on Linux, set `CLAMQTPIE_PYTHON` to the Python path if your venv is elsewhere). To run it as administrator on Windows, right-click the `.bat` and choose "Run as administrator"
