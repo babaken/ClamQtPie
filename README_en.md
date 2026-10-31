@@ -189,7 +189,7 @@ pip install -r requirements.txt
 
 python app.py                     # run the app
 python -m pytest -q               # run tests (GUI tests run headless)
-python build_release.py --version 0.9.0   # build with PyInstaller and create a Zip in dist/
+python build_release.py --version 0.9.1   # build with PyInstaller and create a Zip in dist/
 ```
 
 - Tests live under `tests/` and use a fake clamd (`FakeClamdServer`). If a real clamd is available, the EICAR integration tests run too

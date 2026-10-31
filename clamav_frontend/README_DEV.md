@@ -933,3 +933,13 @@ Linux配布版がWaylandのデスクトップで起動しない不具合（v0.9.
 - Linux: pkexec が決まったディレクトリ（`/usr/bin` 等）に無い環境では、clamonacc 方式は使えず watchdog になる。ClamAV を、利用者が書き込めるフォルダの下（root 所有のフォルダでも）に置いている場合は、E6005 で止まる
 
 確認（Windows 11、Python 3.15.1 / WSL2 Ubuntu、Python 3.14）: 全テスト成功。この開発機で、決まった環境変数だけで通知（PowerShell のトースト）・`sc query`・`freshclam --version` が動くこと、WSL の `/usr/sbin/clamonacc`・`/usr/bin/freshclam`・`/etc/clamav/clamd.conf` が場所の検証を通ることを確認
+
+## 41. v0.9.1 の公開
+
+§39・§40 のセキュリティの改善を v0.9.1 として公開する。`core/version.py`の`APP_VERSION`、`version_info.txt`、READMEと`build_release.py`のビルド例を0.9.1にそろえた。
+
+確認: 全テスト（Windows 11 / WSL2 Ubuntu）成功。実機で次を確認した。
+- Windows（管理者で起動）: 定義の手動更新、検知の通知（通知センターに届き、クリックで隔離画面が開く）
+- Linux（実機のデスクトップ、一般ユーザーで起動）: 起動（監視方式は clamonacc）、pkexec での定義の手動更新とリアルタイム監視の開始、検知の隔離と notify-send の通知、カスタムスキャンでの検知、監視の停止と終了後に clamonacc が残らないこと
+
+この確認で見つかった次の点は、v0.9.2 以降で対応する: notify-send の通知にアプリ名・アイコンが付かない、clamonacc のログが2回記録される、glibc 2.44 以降の環境では clamonacc がサブフォルダを監視できない（ClamAV Issue #1797）ことの案内、定義更新の結果の文言の画面とログの違い、終了時のログ行が無い。
