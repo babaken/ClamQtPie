@@ -93,22 +93,24 @@ _FOUND_RE = re.compile(r"(?P<path>(?:[A-Za-z]:)?[\\/].*): (?P<virus>\S+) FOUND\s
 #: - 非対話シェルでは「&」で起動したコマンドの標準入力が/dev/nullになるため、元の標準入力をfd3へ複製してから
 #:   監視用サブシェルに渡す。アプリが標準入力を閉じるとclamonaccを停止する
 #: - 終了マーカーには起動ごとの識別子を付ける（clamonaccの出力に含まれるファイル名で偽装されないように）
+#: - 一時フォルダは最後に消す。trap EXIT は使わない（bash は EXIT の trap があると SIGTERM の受け取り処理を
+#:   置き、「&」で起動した子にも exec までその処理が残る。その間に届いた停止の合図が失われ、
+#:   clamonaccが止まらずに残ることがあった。Arch Linux実機で発見）
 _SUPERVISOR_SCRIPT = (
     'exec 3<&0; nonce=$1; shift; '
     'd=$(mktemp -d /tmp/clamqtpie-onacc.XXXXXXXX) || { echo "__CLAMONACC_EXIT__$nonce 125"; exit 125; }; '
-    'trap \'rm -rf "$d"\' EXIT; '
     'n=$1; shift; : > "$d/watch-list"; '
     'while [ "$n" -gt 0 ]; do printf "%s\\n" "$1" >> "$d/watch-list"; shift; n=$((n-1)); done; '
     'n=$1; shift; : > "$d/exclude-list"; '
     'while [ "$n" -gt 0 ]; do printf "%s\\n" "$1" >> "$d/exclude-list"; shift; n=$((n-1)); done; '
-    ': > "$d/clamonacc.log"; '
+    ': > "$d/clamonacc.log"; : > "$d/clamonacc.out"; '
     'tail -n +1 -F "$d/clamonacc.log" 2>/dev/null & tailpid=$!; '
     '"$@" --log="$d/clamonacc.log" --watch-list="$d/watch-list" --exclude-list="$d/exclude-list" '
     '> "$d/clamonacc.out" 2>&1 & pid=$!; '
     '( read _unused <&3; kill "$pid" 2>/dev/null ) & '
     'wait "$pid"; code=$?; sleep 1; kill "$tailpid" 2>/dev/null; '
     'grep -vxFf "$d/clamonacc.log" "$d/clamonacc.out"; '
-    'echo "__CLAMONACC_EXIT__$nonce $code"'
+    'rm -rf "$d"; echo "__CLAMONACC_EXIT__$nonce $code"'
 )
 _EXIT_MARKER = "__CLAMONACC_EXIT__"
 

@@ -550,13 +550,20 @@ def test_pkexec_is_not_taken_from_path(env, monkeypatch):
 
 
 # -- rootシェル（_SUPERVISOR_SCRIPT）の実動作 -----------------------------------
+# /bin/sh は配布元によって dash（Debian・Ubuntu）や bash（Arch・Fedora）。どちらでも確かめる
+_POSIX_SHELLS = [pytest.param(name, marks=pytest.mark.skipif(shutil.which(name) is None, reason=f"{name} が無い"))
+                 for name in ("sh", "bash", "dash")]
+
+
 @requires_posix_sh
-def test_supervisor_script_stops_child_when_stdin_closes():
+@pytest.mark.parametrize("shell", _POSIX_SHELLS)
+def test_supervisor_script_stops_child_when_stdin_closes(shell):
     # clamonaccの代わりにsleepを監視させ、標準入力を閉じたら終了マーカーが出ることを確認
     # （rootシェルが付ける--log等は、sh -cの位置引数として渡るだけで無視される）
     # （子はexecでsleepに置き換え、1つのプロセスとして止める。shによっては最後のコマンドをexecしないため）
+    # 起動の直後に閉じる（子が exec する前に停止の合図が届いても止まること）
     process = subprocess.Popen(
-        [shutil.which("sh"), "-c", _SUPERVISOR_SCRIPT, "supervisor", "n1", "0", "0", "sh", "-c", "exec sleep 30"],
+        [shutil.which(shell), "-c", _SUPERVISOR_SCRIPT, "supervisor", "n1", "0", "0", "sh", "-c", "exec sleep 30"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
