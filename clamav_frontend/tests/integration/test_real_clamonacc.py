@@ -39,6 +39,19 @@ requires_real_clamonacc = pytest.mark.skipif(
 )
 
 
+def _glibc_version() -> tuple[int, ...]:
+    name, version = platform.libc_ver()
+    if name != "glibc" or not version:
+        return ()
+    return tuple(int(part) for part in version.split(".") if part.isdigit())
+
+
+#: glibc 2.44以降では、clamonaccの不具合（ClamAV Issue #1797）でサブフォルダを認識できず、
+#: 除外フォルダがあると監視を開始できない（アプリはエラーを表示する。README「Linuxのリアルタイム監視」）。
+#: ClamAV側で直れば通るため、strict=Falseのxfailにする
+_CLAMONACC_SUBFOLDER_BUG = _glibc_version() >= (2, 44)
+
+
 @pytest.fixture
 def services(tmp_path):
     db_service = DatabaseService(tmp_path / "app.db")
@@ -110,6 +123,11 @@ def test_real_clamonacc_detects_and_quarantines_eicar(services, tmp_path, qtbot)
 
 
 @requires_real_clamonacc
+@pytest.mark.xfail(
+    _CLAMONACC_SUBFOLDER_BUG,
+    reason="glibc 2.44以降ではclamonaccがサブフォルダを認識できない（ClamAV Issue #1797）",
+    strict=False,
+)
 def test_real_clamonacc_respects_exclude_folder(services, tmp_path, qtbot):
     watched = tmp_path / "watched"
     excluded = watched / "excluded"

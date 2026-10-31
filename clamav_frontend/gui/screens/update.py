@@ -117,7 +117,7 @@ class UpdateScreen(BaseScreen):
         for record in records:
             row = self.history_table.rowCount()
             self.history_table.insertRow(row)
-            result_label = {"success": "成功", "failure": "失敗", "no_change": "変更なし"}.get(
+            result_label = {"success": "成功", "failure": "失敗", "no_change": "最新"}.get(
                 record.result, record.result
             )
             values = [record.executed_at, result_label, record.before_version, record.after_version]

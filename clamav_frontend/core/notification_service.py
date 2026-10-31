@@ -208,6 +208,8 @@ class NotificationService:
             html.escape(title, quote=False),
             html.escape(body, quote=False),
             "--urgency=critical",
+            # 差出人の名前（固定値）。付けないと通知デーモンに「notify-send」と表示される
+            f"--app-name={APP_NAME}",
         ]
         if self._icon_path:
             cmd.append(f"--icon={self._icon_path}")

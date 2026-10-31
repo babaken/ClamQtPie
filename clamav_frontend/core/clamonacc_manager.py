@@ -87,7 +87,9 @@ _FOUND_RE = re.compile(r"(?P<path>(?:[A-Za-z]:)?[\\/].*): (?P<virus>\S+) FOUND\s
 #: rootシェルとして実行するスクリプト。引数は「終了マーカーの識別子、監視リストの件数、監視リスト…、
 #: 除外リストの件数、除外リスト…、clamonaccのコマンドライン…」の順（build_commandが組み立てる）。
 #: - root専用の一時フォルダ（mktemp -d、0700）に監視リスト・除外リスト・ログを置き、終了時に消す
-#: - ログはtail -Fで標準出力へ流す（アプリはこのパイプだけを読む）
+#: - ログはtail -Fで標準出力へ流す（アプリはこのパイプだけを読む）。--foregroundのclamonaccは同じ内容を
+#:   画面にも出すため、その出力は一時フォルダのファイルに受け、終了後にログに無い行（ログを開く前のエラー、
+#:   画面にだけ出る停止の行など）だけを流す（同じ行が2回届かないように）
 #: - 非対話シェルでは「&」で起動したコマンドの標準入力が/dev/nullになるため、元の標準入力をfd3へ複製してから
 #:   監視用サブシェルに渡す。アプリが標準入力を閉じるとclamonaccを停止する
 #: - 終了マーカーには起動ごとの識別子を付ける（clamonaccの出力に含まれるファイル名で偽装されないように）
@@ -101,9 +103,11 @@ _SUPERVISOR_SCRIPT = (
     'while [ "$n" -gt 0 ]; do printf "%s\\n" "$1" >> "$d/exclude-list"; shift; n=$((n-1)); done; '
     ': > "$d/clamonacc.log"; '
     'tail -n +1 -F "$d/clamonacc.log" 2>/dev/null & tailpid=$!; '
-    '"$@" --log="$d/clamonacc.log" --watch-list="$d/watch-list" --exclude-list="$d/exclude-list" & pid=$!; '
+    '"$@" --log="$d/clamonacc.log" --watch-list="$d/watch-list" --exclude-list="$d/exclude-list" '
+    '> "$d/clamonacc.out" 2>&1 & pid=$!; '
     '( read _unused <&3; kill "$pid" 2>/dev/null ) & '
     'wait "$pid"; code=$?; sleep 1; kill "$tailpid" 2>/dev/null; '
+    'grep -vxFf "$d/clamonacc.log" "$d/clamonacc.out"; '
     'echo "__CLAMONACC_EXIT__$nonce $code"'
 )
 _EXIT_MARKER = "__CLAMONACC_EXIT__"

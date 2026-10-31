@@ -146,7 +146,11 @@ def main() -> int:
     logger.info(f"リアルタイム監視方式: {realtime_manager.mode_name}")
     update_service = UpdateService(db_service, clamav_service, freshclam_path=config.update.freshclam_path)
     update_dispatcher = UpdateDispatcher(update_service)
-    notification_service = NotificationService(config_service)
+    # notify-sendの通知に付けるアイコン（Windowsのトーストは差出人のAPP_IDで表示する）
+    notify_icon = _RESOURCE_DIR / "icons" / "app.png"
+    notification_service = NotificationService(
+        config_service, icon_path=str(notify_icon) if notify_icon.exists() else None
+    )
     log_reader_service = LogReaderService(_APP_DIR / "logs" / "app.log")
     # 非フリーズ時（python app.py）はsys.executableがpython.exeになるため、
     # app.pyのパスも含めたコマンドを登録する（そのままではapp.pyなしでpythonが起動してしまう）
@@ -470,9 +474,11 @@ def main() -> int:
     tray_icon.toggle_realtime_action.triggered.connect(_on_toggle_realtime)
 
     def _on_quit_requested() -> None:
-        if not show_confirm_dialog(
-            window, "終了確認", "アプリを終了しますか？リアルタイム監視も停止されます"
-        ):
+        # 監視を止めているときに「監視も停止されます」と出すと、監視中と誤解させるため、監視中のときだけ付ける
+        message = "アプリを終了しますか？"
+        if realtime_manager.is_running:
+            message += "リアルタイム監視も停止されます"
+        if not show_confirm_dialog(window, "終了確認", message):
             return
         app.quit()
 
@@ -507,11 +513,13 @@ def main() -> int:
 
     exit_code = app.exec()
 
+    logger.info("アプリ終了シーケンス開始")
     if realtime_manager.is_running:
         realtime_manager.stop()
     scheduler_service.shutdown()
     db_service.close()
     instance_lock.release()
+    logger.info(f"アプリ終了シーケンス完了（終了コード: {exit_code}）")
     return exit_code
 
 
