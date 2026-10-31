@@ -24,6 +24,10 @@ def test_parse_clamd_db_date():
     assert parse_clamd_db_date("") is None
     assert parse_clamd_db_date("Mon Jan 6 2026") is None  # 時刻が無い
     assert parse_clamd_db_date("Mon Foo  6 08:00:00 2026") is None
+    # 範囲外の値は、例外にせず読めない日付として扱う
+    assert parse_clamd_db_date("Mon Jan  6 08:00:00 99999999999999999999") is None
+    assert parse_clamd_db_date("Mon Jan 99999999999999999999 08:00:00 2026") is None
+    assert parse_clamd_db_date("Mon Jan  6 99999999999999999999:00:00 2026") is None
 
 
 def test_definitions_age_days():
@@ -71,6 +75,18 @@ def test_home_does_not_warn_for_recent_definitions(qtbot):
 
     assert screen.status.definitions_stale is False
     assert screen.hero_title_label.text() == "保護されています"
+
+
+def test_home_keeps_updating_status_when_db_date_is_unreadable(qtbot):
+    # clamdの応答の日付が読めない値でも、状態の表示（リアルタイム監視の状態・状態の通知）を更新し続ける
+    screen = _home_with_db_date(qtbot, "Mon Jan  6 08:00:00 99999999999999999999")
+    with qtbot.waitSignal(screen.status_refreshed, timeout=1000):
+        screen.refresh_status()
+
+    assert screen.status.clamd_running is True
+    assert screen.status.definitions_age_days is None
+    assert screen.status.definitions_stale is False
+    assert screen.status.realtime_running is True
 
 
 def test_home_uses_configured_stale_days(qtbot):

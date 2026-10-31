@@ -15,7 +15,6 @@ from __future__ import annotations
 import os
 import platform
 import re
-import shutil
 import subprocess
 from typing import Callable
 
@@ -25,7 +24,7 @@ from core.background_task import BackgroundTask
 from core.clamav_service import ClamAVService
 from core.config_model import ClamdConfig
 from core.exceptions import AppError, ClamdConnectionError, ClamdProcessError
-from core.exec_path import system_tool
+from core.exec_path import child_env, system_tool
 
 _DEFAULT_SERVICE_NAMES = {"Windows": "clamd", "Linux": "clamav-daemon"}
 #: sc start の「既に開始されています」（ERROR_SERVICE_ALREADY_RUNNING）
@@ -68,12 +67,10 @@ class ClamdServiceController:
         config: ClamdConfig,
         system: str | None = None,
         runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-        which: Callable[[str], str | None] = shutil.which,
     ) -> None:
         self.config = config
         self._system = system or platform.system()
         self._run = runner
-        self._which = which
 
     @property
     def service_name(self) -> str:
@@ -101,12 +98,14 @@ class ClamdServiceController:
         else:
             command = [system_tool("systemctl", self._system), action, self.service_name]
             if not (hasattr(os, "geteuid") and os.geteuid() == 0):
-                command = [self._which("pkexec") or "pkexec", *command]
+                # pkexecもPATH（利用者が変えられる）からは探さず、決まった場所の絶対パスで起動する
+                command = [system_tool("pkexec", self._system), *command]
         try:
             completed = self._run(
                 command,
                 capture_output=True,
                 timeout=60,
+                env=child_env(system=self._system),
                 **console_text_kwargs(self._system),
                 **no_window_kwargs(self._system),
             )

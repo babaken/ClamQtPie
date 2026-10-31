@@ -34,6 +34,7 @@ from core.exceptions import AppError
 from gui.error_dialog import show_error_dialog
 from gui.screens.base import BaseScreen, wrap_layout
 from gui.theme import COLOR_NG, COLOR_OK, set_variant
+from gui.plain_text import plain
 
 _IS_WINDOWS = sys.platform == "win32"
 #: 空欄で保存したときに戻す既定値
@@ -275,7 +276,7 @@ class SettingsScreen(BaseScreen):
         self.connection_test_button = QPushButton("接続テスト")
         self.connection_test_button.setToolTip("入力中の接続先へ PING を送ります（保存前に試せます）")
         self.connection_test_button.clicked.connect(self._on_connection_test_clicked)
-        self.connection_test_label = QLabel("")
+        self.connection_test_label = plain(QLabel(""))
         self.connection_test_label.setWordWrap(True)
         test_layout = QHBoxLayout()
         test_layout.addWidget(self.connection_test_button)

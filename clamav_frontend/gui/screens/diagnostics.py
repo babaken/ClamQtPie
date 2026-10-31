@@ -17,6 +17,7 @@ from core.background_task import BackgroundTask
 from core.diagnostics_service import LEVEL_NG, LEVEL_WARN, mask_report
 from gui.screens.base import BaseScreen, wrap_layout
 from gui.theme import COLOR_NG, COLOR_OK, COLOR_WARN, set_variant
+from gui.plain_text import plain
 
 
 class DiagnosticsScreen(BaseScreen):
@@ -41,7 +42,7 @@ class DiagnosticsScreen(BaseScreen):
             buttons.addWidget(button)
         buttons.addStretch(1)
         self.add_layout_widget(wrap_layout(buttons))
-        self.summary_label = QLabel("「ヘルスチェックを実行」をクリックすると診断レポートを作成します。")
+        self.summary_label = plain(QLabel("「ヘルスチェックを実行」をクリックすると診断レポートを作成します。"))
         self.summary_label.setObjectName("cardText")
         self.summary_label.setWordWrap(True)
         self.add_layout_widget(self.summary_label)

@@ -126,3 +126,64 @@ def test_trusted_file_in_user_writable_folder_is_rejected(tmp_path):
     path.write_text("LocalSocket /run/clamav/clamd.ctl\n", encoding="utf-8")
     with pytest.raises(UnsafeExecutablePathError):
         validate_trusted_file(str(path))
+
+
+def test_find_system_tool_does_not_fall_back_to_path(tmp_path, monkeypatch):
+    # 決まった場所に無いコマンドは、PATHにあっても見つからない扱いにする（昇格に使うpkexec等の確認に使う）
+    from core.exec_path import find_system_tool
+
+    monkeypatch.setenv("PATH", str(tmp_path))
+    (tmp_path / "clamqtpie-no-such-tool").write_text("")
+    assert find_system_tool("clamqtpie-no-such-tool", "Linux") is None
+
+
+# -- 外部コマンドに渡す環境変数 ------------------------------------------------------------
+def test_windows_child_env_passes_only_fixed_variables(monkeypatch):
+    # 管理者権限で起動する外部コマンドには、利用者が変えられる環境変数を引き継がず、決まった変数だけを渡す
+    from core.exec_path import child_env
+
+    monkeypatch.setenv("CLAMQTPIE_TEST_USER_VARIABLE", "1")
+    monkeypatch.setenv("SystemRoot", r"C:\Users\someone\fake")
+    env = child_env({"EXTRA": "x"}, system="Windows")
+
+    assert "CLAMQTPIE_TEST_USER_VARIABLE" not in env
+    assert env["EXTRA"] == "x"
+    assert env["SystemRoot"] != r"C:\Users\someone\fake"  # 環境変数ではなくAPIから得る
+    assert set(env) <= {
+        "SystemRoot", "windir", "SystemDrive", "ComSpec", "PATH", "PATHEXT", "TEMP", "TMP", "OS",
+        "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "EXTRA",
+    }
+
+
+def test_posix_child_env_inherits_environment():
+    from core.exec_path import child_env
+
+    assert child_env(system="Linux") is None
+
+
+@pytest.mark.skipif(_IS_WINDOWS, reason="Linux等の所有者・アクセス権の確認")
+def test_posix_executable_under_user_writable_ancestor_is_rejected(tmp_path, monkeypatch):
+    # 実行ファイルと親のフォルダがroot所有でも、祖先のフォルダにroot以外が書き込めるなら実行しない
+    # （祖先のフォルダに書き込めると、その下のフォルダごと差し替えられるため）
+    import stat as stat_module
+
+    install = tmp_path / "opt" / "clamav" / "sbin"
+    install.mkdir(parents=True)
+    program = install / "clamonacc"
+    program.write_text("")
+    real_program = os.path.realpath(program)
+    root_owned = {real_program, os.path.dirname(real_program)}
+    real_stat = os.stat
+
+    def fake_stat(path, *args, **kwargs):
+        info = real_stat(path, *args, **kwargs)
+        values = list(info)
+        if str(path) in root_owned:
+            values[stat_module.ST_UID] = 0
+            values[stat_module.ST_MODE] = (info.st_mode & ~0o022)
+        return os.stat_result(values)
+
+    monkeypatch.setattr("core.exec_path.os.stat", fake_stat)
+    with pytest.raises(UnsafeExecutablePathError) as excinfo:
+        validate_executable(str(program), ("clamonacc",))
+    assert str(tmp_path) in excinfo.value.detail  # 祖先のフォルダの問題として知らせる

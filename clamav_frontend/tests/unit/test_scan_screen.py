@@ -5,6 +5,7 @@ gui/screens/scan.py のサービス層結線に関するテスト
 from unittest.mock import MagicMock
 
 from gui.screens.scan import ScanScreen
+from tests.conftest import tooltip_text
 
 
 def _make_screen(qtbot):
@@ -180,7 +181,7 @@ def test_activity_shows_queued_and_stalled_states(qtbot):
     screen._on_activity("stalled", "/data/big.iso", 25)
     assert "応答待ち（25秒）" in screen.state_label.text()
     assert "big.iso" in screen.state_label.text()
-    assert screen.state_label.toolTip() == "/data/big.iso"
+    assert tooltip_text(screen.state_label.toolTip()) == "/data/big.iso"
 
     screen._on_activity("scanning", "", 0)
     assert screen.state_label.text() == "状態: スキャン中"

@@ -37,6 +37,7 @@ from core.clamav_service import (
 )
 from core.logger import CATEGORY_SCAN, log_event
 from gui.error_dialog import show_confirm_dialog, show_error_dialog
+from gui.plain_text import plain, plain_tooltip
 from gui.screens.base import BaseScreen, wrap_layout
 from gui.theme import set_variant
 
@@ -102,7 +103,7 @@ class ScanScreen(BaseScreen):
         self.stop_button.setEnabled(False)
         self.start_button.clicked.connect(self._on_start_clicked)
         self.stop_button.clicked.connect(self._on_stop_clicked)
-        self.state_label = QLabel("状態: 待機中")
+        self.state_label = plain(QLabel("状態: 待機中"))
         control_layout.addWidget(self.start_button)
         control_layout.addWidget(self.stop_button)
         control_layout.addWidget(self.state_label)
@@ -110,7 +111,7 @@ class ScanScreen(BaseScreen):
         self._add_hlayout(control_layout)
 
         self.progress_bar = QProgressBar()
-        self.current_file_label = QLabel("")
+        self.current_file_label = plain(QLabel(""))  # ファイル名を文字のまま表示する
         self.counter_label = QLabel(_counter_text(0, 0, 0))
         self.add_layout_widget(self.progress_bar)
         self.add_layout_widget(self.current_file_label)
@@ -261,7 +262,7 @@ class ScanScreen(BaseScreen):
             self.state_label.setText(
                 f"状態: 応答待ち（{elapsed_sec}秒）: {Path(path).name}　※「停止」で中断できます"
             )
-            self.state_label.setToolTip(path)
+            self.state_label.setToolTip(plain_tooltip(path))
         else:
             self.state_label.setText("状態: スキャン中")
             self.state_label.setToolTip("")
@@ -307,7 +308,7 @@ class ScanScreen(BaseScreen):
         values = [path, label, detail, detected_at]
         for col, value in enumerate(values):
             item = QTableWidgetItem(value)
-            item.setToolTip(value)  # 列の幅で切れた内容（検査できなかった理由等）も読めるようにする
+            item.setToolTip(plain_tooltip(value))  # 列の幅で切れた内容（検査できなかった理由等）も読めるようにする
             self.result_table.setItem(row, col, item)
 
     def _selected_detection_rows(self) -> list[int]:

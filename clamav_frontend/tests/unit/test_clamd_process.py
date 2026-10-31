@@ -1,6 +1,7 @@
 """
 clamdサービスの起動制御（core/clamd_process.py、Phase 11）のテスト
 """
+import os
 import subprocess
 import sys
 from unittest.mock import MagicMock
@@ -48,10 +49,21 @@ def test_linux_uses_pkexec_systemctl_and_custom_service_name(monkeypatch):
     run = _runner()
     controller = ClamdServiceController(
         ClamdConfig(service_name="clamd@scan"), system="Linux", runner=run,
-        which=lambda name: "/usr/bin/pkexec",
     )
     controller.start()
-    assert run.calls == [["/usr/bin/pkexec", system_tool("systemctl", "Linux"), "start", "clamd@scan"]]
+    assert run.calls == [[system_tool("pkexec", "Linux"), system_tool("systemctl", "Linux"), "start", "clamd@scan"]]
+
+
+def test_linux_pkexec_is_not_taken_from_path(monkeypatch, tmp_path):
+    # 昇格に使うpkexecは、PATH（利用者が変えられる）の先頭のフォルダにあっても使わず、決まった場所の絶対パスで起動する
+    monkeypatch.setattr("core.clamd_process.os.geteuid", lambda: 1000, raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
+    (tmp_path / "pkexec").write_text("#!/bin/sh\n")
+    run = _runner()
+    ClamdServiceController(ClamdConfig(), system="Linux", runner=run).start()
+    pkexec = run.calls[0][0]
+    assert pkexec == system_tool("pkexec", "Linux")
+    assert pkexec.startswith("/usr/") or pkexec.startswith("/bin/") or pkexec.startswith("/sbin/")
 
 
 def test_starter_reports_failure_in_background(qtbot):
@@ -94,10 +106,10 @@ def test_linux_stop_uses_pkexec_systemctl(monkeypatch):
     monkeypatch.setattr("core.clamd_process.os.geteuid", lambda: 1000, raising=False)
     run = _runner()
     controller = ClamdServiceController(
-        ClamdConfig(), system="Linux", runner=run, which=lambda name: f"/usr/bin/{name}"
+        ClamdConfig(), system="Linux", runner=run
     )
     assert controller.stop() is True
-    assert run.calls == [["/usr/bin/pkexec", system_tool("systemctl", "Linux"), "stop", "clamav-daemon"]]
+    assert run.calls == [[system_tool("pkexec", "Linux"), system_tool("systemctl", "Linux"), "stop", "clamav-daemon"]]
 
 
 def test_stop_failure_raises_e8003():
@@ -203,3 +215,17 @@ def test_invalid_service_name_is_not_passed_to_command(name):
     with pytest.raises(ClamdProcessError):
         controller.start()
     assert calls == []
+
+
+def test_windows_sc_does_not_inherit_user_environment(monkeypatch):
+    # 管理者権限で起動するscには、利用者が変えられる環境変数を引き継がない
+    monkeypatch.setenv("CLAMQTPIE_TEST_USER_VARIABLE", "1")
+    received = []
+
+    def run(command, **kwargs):
+        received.append(kwargs.get("env"))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    ClamdServiceController(ClamdConfig(), system="Windows", runner=run).start()
+    assert received[0] is not None
+    assert "CLAMQTPIE_TEST_USER_VARIABLE" not in received[0]

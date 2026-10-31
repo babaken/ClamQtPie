@@ -360,9 +360,9 @@ def test_toast_passes_title_and_body_only_via_env(tmp_path):
         time.sleep(0.3)
 
     env = mock_run.call_args.kwargs["env"]
-    # 既存の環境変数を引き継ぎつつ、通知用の2つを追加している
-    assert env["CLAMQT_TEST_INHERITED"] == "1"
-    assert set(["CLAMQTPIE_TOAST_TITLE", "CLAMQTPIE_TOAST_BODY"]).issubset(env)
+    # 管理者権限のPowerShellには、利用者が変えられる環境変数を引き継がず、決まった変数と通知用の2つだけを渡す
+    assert "CLAMQT_TEST_INHERITED" not in env
+    assert set(["CLAMQTPIE_TOAST_TITLE", "CLAMQTPIE_TOAST_BODY", "SystemRoot", "PATH"]).issubset(env)
 
 
 def test_notify_send_text_is_escaped_so_markup_is_shown_literally(tmp_path):

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.scheduler_service import cron_trigger
+from gui.plain_text import plain
 
 #: プリセット周期とcron式の対応（画面設計書4章「実行周期」）。曜日は標準のcron式の数え方（0=日曜）
 #: （APSchedulerへはcore.scheduler_service.cron_triggerで変換して渡す）
@@ -69,7 +70,7 @@ class JobEditDialog(QDialog):
         self.cron_edit = QLineEdit()
         layout.addRow("Cron式", self.cron_edit)
 
-        self.error_label = QLabel("")
+        self.error_label = plain(QLabel(""))
         self.error_label.setStyleSheet("color: #e53935;")
         self.error_label.setVisible(False)
         layout.addRow(self.error_label)

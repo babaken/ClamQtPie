@@ -44,7 +44,15 @@ requires_posix_sh = pytest.mark.skipif(
 
 
 def _which(name):
-    return {"clamonacc": "/usr/sbin/clamonacc", "pkexec": "/usr/bin/pkexec"}.get(name)
+    return {"clamonacc": "/usr/sbin/clamonacc"}.get(name)
+
+
+@pytest.fixture(autouse=True)
+def _linux_pkexec(monkeypatch):
+    """pkexecは決まった場所から探す（find_system_tool）。Windowsでもテストできるよう、Linuxの場所にある扱いにする"""
+    monkeypatch.setattr(
+        "core.clamonacc_manager.find_system_tool", lambda name, system=None: f"/usr/bin/{name}"
+    )
 
 
 class _FakeStdin:
@@ -523,11 +531,22 @@ def test_factory_respects_linux_backend_watchdog(env):
 
 def test_availability_requires_pkexec_when_not_root(monkeypatch):
     monkeypatch.setattr("core.clamonacc_manager._is_root", lambda: False)
+    monkeypatch.setattr("core.clamonacc_manager.find_system_tool", lambda name, system=None: None)
+    # PATHにpkexecがあっても、決まった場所に無ければ使えない扱いにする
     available, reason = is_clamonacc_available(
-        RealtimeConfig(), lambda name: "/usr/sbin/clamonacc" if name == "clamonacc" else None
+        RealtimeConfig(), lambda name: {"clamonacc": "/usr/sbin/clamonacc", "pkexec": "/home/u/bin/pkexec"}.get(name)
     )
     assert available is False
     assert "pkexec" in reason
+
+
+def test_pkexec_is_not_taken_from_path(env, monkeypatch):
+    # 昇格に使うpkexecは、PATH（利用者が変えられる）で見つかるものではなく、決まった場所の絶対パスで起動する
+    monkeypatch.setattr("core.clamonacc_manager._is_root", lambda: False)
+    manager = env["build"]()
+    manager._which = lambda name: {"clamonacc": "/usr/sbin/clamonacc", "pkexec": "/home/u/bin/pkexec"}.get(name)
+    command = manager.build_command("/usr/sbin/clamonacc", ["/w"], [])
+    assert command[0] == "/usr/bin/pkexec"
 
 
 # -- rootシェル（_SUPERVISOR_SCRIPT）の実動作 -----------------------------------

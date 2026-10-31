@@ -71,7 +71,7 @@ from core.clamd_conf import (
     load_clamd_conf,
 )
 from core.exceptions import AppError, ClamonaccError, ClamonaccTargetError, UnsafeExecutablePathError
-from core.exec_path import validate_executable, validate_trusted_file
+from core.exec_path import find_system_tool, system_tool, validate_executable, validate_trusted_file
 from core.exclude_service import ExcludeService, is_under_any_folder
 from core.logger import CATEGORY_REALTIME, log_event
 from core.quarantine_service import QuarantineService
@@ -177,7 +177,8 @@ def is_clamonacc_available(
     """clamonacc方式が使えるか判定する。(使えるか, 使えない理由)"""
     if find_clamonacc(config, which) is None:
         return False, f"clamonaccが見つかりません ({config.clamonacc_path})"
-    if not _is_root() and which("pkexec") is None:
+    # pkexecはPATH（利用者が変えられる）からは探さず、決まった場所だけを見る
+    if not _is_root() and find_system_tool("pkexec", "Linux") is None:
         return False, "pkexecが見つかりません（clamonaccの実行にはroot権限が必要です）"
     return True, ""
 
@@ -393,7 +394,8 @@ class ClamonaccRealtimeManager(QObject):
         ]
         if _is_root():
             return supervisor
-        return [self._which("pkexec") or "pkexec", *supervisor]
+        # 昇格に使うpkexecは、PATHからは探さず決まった場所の絶対パスで起動する
+        return [find_system_tool("pkexec", "Linux") or system_tool("pkexec", "Linux"), *supervisor]
 
     def _use_fdpass(self) -> bool:
         """--fdpassはclamd.confにLocalSocketが無いと無視され、clamdがパスを開く方式になる。

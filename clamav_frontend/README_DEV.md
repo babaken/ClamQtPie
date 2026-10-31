@@ -914,3 +914,22 @@ Linux配布版がWaylandのデスクトップで起動しない不具合（v0.9.
 - 開発時（`python app.py`）は、他の `python.exe` のプロセスがあると、従来どおり多重起動として終了することがある（配布版は実行ファイルのフルパスで判定する）
 
 確認（Windows 11、Python 3.15.1 / WSL2 Ubuntu、Python 3.14）: 全テスト成功（Windows 506件、Linux 512件）。WSL の実機 clamonacc（root）で `tests/integration/test_real_clamonacc.py` 成功。この開発機の freshclam（Chocolatey で導入）が場所の検証を通ることを確認
+
+## 40. セキュリティの改善（v0.9.1 に向けて、続き）
+
+§39 の改善の後の見直しで、次の点を改善した。
+
+| 対象 | 変更 |
+|---|---|
+| 外部コマンドの環境変数（Windows） | 管理者権限で起動する外部コマンド（通知の PowerShell、sc、freshclam）には、本体の環境変数を引き継がず、動作に必要な決まった変数だけを Windows の API から得た値で渡す（新規 `exec_path.child_env`）。Linux 等では従来どおり引き継ぐ（root で動かすものは pkexec が環境変数を整理する） |
+| pkexec（Linux） | `which` で PATH から探すのをやめ、決まったディレクトリの絶対パスで起動する（新規 `exec_path.find_system_tool`。clamd の起動・停止、clamonacc、定義更新） |
+| 実行ファイルの場所（Linux） | root で実行・読み込むファイル（freshclam・clamonacc・clamonacc の設定ファイル）は、ファイルと親のフォルダに加えて、`/` までのすべての祖先のフォルダについても、所有者が root で root 以外が書き込めないことを確かめる |
+| 画面の表示 | ファイル名・clamd の応答・ログのメッセージを表示するラベル・ダイアログは `PlainText`、ツールチップは `Qt.convertFromPlainText` で表示し、HTML として解釈させない（新規 `gui/plain_text.py`。隔離ファイルの詳細は `QMessageBox` のインスタンスで表示するように変更） |
+| 定義の日付 | clamd の応答の日付が範囲外の値でも例外にせず「不明」として扱い、状態の表示の更新を続ける |
+| テスト | Linux 専用の監視シェル（`_SUPERVISOR_SCRIPT`）を実際に動かすテストは、POSIX の環境だけで実行する（Windows の sh ではプロセスの停止の挙動が異なり、結果が安定しないため） |
+
+動作の変わる点:
+- Windows: 定義更新の freshclam は、一時フォルダとして `%SystemRoot%\Temp` を使う（本体は管理者権限のため書き込める）。freshclam・PowerShell に、利用者が設定した環境変数（プロキシの設定など）は渡らない。freshclam のプロキシは `freshclam.conf` の `HTTPProxyServer` 等で設定する
+- Linux: pkexec が決まったディレクトリ（`/usr/bin` 等）に無い環境では、clamonacc 方式は使えず watchdog になる。ClamAV を、利用者が書き込めるフォルダの下（root 所有のフォルダでも）に置いている場合は、E6005 で止まる
+
+確認（Windows 11、Python 3.15.1 / WSL2 Ubuntu、Python 3.14）: 全テスト成功。この開発機で、決まった環境変数だけで通知（PowerShell のトースト）・`sc query`・`freshclam --version` が動くこと、WSL の `/usr/sbin/clamonacc`・`/usr/bin/freshclam`・`/etc/clamav/clamd.conf` が場所の検証を通ることを確認

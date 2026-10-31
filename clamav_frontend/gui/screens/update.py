@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from gui.error_dialog import show_error_dialog
 from gui.screens.base import BaseScreen
 from gui.theme import set_variant
+from gui.plain_text import plain
 
 
 class UpdateScreen(BaseScreen):
@@ -28,7 +29,7 @@ class UpdateScreen(BaseScreen):
 
     def build_content(self) -> None:
         self.begin_card("ウイルス データベースと定義の状態")
-        self.version_label = QLabel("現在の定義DBバージョン: - / 最終更新: -")
+        self.version_label = plain(QLabel("現在の定義DBバージョン: - / 最終更新: -"))
         self.add_layout_widget(self.version_label)
 
         # 画面設計書6章3: 自動更新設定（本画面では表示のみ、設定画面へのショートカット）

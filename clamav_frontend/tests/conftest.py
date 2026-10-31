@@ -298,3 +298,12 @@ def fake_clamd_unix_server():
     yield server
     server.stop()
     shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+def tooltip_text(tooltip: str) -> str:
+    """ツールチップが画面に表示される文字（gui.plain_text.plain_tooltipでHTMLにしたものを文字に戻す）"""
+    from PySide6.QtGui import QTextDocument
+
+    document = QTextDocument()
+    document.setHtml(tooltip)
+    return document.toPlainText()

@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from core.definitions import definitions_age_days
 from core.logger import CATEGORY_QUARANTINE, CATEGORY_REALTIME, CATEGORY_SCAN, CATEGORY_UPDATE
 from gui import icons
+from gui.plain_text import plain, plain_tooltip
 from gui.screens.base import BaseScreen, make_card, wrap_layout
 from gui.theme import COLOR_NG, COLOR_OK, COLOR_TEXT_MUTED, COLOR_WARN, set_accent, set_variant
 
@@ -72,7 +73,7 @@ class _StatusCard(QFrame):
         layout.setSpacing(4)
         title_label = QLabel(f"{title}:")
         title_label.setObjectName("cardText")
-        self.value_label = QLabel(value)
+        self.value_label = plain(QLabel(value))  # clamdの応答等を文字のまま表示する
         self.value_label.setObjectName("value_label")
         self.set_value(value)
         layout.addWidget(title_label)
@@ -310,7 +311,7 @@ class HomeScreen(BaseScreen):
             values = [entry.datetime.strftime("%Y-%m-%d %H:%M:%S"), entry.category, entry.message]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
-                item.setToolTip(entry.message)
+                item.setToolTip(plain_tooltip(entry.message))
                 self.activity_table.setItem(row, col, item)
 
     def _on_activity_clicked(self, row: int, _column: int) -> None:

@@ -57,6 +57,65 @@ def system_tool(name: str, system: str | None = None) -> str:
     return posixpath.join(_POSIX_SYSTEM_DIRS[0], name)
 
 
+def find_system_tool(name: str, system: str | None = None) -> str | None:
+    """OSのコマンドを決まった場所（system_toolと同じ）だけから探す。見つからなければNone。
+    昇格に使うpkexec等の有無の確認に使う（PATHは利用者が変えられるため使わない）"""
+    path = system_tool(name, system)
+    return path if os.path.isfile(path) else None
+
+
+def child_env(extra: dict[str, str] | None = None, system: str | None = None) -> dict[str, str] | None:
+    """外部コマンドに渡す環境変数（subprocessのenv）。Windows以外はNone（そのまま引き継ぐ）
+
+    Windowsではアプリは管理者権限で動くが、その環境変数には、昇格していない利用者が変えられる値
+    （利用者の環境変数）がそのまま入っている。外部コマンドが読み込むDLL・設定ファイルの場所を変えられないよう、
+    動作に必要な決まった変数だけを、環境変数ではなくAPIから得た値で渡す（extraは呼び出し側が追加する値）。
+    Linux等: アプリは一般ユーザーで動き、rootで動かすものはpkexecが環境変数を整理するため、引き継ぐ。
+    """
+    system = system or platform.system()
+    if system != "Windows":
+        return None
+    system_dir = windows_system_dir()
+    windows_dir = ntpath.dirname(system_dir)
+    env = {
+        "SystemRoot": windows_dir,
+        "windir": windows_dir,
+        "SystemDrive": ntpath.splitdrive(windows_dir)[0] or "C:",
+        "ComSpec": ntpath.join(system_dir, "cmd.exe"),
+        "PATH": ";".join([
+            system_dir,
+            windows_dir,
+            ntpath.join(system_dir, "Wbem"),
+            ntpath.join(system_dir, "WindowsPowerShell", "v1.0"),
+        ]),
+        "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        "TEMP": ntpath.join(windows_dir, "Temp"),
+        "TMP": ntpath.join(windows_dir, "Temp"),
+        "OS": "Windows_NT",
+        "PROCESSOR_ARCHITECTURE": platform.machine() or "AMD64",
+        "NUMBER_OF_PROCESSORS": str(os.cpu_count() or 1),
+    }
+    env.update(_windows_user_folders())
+    env.update(extra or {})
+    return env
+
+
+def _windows_user_folders() -> dict[str, str]:
+    """利用者のフォルダ（PowerShell等が使う）。環境変数ではなくAPI（SHGetFolderPathW）から得る"""
+    folders = {"USERPROFILE": 0x0028, "APPDATA": 0x001A, "LOCALAPPDATA": 0x001C}  # CSIDL_PROFILE等
+    result: dict[str, str] = {}
+    try:
+        import ctypes
+
+        for name, csidl in folders.items():
+            buffer = ctypes.create_unicode_buffer(260)
+            if ctypes.windll.shell32.SHGetFolderPathW(None, csidl, None, 0, buffer) == 0 and buffer.value:
+                result[name] = buffer.value
+    except (AttributeError, OSError):
+        pass  # Windows以外（テストでsystem="Windows"を指定した場合）
+    return result
+
+
 def windows_clamav_dirs() -> list[str]:
     """WindowsでClamAVのコマンドを探すフォルダ（clamdサービスの実行ファイルのフォルダ、Program Files\\ClamAV）"""
     dirs: list[str] = []
@@ -167,6 +226,10 @@ def validate_trusted_file(path: str, system: str | None = None) -> str:
     problems = []
     for target, is_dir in ((real, False), (os.path.dirname(real), True)):
         problems += _untrusted_writers(target, is_dir, system)
+    if system != "Windows":
+        # Linux等では、祖先のフォルダに書き込めれば、その下のフォルダの名前を変えて丸ごと差し替えられるため、
+        # /までのすべての祖先も確かめる（Windowsは、祖先のフォルダの権限だけでは子のフォルダの名前を変えられない）
+        problems += _posix_untrusted_ancestors(os.path.dirname(os.path.dirname(real)))
     if problems:
         raise UnsafeExecutablePathError(detail=f"{path}: " + "、".join(problems))
     return real
@@ -188,6 +251,17 @@ def _posix_untrusted_writers(path: str, is_dir: bool) -> list[str]:
     if info.st_mode & stat.S_IWOTH or group_writable:
         problems.append(f"{kind}にroot以外が書き込めます（{path}）")
     return problems
+
+
+def _posix_untrusted_ancestors(directory: str) -> list[str]:
+    """directoryから/までの各フォルダの問題（所有者がrootでない・root以外が書き込める）"""
+    problems = []
+    while True:
+        problems += _posix_untrusted_writers(directory, True)
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return problems
+        directory = parent
 
 
 def _windows_untrusted_writers(path: str, is_dir: bool) -> list[str]:

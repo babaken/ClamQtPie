@@ -23,7 +23,7 @@ def parse_clamd_db_date(text: str) -> datetime | None:
     try:
         hour, minute, second = (int(v) for v in parts[3].split(":"))
         return datetime(int(parts[4]), _MONTHS[parts[1]], int(parts[2]), hour, minute, second)
-    except ValueError:
+    except (ValueError, OverflowError):  # 範囲外の値（極端に大きな数など）も読めない日付として扱う
         return None
 
 

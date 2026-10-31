@@ -4,7 +4,10 @@ gui/screens/quarantine.py のサービス層結線に関するテスト
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
+from PySide6.QtCore import Qt
+
 from gui.screens.quarantine import QuarantineScreen
+from tests.conftest import tooltip_text
 
 
 @dataclass
@@ -116,7 +119,7 @@ def test_sha256_is_elided_with_full_tooltip_and_size_is_human_readable(qtbot):
     screen, _ = _screen_with(qtbot, [_rec(1)])
     sha_item = screen.quarantine_table.item(0, 4)
     assert sha_item.text() == "a" * 12 + "…"
-    assert sha_item.toolTip() == "a" * 64
+    assert tooltip_text(sha_item.toolTip()) == "a" * 64
     assert screen.quarantine_table.item(0, 3).text() == "2.0 KB"
 
 
@@ -133,13 +136,18 @@ def test_bulk_delete_only_quarantined_rows(qtbot, monkeypatch):
 def test_detail_shows_all_fields(qtbot, monkeypatch):
     screen, _ = _screen_with(qtbot, [_rec(1)])
     shown = []
-    monkeypatch.setattr(quarantine_module.QMessageBox, "information", lambda *a, **k: shown.append(a[2]))
+    monkeypatch.setattr(
+        quarantine_module.QMessageBox, "exec", lambda box: shown.append((box.text(), box.textFormat()))
+    )
     screen.quarantine_table.selectRow(0)
 
     screen.detail_button.click()
 
-    assert "a" * 64 in shown[0]
-    assert "uuid-1" in shown[0]
+    text, text_format = shown[0]
+    assert "a" * 64 in text
+    assert "uuid-1" in text
+    # 元のファイル名（<・>を含み得る）を、HTMLとして解釈させず文字のまま表示する
+    assert text_format == Qt.TextFormat.PlainText
 
 
 def test_period_filter(qtbot):

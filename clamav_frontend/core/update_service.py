@@ -27,7 +27,14 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from core.clamav_service import ClamAVService
 from core.exceptions import UnsafeExecutablePathError
-from core.exec_path import find_program, system_tool, validate_executable, windows_clamav_dirs
+from core.exec_path import (
+    child_env,
+    find_program,
+    find_system_tool,
+    system_tool,
+    validate_executable,
+    windows_clamav_dirs,
+)
 from core.logger import CATEGORY_UPDATE, log_event
 from db.database import DatabaseService
 from db.models import UpdateHistory
@@ -139,6 +146,8 @@ class UpdateService:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                # Windowsでは管理者権限のfreshclamに、利用者が変えられる環境変数を引き継がない
+                env=child_env(system=self._system),
             )
         except OSError as exc:
             return self._fail(before_version, f"{_FRESHCLAM_NOT_FOUND_MESSAGE} ({exc})")
@@ -212,7 +221,8 @@ class UpdateService:
         log_args = [_FRESHCLAM_LOG_OVERRIDE] if service_active else []
         if not self._is_linux_user():
             return [self._trusted_freshclam(), *log_args], ""  # アプリ自体がrootで動いている
-        pkexec = self._which("pkexec")
+        # 昇格に使うpkexecは、PATH（利用者が変えられる）からは探さず決まった場所だけを見る
+        pkexec = find_system_tool("pkexec", self._system)
         if pkexec is None:
             return [self.freshclam_path, *log_args], ""  # 失敗時の詳細でサービスの有効化を案内する
         # pkexecは実行ファイルのフルパスが必要。rootで実行するため、root以外が書き換えられる場所のものは実行しない
