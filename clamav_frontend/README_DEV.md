@@ -943,3 +943,9 @@ Linux配布版がWaylandのデスクトップで起動しない不具合（v0.9.
 - Linux（実機のデスクトップ、一般ユーザーで起動）: 起動（監視方式は clamonacc）、pkexec での定義の手動更新とリアルタイム監視の開始、検知の隔離と notify-send の通知、カスタムスキャンでの検知、監視の停止と終了後に clamonacc が残らないこと
 
 この確認で見つかった次の点は、v0.9.2 以降で対応する: notify-send の通知にアプリ名・アイコンが付かない、clamonacc のログが2回記録される、glibc 2.44 以降の環境では clamonacc がサブフォルダを監視できない（ClamAV Issue #1797）ことの案内、定義更新の結果の文言の画面とログの違い、終了時のログ行が無い。
+
+## 43. watchdog 7.0 への対応
+
+2026-10-31 に公開された watchdog 7.0.0 で、Windows のテスト（`test_realtime_manager.py` の 4 件）が CI で失敗した。7.0.0 の Windows の監視（`WindowsApiEmitter`／`DirectoryChangeReader.get_events(timeout)`）は、`timeout`（既定 1 秒）の間に新しいイベントが来なくなるまで待ってからまとめて渡すため、ファイルの変更から検知まで約 1 秒遅れていた（6.0.0 では即座に届く。イベントは失われない）。テストがそれより短い時間しか待たないため失敗していた。Linux（inotify）では差が出ない。
+
+`RealtimeManager` で `Observer(timeout=0.1)`（`_OBSERVER_TIMEOUT_SEC`）にして、7.0.0 でも約 0.1 秒で届くようにした。6 系では待ちの間隔が変わるだけで、届くまでの時間は変わらない。版は固定しない（`watchdog>=4.0` のまま）。確認: watchdog 6.0.0・7.0.0 の両方で、Windows・WSL の全テスト成功。v0.9.1 の配布版は 6.0.0 でビルドしている。

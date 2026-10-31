@@ -33,6 +33,10 @@ from PySide6.QtCore import QObject, Signal
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+#: watchdogがイベントを待つ時間（秒）。watchdog 7.0のWindowsの監視は、この時間だけ新しいイベントが来なくなるまで
+#: 待ってからまとめて渡すため、既定の1秒では検知が1秒遅れる。短くしても、6系では待ちの間隔が変わるだけ
+_OBSERVER_TIMEOUT_SEC = 0.1
+
 from core.clamav_service import ERROR_REASON_SIZE_LIMIT, ClamAVService, error_reason
 from core.config_model import RealtimeConfig
 from core.exclude_service import ExcludeService, is_under_any_folder
@@ -199,7 +203,7 @@ class RealtimeManager(QObject):
         )
 
         handler = _EventHandler(self._exclude_service, self._debounce, self._extra_exclude_dirs)
-        self._observer = Observer()
+        self._observer = Observer(timeout=_OBSERVER_TIMEOUT_SEC)
         for target in targets:
             self._schedule_path(target, handler)
         self._observer.start()
