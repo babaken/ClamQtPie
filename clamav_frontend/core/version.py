@@ -14,7 +14,7 @@ APP_NAME = "ClamQtPie"
 APP_SUBTITLE = "ClamAV フロントエンド"
 APP_POWERED_BY = "Powered by ClamAV"
 #: 配布物の版。build_release.pyの--versionの既定値で、異なる値を指定するとビルドを中止する
-APP_VERSION = "0.9.1"
+APP_VERSION = "0.9.2"
 
 #: OSに登録する識別子（キーリングのサービス名・自動起動のレジストリ値・トースト通知の差出人・ミューテックス）
 APP_ID = "ClamQtPie"

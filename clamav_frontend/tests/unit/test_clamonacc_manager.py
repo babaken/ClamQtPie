@@ -593,6 +593,67 @@ def test_supervisor_script_streams_log_and_writes_lists():
     assert out.splitlines()[-1].startswith("__CLAMONACC_EXIT__n1 ")
 
 
+
+@requires_posix_sh
+def test_supervisor_script_sends_each_log_line_once():
+    # clamonaccが画面とログの両方に書いても、アプリには1回だけ届くこと
+    child = (
+        'for a; do case "$a" in --log=*) log=${a#--log=};; esac; done; '
+        'echo "/w/x: Fake-Signature FOUND"; echo "/w/x: Fake-Signature FOUND" >> "$log"; exec sleep 30'
+    )
+    process = subprocess.Popen(
+        [shutil.which("sh"), "-c", _SUPERVISOR_SCRIPT, "supervisor", "n1", "0", "0", "sh", "-c", child, "child"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout.readline().rstrip("\n") == "/w/x: Fake-Signature FOUND"
+    finally:
+        process.stdin.close()
+        out, _ = process.communicate(timeout=10)
+    assert "FOUND" not in out
+    assert out.splitlines()[-1].startswith("__CLAMONACC_EXIT__n1 ")
+
+
+@requires_posix_sh
+def test_supervisor_script_shows_output_when_log_stays_empty():
+    # ログを開く前に終わったclamonaccのエラーも、原因が分かるようにアプリへ届くこと
+    process = subprocess.Popen(
+        [shutil.which("sh"), "-c", _SUPERVISOR_SCRIPT, "supervisor", "n1", "0", "0",
+         "sh", "-c", 'echo "ERROR: early failure" >&2; exit 2', "child"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        lines = [process.stdout.readline().rstrip("\n") for _ in range(2)]
+        assert lines == ["ERROR: early failure", "__CLAMONACC_EXIT__n1 2"]
+    finally:
+        process.stdin.close()
+        process.wait(timeout=10)
+
+
+@requires_posix_sh
+def test_supervisor_script_shows_lines_written_only_to_screen():
+    # ログに書かれず画面にだけ出た行（停止の行など）も、終了時にアプリへ届くこと
+    child = (
+        'for a; do case "$a" in --log=*) log=${a#--log=};; esac; done; '
+        'echo "ClamInotif: stopped"; echo "ClamInotif: stopped" >> "$log"; echo "Clamonacc: stopped"; exit 0'
+    )
+    process = subprocess.Popen(
+        [shutil.which("sh"), "-c", _SUPERVISOR_SCRIPT, "supervisor", "n1", "0", "0", "sh", "-c", child, "child"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        lines = [process.stdout.readline().rstrip("\n") for _ in range(3)]
+        assert lines == ["ClamInotif: stopped", "Clamonacc: stopped", "__CLAMONACC_EXIT__n1 0"]
+    finally:
+        process.stdin.close()
+        process.wait(timeout=10)
+
 @requires_posix_sh
 def test_supervisor_script_reports_child_exit_code():
     process = subprocess.Popen(

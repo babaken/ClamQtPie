@@ -376,6 +376,21 @@ def test_notify_send_text_is_escaped_so_markup_is_shown_literally(tmp_path):
     assert args[2] == '/tmp/&lt;a href="http://x"&gt;a&lt;/a&gt;&amp;b.txt: Eicar'
 
 
+
+def test_notify_send_shows_app_name_and_icon(tmp_path):
+    # 通知の差出人がClamQtPieと分かるよう、アプリ名とアイコンを付けること
+    from core.version import APP_NAME
+
+    config_service = ConfigService(tmp_path / "config.json")
+    config_service.load()
+    service = NotificationService(config_service, icon_path="/opt/clamqtpie/icons/app.png")
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+        service._send_linux_notify_send("検知", "/tmp/a.txt: Eicar")
+    args = mock_run.call_args[0][0]
+    assert f"--app-name={APP_NAME}" in args
+    assert "--icon=/opt/clamqtpie/icons/app.png" in args
+
 def test_smtp_without_encryption_does_not_send_password(tmp_path):
     # 暗号化しない接続では、パスワードを平文で送らないよう認証しない（送信自体は行う）
     service, config_service = _service_for(tmp_path)

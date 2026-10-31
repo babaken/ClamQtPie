@@ -187,9 +187,10 @@ pip install -r requirements.txt
 
 python app.py                     # 起動
 python -m pytest -q               # テスト（GUI テストはヘッドレスで実行）
-python build_release.py --version 0.9.1   # PyInstaller でビルドし、dist/ に Zip を作成
+python build_release.py --version 0.9.2   # PyInstaller でビルドし、dist/ に Zip を作成
 ```
 
+- リポジトリ直下の `scripts/run_ClamQtPie.bat`（Windows）・`scripts/run_ClamQtPie.sh`（Linux）で、どこからでも `clamav_frontend/.venv` の Python でアプリを起動できます（Linux で venv が別の場所にあるときは `CLAMQTPIE_PYTHON` に Python のパスを指定）。Windows で管理者として動かすときは、`.bat` を右クリックして「管理者として実行」を選びます
 - テストは `tests/` 以下にあり、clamd は偽のサーバー（`FakeClamdServer`）で代用します。実際の clamd があれば、EICAR を使った結合テストも実行されます
 - Windows Defender が有効な環境で EICAR のテストも実行する場合は、`clamav_frontend\.pytest_eicar` を Defender の除外に追加し、`python -m pytest --basetemp=.pytest_eicar` で実行します
 - Linux で実際の clamonacc を使う結合テスト: `sudo QT_QPA_PLATFORM=offscreen <venv>/bin/python -m pytest tests/integration/test_real_clamonacc.py`
@@ -208,6 +209,7 @@ ClamQtPie/
 │   ├── scripts/          アイコン生成、性能計測スクリプト
 │   ├── tests/            unit / integration テスト
 │   └── README_DEV.md     フェーズごとの実装記録・設計判断・発見した不具合
+├── scripts/              開発環境からの起動スクリプト
 └── docs/                 要件定義書・設計書・テスト仕様書（日本語）
 ```
 
