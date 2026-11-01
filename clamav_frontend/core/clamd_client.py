@@ -9,6 +9,7 @@ ClamdClient — clamdソケット通信の低レベルプロトコル層
 """
 from __future__ import annotations
 
+import ipaddress
 import platform
 import re
 import socket
@@ -47,6 +48,20 @@ class ScanResult:
     path: str
     status: ScanStatus
     detail: str = ""
+
+
+def _is_loopback(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _connect_without_timeout(host: str) -> bool:
+    """TCP の接続にタイムアウトを付けないか（Windows で、接続先がこのPC 自身のときだけ）"""
+    return platform.system() == "Windows" and _is_loopback(host)
 
 
 class ClamdClient:
@@ -106,7 +121,13 @@ class ClamdClient:
                 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 sock.settimeout(self.config.connect_timeout_sec)
                 sock.connect(self.config.unix_socket_path)
+            elif _connect_without_timeout(self.config.tcp_host):
+                # Windows でこのPC 自身へつなぐときは、タイムアウトを付けずに接続し、つないだ後で設定する。
+                # タイムアウト付きの接続は1回ごとに数倍の時間がかかり、1ファイルに1回接続するスキャンが遅くなる。
+                # つながらないとき（clamd の停止）は、どちらでも Windows が約2秒で諦めるため、待ち時間は変わらない
+                sock = socket.create_connection((self.config.tcp_host, self.config.tcp_port))
             else:
+                # 別のマシンへは従来どおり（タイムアウトを付けないと、届かないアドレスで約21秒待つ）
                 sock = socket.create_connection(
                     (self.config.tcp_host, self.config.tcp_port),
                     timeout=self.config.connect_timeout_sec,
