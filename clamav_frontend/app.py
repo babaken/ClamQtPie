@@ -509,11 +509,38 @@ def main() -> int:
     if not config.general.start_minimized:
         window.show()
 
+    # Web API（サービス化・Web API設計書。段階12-1: 従来のアプリの中で動かす。既定はOFFで、config.api.enabledで有効にする）
+    # OFFのときはFastAPI・uvicornを読み込まない（起動時間を延ばさない）
+    api_server = None
+    if config.api.enabled:
+        from api.app import create_app as create_api_app
+        from api.context import ApiContext
+        from api.server import start_api_server
+
+        api_context = ApiContext(
+            config_service=config_service,
+            clamav_service=clamav_service,
+            realtime_manager=realtime_manager,
+            scan_dispatcher=scan_dispatcher,
+            update_service=update_service,
+            update_dispatcher=update_dispatcher,
+            scheduler_service=scheduler_service,
+            quarantine_service=quarantine_service,
+            exclude_service=exclude_service,
+            watch_target_service=watch_target_service,
+            log_reader_service=log_reader_service,
+        )
+        api_server = start_api_server(
+            config.api, lambda tokens: create_api_app(tokens, api_context), _APP_DIR
+        )
+
     logger.info("アプリ起動シーケンス完了")
 
     exit_code = app.exec()
 
     logger.info("アプリ終了シーケンス開始")
+    if api_server is not None:
+        api_server.stop()
     if realtime_manager.is_running:
         realtime_manager.stop()
     scheduler_service.shutdown()

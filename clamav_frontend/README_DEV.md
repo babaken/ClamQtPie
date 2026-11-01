@@ -965,3 +965,28 @@ Linux配布版がWaylandのデスクトップで起動しない不具合（v0.9.
 §42・§43 の修正と開発環境からの起動スクリプト（リポジトリ直下の `scripts/`）を v0.9.2 として公開する。`core/version.py`の`APP_VERSION`、`version_info.txt`、READMEと`build_release.py`のビルド例を0.9.2にそろえた。
 
 確認: 全テスト（Windows 11 / WSL2 Ubuntu / Linux 実機）成功。Linux 実機（glibc 2.44、watchdog 7.0.0）で、通知の差出人とアイコン、clamonacc のログが1回ずつであること、停止の行、定義更新の履歴の文言、watchdog 方式での検知、終了ログと終了確認の文言を確認した。
+
+## 45. 段階 12-1: Web API（読み取り）
+
+サービス化・Web API設計書の段階 12-1。従来のアプリ（`app.py`）の中で内部 API を動かし、curl 等で読めるようにした。既定は OFF で、`config.json` の `"api": {"enabled": true}` のときだけ待ち受ける（OFF のときは FastAPI・uvicorn を読み込まない）。
+
+構成（`api/`）:
+- `app.py`: `create_app(tokens, context)`。ルーターは `/api/v1` の下。`/docs`・`/redoc`・`/openapi.json` は作らない
+- `errors.py`: `AppError` を `{"error": {code, message, detail}}` で返す。状態コードは例外の種類で決める（401 E8101、403 E8102/E8103/E8108、404 E3003、409 E8104/E4004、429 E8106、400 検証エラー、503 E1xxx、500 それ以外）。500 は detail・例外の文字列を応答に含めずログにだけ残す。入力の検証エラーは 400（E8100）で、どの項目かだけを返し、入力された値は返さない
+- `server.py`: 127.0.0.1 だけで待ち受けるソケットを自分で作って uvicorn に渡し、専用のスレッドで動かす。Windows は `SO_EXCLUSIVEADDRUSE`。サーバー名を名乗らず（`server_header=False`）、`X-Forwarded-For` 等で接続元を書き換えさせない（`proxy_headers=False`）。ポートを使えなくてもアプリは続ける
+- `auth.py`: user・admin の Bearer トークン（待ち受けを始めるたびに `secrets.token_urlsafe(32)`、`hmac.compare_digest`）。トークンファイルは `api_tokens/`（アプリのフォルダ。コードの `api/` と混ざらない名前）に、本人（Windows は加えて SYSTEM・Administrators）だけが読める権限で書き出し、待ち受けを止めたら消す。フォルダがリンクなら書き出さない。すべての要求で、接続元が 127.0.0.1／::1、Host が 127.0.0.1／localhost とこのポート、状態を変えるメソッドでは Origin・Referer（付いていれば）がこのPC のものであることを確かめる
+- `bridge.py`: `QtInvoker`（任意のスレッドから処理をメインスレッドで実行させる）、`EventHub`（イベントの配信。連番・直近 1,000 件・追いつかない購読者は切り離す）。12-2 の状態を変える API・SSE の土台で、12-1 ではまだ使わない
+- `routes/read.py`: `/status`、`/quarantine`、`/excludes`、`/realtime`、`/realtime/targets`、`/schedules`、`/updates/history`、`/logs`、`/logs/export.csv`（すべて user 以上。一覧は `?limit=` 既定 100・最大 1000、`?offset=`）
+
+設計書と異なる点・決めた点:
+- トークンファイルの置き場所は、サービス化（12-3）まではアプリのフォルダの `api_tokens/`。読めるのは本人だけ（設計書の `ClamQtPie Users` グループに読ませる形は 12-3 で行う）
+- Host の検査に失敗したときは 400（3.1節に合わせた。4.2節の表は 403）。接続元・Origin の失敗は 403
+- 状態を変えるメソッドの Origin・Referer は、付いていない要求（GUI・curl）は通す。付いていてこのPC 以外なら拒否する
+- `/status` は `clamd.endpoint`・`clamd.verified`（接続先の確認、9.5節）と `update.next_run` を返さない（それぞれ未実装・12-2 以降）
+- `/updates/current`（ジョブ）は 12-2
+- 500 になる `AppError` も detail を返さない（設計書は予期しない例外だけを明記）
+- ログの時刻はこのPC のローカル時刻にタイムゾーンを付けて返す
+
+依存: `fastapi`・`uvicorn`（テスト用に `httpx2`。Starlette 1.10 の TestClient は旧来の `httpx` を非推奨にした）。配布版は PyInstaller の標準のフック（`hook-uvicorn`）で取り込まれ、`ClamQtPie.spec` の変更は要らなかった。Zip は Windows 39.9→44.3 MB、Linux 97.7→102.0 MB。
+
+確認: 全テスト（Windows・WSL）成功。WSL で配布版をビルドし、API を有効にして起動して、トークンファイルの権限（700/600）、`/version`・`/status`・`/logs`・CSV、トークンなしの 401、Host 違いの 400、`/docs` の 404、127.0.0.1 だけで待ち受けることを curl で確認した。

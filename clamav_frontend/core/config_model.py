@@ -94,6 +94,14 @@ class LoggingConfig:
 
 
 @dataclass
+class ApiConfig:
+    """Web API（サービス化・Web API設計書3.1節の内部API）。段階12-3までは従来のアプリの中で動かすため既定はOFF"""
+
+    enabled: bool = False
+    port: int = 8765  # 待ち受けるのは127.0.0.1だけ（変更不可）
+
+
+@dataclass
 class ConfigModel:
     schema_version: int = SCHEMA_VERSION
     general: GeneralConfig = field(default_factory=GeneralConfig)
@@ -103,6 +111,7 @@ class ConfigModel:
     notification: NotificationConfig = field(default_factory=NotificationConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    api: ApiConfig = field(default_factory=ApiConfig)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -120,6 +129,7 @@ class ConfigModel:
         notification = NotificationConfig(**_filtered(data.get("notification", {}), NotificationConfig))
         update = UpdateConfig(**_filtered(data.get("update", {}), UpdateConfig))
         logging_cfg = LoggingConfig(**_filtered(data.get("logging", {}), LoggingConfig))
+        api = ApiConfig(**_filtered(data.get("api", {}), ApiConfig))
 
         model = cls(
             schema_version=data.get("schema_version", SCHEMA_VERSION),
@@ -130,6 +140,7 @@ class ConfigModel:
             notification=notification,
             update=update,
             logging=logging_cfg,
+            api=api,
         )
         return model
 
@@ -208,5 +219,14 @@ def validate_and_fix(model: ConfigModel, warn) -> ConfigModel:
             f"({model.realtime.windows_debounce_sec})。既定値2.0へ補正します。"
         )
         model.realtime.windows_debounce_sec = 2.0
+
+    if not isinstance(model.api.enabled, bool):
+        warn(f"api.enabled が不正な値です ({model.api.enabled!r})。falseへ自動補正します。")
+        model.api.enabled = False
+
+    # 1024未満は特権ポート。bool（intの派生）は値として扱わない
+    if isinstance(model.api.port, bool) or not isinstance(model.api.port, int) or not (1024 <= model.api.port <= 65535):
+        warn(f"api.port が範囲外です ({model.api.port!r})。既定値8765へ補正します。")
+        model.api.port = 8765
 
     return model

@@ -240,3 +240,57 @@ class DefinitionUpdateError(ProcessError):
 
     default_code = "E8004"
     default_message = "定義データベースの更新に失敗しました"
+
+
+# ---------------------------------------------------------------------------
+# E8100番台: Web API（サービス化・Web API設計書 4.2節）
+# ---------------------------------------------------------------------------
+class ApiError(AppError):
+    default_code = "E8100"
+    default_message = "API の処理でエラーが発生しました"
+
+
+class ApiAuthError(ApiError):
+    default_code = "E8101"
+    default_message = "認証が必要です"
+
+
+class ApiForbiddenError(ApiError):
+    default_code = "E8102"
+    default_message = "この操作には管理者の権限が必要です"
+
+
+class ApiRequestRejectedError(ApiError):
+    """CSRF・Origin・Host・接続元の検査で拒否した"""
+
+    default_code = "E8103"
+    default_message = "不正なリクエストのため拒否しました"
+
+
+class ApiConflictError(ApiError):
+    default_code = "E8104"
+    default_message = "別の処理を実行中のため受け付けられません"
+
+
+class ServiceUnavailableError(ApiError):
+    """トレイGUI側で使う（サービスに接続できない、接続先がサービスでない）"""
+
+    default_code = "E8105"
+    default_message = "ClamQtPie サービスに接続できません"
+
+
+class ApiLoginLockedError(ApiError):
+    default_code = "E8106"
+    default_message = "ログインの失敗が続いたため、しばらく時間をおいてください"
+
+
+class ServiceVersionMismatchError(ApiError):
+    """トレイGUI側で使う"""
+
+    default_code = "E8107"
+    default_message = "サービスとトレイGUI の版数が一致しません。再インストールしてください"
+
+
+class ApiReauthRequiredError(ApiError):
+    default_code = "E8108"
+    default_message = "この操作の前に、確認コード（またはパスワード）を入力してください"
