@@ -93,24 +93,35 @@ _FOUND_RE = re.compile(r"(?P<path>(?:[A-Za-z]:)?[\\/].*): (?P<virus>\S+) FOUND\s
 #: - 非対話シェルでは「&」で起動したコマンドの標準入力が/dev/nullになるため、元の標準入力をfd3へ複製してから
 #:   監視用サブシェルに渡す。アプリが標準入力を閉じるとclamonaccを停止する
 #: - 終了マーカーには起動ごとの識別子を付ける（clamonaccの出力に含まれるファイル名で偽装されないように）
+#: - 一時フォルダは最後に消す。trap EXIT は使わない（bash は EXIT の trap があると SIGTERM の受け取り処理を
+#:   置き、「&」で起動した子にも exec までその処理が残る。その間に届いた停止の合図が失われ、
+#:   clamonaccが止まらずに残ることがあった。Arch Linux実機で発見）
 _SUPERVISOR_SCRIPT = (
     'exec 3<&0; nonce=$1; shift; '
     'd=$(mktemp -d /tmp/clamqtpie-onacc.XXXXXXXX) || { echo "__CLAMONACC_EXIT__$nonce 125"; exit 125; }; '
-    'trap \'rm -rf "$d"\' EXIT; '
     'n=$1; shift; : > "$d/watch-list"; '
     'while [ "$n" -gt 0 ]; do printf "%s\\n" "$1" >> "$d/watch-list"; shift; n=$((n-1)); done; '
     'n=$1; shift; : > "$d/exclude-list"; '
     'while [ "$n" -gt 0 ]; do printf "%s\\n" "$1" >> "$d/exclude-list"; shift; n=$((n-1)); done; '
-    ': > "$d/clamonacc.log"; '
+    ': > "$d/clamonacc.log"; : > "$d/clamonacc.out"; '
     'tail -n +1 -F "$d/clamonacc.log" 2>/dev/null & tailpid=$!; '
     '"$@" --log="$d/clamonacc.log" --watch-list="$d/watch-list" --exclude-list="$d/exclude-list" '
     '> "$d/clamonacc.out" 2>&1 & pid=$!; '
     '( read _unused <&3; kill "$pid" 2>/dev/null ) & '
     'wait "$pid"; code=$?; sleep 1; kill "$tailpid" 2>/dev/null; '
     'grep -vxFf "$d/clamonacc.log" "$d/clamonacc.out"; '
-    'echo "__CLAMONACC_EXIT__$nonce $code"'
+    'rm -rf "$d"; echo "__CLAMONACC_EXIT__$nonce $code"'
 )
 _EXIT_MARKER = "__CLAMONACC_EXIT__"
+
+#: 監視を始められなかった・止まった理由（ClamonaccError.reason。Web API の realtime.error で知らせる）
+REASON_NOT_FOUND = "not_found"  # clamonacc が見つからない
+REASON_CONFIG = "config"  # clamd.conf の前提の設定が足りない
+REASON_START_FAILED = "start_failed"  # 起動できなかった
+REASON_AUTH_CANCELLED = "auth_cancelled"  # 管理者の認証をキャンセルした・失敗した
+REASON_MONITORING_FAILED = "monitoring_failed"  # 監視の設定に失敗した
+REASON_EXITED = "exited"  # clamonacc が終了した
+REASON_OTHER = "other"
 
 #: pkexecの認証キャンセル・認証失敗時の終了コード
 _PKEXEC_AUTH_FAILED_CODES = (126, 127)
@@ -198,9 +209,10 @@ def _has_line_break(text: str) -> bool:
 class ClamonaccRealtimeManager(QObject):
     """RealtimeManager（watchdog実装）と同じインターフェースを持つclamonacc実装"""
 
-    detected = Signal(str, str)  # path, virus_name（検知した時点。隔離の前）
-    detection_handled = Signal(str, str, bool)  # path, virus_name, 隔離できたか（検知時アクションの後）
-    watch_target_lost = Signal(str)  # path
+    # パスは object で渡す（str で渡すと、UTF-8 にできない名前の文字が Qt の文字列への変換で消える）
+    detected = Signal(object, str)  # path, virus_name（検知した時点。隔離の前）
+    detection_handled = Signal(object, str, bool)  # path, virus_name, 隔離できたか（検知時アクションの後）
+    watch_target_lost = Signal(object)  # path
     scan_error = Signal(object)  # AppError
 
     mode_name = "clamonacc"
@@ -276,7 +288,7 @@ class ClamonaccRealtimeManager(QObject):
 
         clamonacc = find_clamonacc(self.config, self._which)
         if clamonacc is None:
-            self._emit_error(f"clamonaccが見つかりません ({self.config.clamonacc_path})")
+            self._emit_error(f"clamonaccが見つかりません ({self.config.clamonacc_path})", REASON_NOT_FOUND)
             return False
         # clamonaccとその設定ファイルはrootで実行・読み込むため、root以外が書き換えられる場所のものは使わない
         try:
@@ -292,7 +304,7 @@ class ClamonaccRealtimeManager(QObject):
         self._clamd_conf = load_clamd_conf(self.config.clamonacc_config_file, self._clamd_conf_candidates)
         problem = self._check_clamd_conf(self._clamd_conf)
         if problem:
-            self._emit_error(problem)
+            self._emit_error(problem, REASON_CONFIG)
             return False
         targets, rejected = self._split_unwatchable(targets, self._clamd_conf)
         if not targets:
@@ -312,11 +324,13 @@ class ClamonaccRealtimeManager(QObject):
                 stderr=subprocess.STDOUT,
                 text=True,
                 encoding="utf-8",
-                errors="replace",
+                # 正しくない UTF-8 の名前（clamonacc がそのままのバイトで書く）を、置き換え文字にせず元のバイトとして
+                # 保つ（surrogateescape の文字になり、検査し直し・隔離ができる。スキャンのパスと同じ形）
+                errors="surrogateescape",
             )
         except OSError as exc:
             self._process = None
-            self._emit_error(f"clamonaccの起動に失敗しました: {exc}")
+            self._emit_error(f"clamonaccの起動に失敗しました: {exc}", REASON_START_FAILED)
             return False
 
         self._stopping = False
@@ -530,7 +544,7 @@ class ClamonaccRealtimeManager(QObject):
                 process.stdin.close()  # rootシェルがclamonaccを停止する
         except OSError:
             pass
-        self._emit_error(detail)
+        self._emit_error(detail, REASON_MONITORING_FAILED)
 
     def _watch_process_output(self) -> None:
         """rootシェルの出力を監視し、clamonaccの終了（異常終了・認証キャンセル）を検出する"""
@@ -557,10 +571,13 @@ class ClamonaccRealtimeManager(QObject):
             exit_code = process.wait()
             if exit_code in _PKEXEC_AUTH_FAILED_CODES:
                 detail = "管理者認証がキャンセルされたか、失敗しました"
+                reason = REASON_AUTH_CANCELLED
             else:
                 detail = f"終了コード {exit_code}"
+                reason = REASON_EXITED
         else:
             detail = f"clamonaccが終了しました（終了コード {exit_code}）"
+            reason = REASON_EXITED
 
         self._exited.set()
         if self._stopping:
@@ -577,7 +594,7 @@ class ClamonaccRealtimeManager(QObject):
         except OSError:
             pass
         self._stop_event.set()
-        self._emit_error(detail)
+        self._emit_error(detail, reason)
 
     # -- 検知時アクション（watchdog実装の6.3節と同じ） -----------------------
     def _handle_detection(self, path: str, virus_name: str) -> None:
@@ -620,7 +637,7 @@ class ClamonaccRealtimeManager(QObject):
                 self._quarantine_service.quarantine(path, virus_name)
                 quarantined = True
             except Exception as exc:  # noqa: BLE001 - GUI通知のため広く捕捉
-                logger.error(f"リアルタイム検知の自動隔離に失敗しました (detail: {exc})")
+                logger.error(f"リアルタイム検知の自動隔離に失敗しました: {path} (detail: {exc})")
         # 通知は隔離を試した後の実際の結果で送る（RealtimeManagerと同じ）
         self.detection_handled.emit(path, virus_name, quarantined)
 
@@ -658,7 +675,8 @@ class ClamonaccRealtimeManager(QObject):
         logger.warning(f"clamonaccが検知したファイルを検査し直せませんでした: {path} ({detail})")
         return "unverified", virus_name
 
-    def _emit_error(self, detail: str) -> None:
+    def _emit_error(self, detail: str, reason: str = REASON_OTHER) -> None:
         error = ClamonaccError(detail=detail)
+        error.reason = reason  # Web API のイベント（realtime.error）で理由を知らせる（detail は返さない）
         logger.error(f"{error.message} (detail: {detail})", extra={"error_code": error.code})
         self.scan_error.emit(error)

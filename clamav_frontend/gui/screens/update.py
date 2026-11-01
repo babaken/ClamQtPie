@@ -132,10 +132,14 @@ class UpdateScreen(BaseScreen):
     def _on_update_now_clicked(self) -> None:
         if self._update_dispatcher is None or self._update_dispatcher.is_running:
             return
+        self.show_started_elsewhere()
+        self._update_dispatcher.start()
+
+    def show_started_elsewhere(self) -> None:
+        """実行中の表示にする（画面以外（Web API）から始めた更新でも使う。ログはシグナルで届く）"""
         self.log_area.clear()
         self.update_now_button.setEnabled(False)
         self.progress_bar.setVisible(True)
-        self._update_dispatcher.start()
 
     def _on_log_line(self, line: str) -> None:
         self.log_area.append(line)

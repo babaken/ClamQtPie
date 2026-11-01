@@ -201,3 +201,48 @@ def test_oversized_response_is_rejected(fake_clamd_server):
     fake_clamd_server.response_map["VERSION"] = "x" * (MAX_RESPONSE_BYTES + 1)
     with pytest.raises(ClamdProtocolError):
         _client_for(fake_clamd_server).get_version()
+
+
+# -- 接続の方法（Windows のスキャンが遅かった件） ---------------------------------------------
+@pytest.mark.parametrize("system,host,expect_timeout", [
+    ("Windows", "127.0.0.1", False),  # このPC 自身: タイムアウトを付けずに接続し、つないだ後で設定する
+    ("Windows", "::1", False),
+    ("Windows", "LocalHost", False),
+    ("Windows", "192.168.1.10", True),  # 別のマシン: 届かないときに長く待たないよう、従来どおり
+    ("Windows", "clamd.example", True),
+    ("Linux", "127.0.0.1", True),
+])
+def test_tcp_connect_timeout_depends_on_the_destination(monkeypatch, system, host, expect_timeout):
+    calls = []
+
+    class _Sock:
+        def settimeout(self, value):
+            calls.append(("settimeout", value))
+
+        def close(self):
+            pass
+
+    def create_connection(address, *args, **kwargs):
+        calls.append(("connect", "timeout" in kwargs or bool(args)))
+        return _Sock()
+
+    monkeypatch.setattr("core.clamd_client.platform.system", lambda: system)
+    monkeypatch.setattr("core.clamd_client.socket.create_connection", create_connection)
+    client = ClamdClient(ClamdConfig(connection_type="tcp", tcp_host=host, tcp_port=3310, read_timeout_sec=30))
+    client._connect()
+    assert calls[0] == ("connect", expect_timeout)
+    assert ("settimeout", 30) in calls  # どちらでも、つないだ後は読み取りのタイムアウトを設定する
+
+
+def test_windows_loopback_connection_still_fails_fast_when_clamd_is_stopped(monkeypatch):
+    # clamd が止まっているとき（ポートが閉じている）は、タイムアウトを付けなくても接続のエラーになる
+    import socket
+
+    monkeypatch.setattr("core.clamd_client.platform.system", lambda: "Windows")
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    port = closed.getsockname()[1]
+    closed.close()
+    client = ClamdClient(ClamdConfig(connection_type="tcp", tcp_host="127.0.0.1", tcp_port=port))
+    with pytest.raises(ClamdConnectionError):
+        client._connect()

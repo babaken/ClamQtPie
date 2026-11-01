@@ -15,9 +15,9 @@ from db.database import DatabaseService
 
 
 def _build_manager(
-    tmp_path, server, extra_exclude_dirs=None, **config_overrides
+    tmp_path, server, extra_exclude_dirs=None, db_dir=None, **config_overrides
 ) -> tuple[RealtimeManager, DatabaseService]:
-    db_service = DatabaseService(tmp_path / "app.db")
+    db_service = DatabaseService((db_dir or tmp_path) / "app.db")
     db_service.connect()
 
     clamd_config = ClamdConfig(connection_type="tcp", tcp_host=server.host, tcp_port=server.port)
@@ -327,11 +327,12 @@ def test_existing_unscannable_file_is_still_warned(fake_clamd_server, tmp_path, 
     db_service.close()
 
 
-def _quarantine_loop_scenario(fake_clamd_server, tmp_path, extra_exclude_dirs):
-    """監視対象（tmp_path）の中に隔離フォルダ（tmp_path/quarantine）がある状態で、感染ファイルを隔離する"""
+def _quarantine_loop_scenario(fake_clamd_server, tmp_path, extra_exclude_dirs, db_dir):
+    """監視対象（tmp_path）の中に隔離フォルダ（tmp_path/quarantine）がある状態で、感染ファイルを隔離する
+    （DB は監視対象の外に置く。監視対象の中のアプリのDBは、realtime_factory が除外する）"""
     fake_clamd_server.response_map["SCAN"] = "file: Eicar-Test-Signature FOUND"  # 何を検査しても検知
     manager, db_service, watch_target_service = _build_manager(
-        tmp_path, fake_clamd_server, extra_exclude_dirs=extra_exclude_dirs
+        tmp_path, fake_clamd_server, extra_exclude_dirs=extra_exclude_dirs, db_dir=db_dir
     )
     scanned = _spy_scans(manager)
     watch_target_service.add(str(tmp_path))
@@ -346,19 +347,20 @@ def _quarantine_loop_scenario(fake_clamd_server, tmp_path, extra_exclude_dirs):
     return scanned, records
 
 
-def test_app_dirs_are_not_scanned_so_quarantine_does_not_loop(fake_clamd_server, tmp_path, qtbot):
+def test_app_dirs_are_not_scanned_so_quarantine_does_not_loop(fake_clamd_server, tmp_path, tmp_path_factory, qtbot):
     # Linux実機で発見: 隔離フォルダへの移動（移動イベント）が検査され、隔離したファイルが再び検知されて
     # 隔離が無限に繰り返された（約2時間で7,500回）。アプリ自身のフォルダは検査しない
     quarantine_dir = tmp_path / "quarantine"
-    scanned, records = _quarantine_loop_scenario(fake_clamd_server, tmp_path, [quarantine_dir])
+    scanned, records = _quarantine_loop_scenario(
+        fake_clamd_server, tmp_path, [quarantine_dir], tmp_path_factory.mktemp("db"))
 
     assert len(records) == 1
     assert [p for p in scanned if str(quarantine_dir) in p] == []
 
 
-def test_quarantine_does_not_loop_even_without_app_dir_exclusion(fake_clamd_server, tmp_path, qtbot):
+def test_quarantine_does_not_loop_even_without_app_dir_exclusion(fake_clamd_server, tmp_path, tmp_path_factory, qtbot):
     # 二重の防止策: 除外の指定が無くても、隔離フォルダ内のファイルは隔離し直さない
-    scanned, records = _quarantine_loop_scenario(fake_clamd_server, tmp_path, None)
+    scanned, records = _quarantine_loop_scenario(fake_clamd_server, tmp_path, None, tmp_path_factory.mktemp("db"))
 
     assert len(records) == 1
 
@@ -387,3 +389,14 @@ def test_clamd_connection_error_is_reported_once_until_recovered():
     manager._scan_one("/tmp/file5")
     manager._scan_one("/tmp/file6")
     assert len(errors) == 2
+
+
+def test_app_db_inside_watched_folder_is_not_scanned(fake_clamd_server, tmp_path, qtbot):
+    # アプリのフォルダを監視したとき、DBに書くたび（隔離の記録など）にDBのファイル（WALの付随ファイル）が
+    # 検査・隔離されないこと（realtime_factory が渡す除外と同じもの）
+    db_files = [tmp_path / f"app.db{s}" for s in ("", "-wal", "-shm", "-journal")]
+    scanned, records = _quarantine_loop_scenario(
+        fake_clamd_server, tmp_path, [tmp_path / "quarantine", *db_files], None)
+
+    assert len(records) == 1
+    assert [p for p in scanned if "app.db" in p] == []

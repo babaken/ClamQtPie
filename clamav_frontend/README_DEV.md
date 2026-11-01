@@ -965,3 +965,181 @@ Linux配布版がWaylandのデスクトップで起動しない不具合（v0.9.
 §42・§43 の修正と開発環境からの起動スクリプト（リポジトリ直下の `scripts/`）を v0.9.2 として公開する。`core/version.py`の`APP_VERSION`、`version_info.txt`、READMEと`build_release.py`のビルド例を0.9.2にそろえた。
 
 確認: 全テスト（Windows 11 / WSL2 Ubuntu / Linux 実機）成功。Linux 実機（glibc 2.44、watchdog 7.0.0）で、通知の差出人とアイコン、clamonacc のログが1回ずつであること、停止の行、定義更新の履歴の文言、watchdog 方式での検知、終了ログと終了確認の文言を確認した。
+
+## 45. 段階 12-1: Web API（読み取り）
+
+サービス化・Web API設計書の段階 12-1。従来のアプリ（`app.py`）の中で内部 API を動かし、curl 等で読めるようにした。既定は OFF で、`config.json` の `"api": {"enabled": true}` のときだけ待ち受ける（OFF のときは FastAPI・uvicorn を読み込まない）。
+
+構成（`api/`）:
+- `app.py`: `create_app(tokens, context)`。ルーターは `/api/v1` の下。`/docs`・`/redoc`・`/openapi.json` は作らない
+- `errors.py`: `AppError` を `{"error": {code, message, detail}}` で返す。状態コードは例外の種類で決める（401 E8101、403 E8102/E8103/E8108、404 E3003、409 E8104/E4004、429 E8106、400 検証エラー、503 E1xxx、500 それ以外）。500 は detail・例外の文字列を応答に含めずログにだけ残す。入力の検証エラーは 400（E8100）で、どの項目かだけを返し、入力された値は返さない
+- `server.py`: 127.0.0.1 だけで待ち受けるソケットを自分で作って uvicorn に渡し、専用のスレッドで動かす。Windows は `SO_EXCLUSIVEADDRUSE`。サーバー名を名乗らず（`server_header=False`）、`X-Forwarded-For` 等で接続元を書き換えさせない（`proxy_headers=False`）。ポートを使えなくてもアプリは続ける
+- `auth.py`: user・admin の Bearer トークン（待ち受けを始めるたびに `secrets.token_urlsafe(32)`、`hmac.compare_digest`）。トークンファイルは `api_tokens/`（アプリのフォルダ。コードの `api/` と混ざらない名前）に、本人（Windows は加えて SYSTEM・Administrators）だけが読める権限で書き出し、待ち受けを止めたら消す。フォルダがリンクなら書き出さない。すべての要求で、接続元が 127.0.0.1／::1、Host が 127.0.0.1／localhost とこのポート、状態を変えるメソッドでは Origin・Referer（付いていれば）がこのPC のものであることを確かめる
+- `bridge.py`: `QtInvoker`（任意のスレッドから処理をメインスレッドで実行させる）、`EventHub`（イベントの配信。連番・直近 1,000 件・追いつかない購読者は切り離す）。12-2 の状態を変える API・SSE の土台で、12-1 ではまだ使わない
+- `routes/read.py`: `/status`、`/quarantine`、`/excludes`、`/realtime`、`/realtime/targets`、`/schedules`、`/updates/history`、`/logs`、`/logs/export.csv`（すべて user 以上。一覧は `?limit=` 既定 100・最大 1000、`?offset=`）
+
+設計書と異なる点・決めた点:
+- トークンファイルの置き場所は、サービス化（12-3）まではアプリのフォルダの `api_tokens/`。読めるのは本人だけ（設計書の `ClamQtPie Users` グループに読ませる形は 12-3 で行う）
+- Host の検査に失敗したときは 400（3.1節に合わせた。4.2節の表は 403）。接続元・Origin の失敗は 403
+- 状態を変えるメソッドの Origin・Referer は、付いていない要求（GUI・curl）は通す。付いていてこのPC 以外なら拒否する
+- `/status` は `clamd.endpoint`・`clamd.verified`（接続先の確認、9.5節）と `update.next_run` を返さない（それぞれ未実装・12-2 以降）
+- `/updates/current`（ジョブ）は 12-2
+- 500 になる `AppError` も detail を返さない（設計書は予期しない例外だけを明記）
+- ログの時刻はこのPC のローカル時刻にタイムゾーンを付けて返す
+
+依存: `fastapi`・`uvicorn`（テスト用に `httpx2`。Starlette 1.10 の TestClient は旧来の `httpx` を非推奨にした）。配布版は PyInstaller の標準のフック（`hook-uvicorn`）で取り込まれ、`ClamQtPie.spec` の変更は要らなかった。Zip は Windows 39.9→44.3 MB、Linux 97.7→102.0 MB。
+
+確認: 全テスト（Windows・WSL）成功。WSL で配布版をビルドし、API を有効にして起動して、トークンファイルの権限（700/600）、`/version`・`/status`・`/logs`・CSV、トークンなしの 401、Host 違いの 400、`/docs` の 404、127.0.0.1 だけで待ち受けることを curl で確認した。
+
+## 46. 段階 12-2a: Web API（状態を変える操作）
+
+サービス化・Web API設計書の段階 12-2 のうち、状態を変える API と SQLite の WAL 化。12-2 は大きいため 4 つに分けた（12-2a: 状態を変える API、12-2b: ジョブの API と SSE、12-2c: スキャン履歴、12-2d: 隔離の所有者の復帰と隔離ファイルの変換）。
+
+構成:
+- `api/actions.py`: 状態を変える処理。`QtInvoker` でメインスレッドに渡して実行する（実行中かどうかの判定もメインスレッドで行い、画面・API・スケジュールの同時操作の取り合いを防ぐ）。中身は画面の操作と同じにし、変えた後は `ApiContext.notify_changed` で `app.py` に知らせて画面を読み直させる。変えた内容は `Web API: …` としてログに残す（設定は値を残さず、変えた項目の名前だけ）
+- `api/routes/write.py`（すべて admin）:
+  - 隔離: `POST /quarantine/{id}/restore`（`{"overwrite": bool}`。元の場所にだけ復元する。同じ名前があり上書きしないなら 400 E3002）、`DELETE /quarantine/{id}`
+  - 除外: `POST /excludes`、`PATCH /excludes/{id}`、`DELETE /excludes/{id}`（ファイル・フォルダは絶対パス、拡張子は画面と同じく小文字・先頭に `.`、重複は 400）
+  - 監視: `PUT /realtime`（`{"enabled": bool}`。有効な監視対象が無ければ 400）、`POST/PATCH/DELETE /realtime/targets`（存在するフォルダを絶対パスで）
+  - スケジュール: `POST /schedules`、`PUT/PATCH/DELETE /schedules/{id}`、`POST /schedules/{id}/run`（202。スケジュール画面の「今すぐ実行」と同じく別のスレッドで実行。実行中なら 409）。スキャンの対象は絶対パス
+  - 設定: `PUT /config`（全体を置き換える）、`PUT/DELETE /config/smtp-password`、`POST /notifications/test-mail`
+  - clamd・診断・ログ: `POST /clamd/start`（202。試行中なら 409）、`POST /clamd/stop`（停止検知時の自動起動の抑止を含め、エンジン サービス画面と同じ）、`POST /diagnostics`（伏せ字にしたレポート）、`DELETE /logs`
+- `GET /config`（user）: API 自身の設定（`api`）を除き、SMTP のパスワードは `smtp.has_password` で有無だけ返す。Web API で変えられない項目を `protected` に並べる
+- 入力は余計な項目・型の違う値（`"true"`・`1` を真偽値として扱うなど）を受け付けない（400 E8100）
+- 見つからない除外・監視対象・スケジュールは 404 E8109（`ApiNotFoundError`、新設）。隔離データは従来どおり E3003
+- `db/database.py`: 接続ごとに `PRAGMA journal_mode=WAL`・`busy_timeout=5000`。WAL の付随ファイル（`-wal`・`-shm`）は SQLite が DB ファイルと同じ権限（POSIX は 0600）で作る
+- `api/server.py`: 待ち受けの停止をログに残す。uvicorn の警告・エラー（不正な HTTP の要求など）をアプリのログに書く（制御文字は見える形にする）
+
+設計書と異なる点・決めた点:
+- **Web API で変えられる設定は、設定画面で変えられる項目（と `update.stale_days`）に限る。** 設計書の保護された項目（実行ファイルの場所、clamd の接続先、サービス名）に加え、`clamd.tcp_port` も変えられない（ポートも接続先の一部のため。設計書の一覧に漏れていた）。画面に無い項目（タイムアウト・同時接続数など）と `general`（画面ごとの設定。12-3 で利用者ごとの GUI の設定に移す）も読み取りだけ。範囲外の値は読み込み時のように直さず 400 にし、項目の名前を返す
+- 設定は、現在の設定のオブジェクトをその場で書き換えてから保存する（各サービスは起動時に受け取った設定の部分を持ち続けているため。設定画面と同じ）
+- 復元・削除済みの隔離データへの復元・削除は 400
+- 隔離の「同じ名前がある」は `QuarantineRestoreConflictError`（E3002 のまま）で区別し、400 にする。ほかの復元の失敗は 500
+- スケジュールのスキャンの中止を admin に限ること（設計書 6.2）は、スキャンのジョブの API とあわせて 12-2b
+- `/schedules` の `wake` 列（スリープからの復帰）は 12-3
+
+見つけた不具合: WAL にすると、アプリのフォルダを監視したとき、DB に書くたび（隔離の記録など）に `app.db-wal` が変わって検査され、検知の扱いによっては隔離されてしまう（WSL のテストで発見。従来も `app.db` 自体が検査されていた）。watchdog 方式では、`realtime_factory` がアプリの DB のファイル（`app.db`・`-wal`・`-shm`・`-journal`）も検査から外すようにした（clamonacc の `--exclude-list` はフォルダを指定するもので、ファイルを渡すと監視の設定に失敗するため、clamonacc には渡さない）。
+
+確認: 全テスト（Windows・WSL）成功。WSL で実際のアプリ（ソースから、offscreen）を API を有効にして起動し、user での 403、除外・監視対象の追加、監視の ON/OFF、スケジュールの追加と今すぐ実行、設定の保存（`config.json` への反映）と保護された項目の拒否、診断を curl で確認した。DB が WAL になることも確認した。
+
+## 47. 段階 12-2b: Web API（ジョブとイベント配信）
+
+サービス化・Web API設計書 4.3節・5章・6.2節・6.7節。スキャンと定義の更新をジョブとして扱い、イベントを SSE で配る。
+
+構成:
+- `api/jobs.py`（`JobTracker`）: `ScanDispatcher`・`UpdateDispatcher` のシグナルからジョブ（`id`・`kind`・`label`・`source`（`gui`|`api`）・`state`（`running`→`finished`|`cancelled`|`failed`）・`started_at`・`finished_at`・`progress`・`error`）を作り、イベントを出す。画面・トレイから始めたものも記録する（両 dispatcher に開始のシグナル `started` を足した）。終わったジョブは種類ごとに直近 1 件
+- `api/events.py`: `realtime.detected`・`realtime.handled`・`realtime.target_lost`・`realtime.error`、`status`（ホーム画面の定期確認の結果から、変わったときだけ）、`config.changed`（画面・Web API のどちらで保存しても）
+- `api/routes/jobs.py`（すべて user）: `POST /scans`（202。`type`: `quick`|`full`|`custom`、`targets`、`include_subfolders`、`apply_exclude`。実行中は 409）、`GET /scans/current`、`POST /scans/current/cancel`、`POST /updates`（202。実行中は 409）、`GET /updates/current`、`GET /events`（`text/event-stream`。連番の `id`、`Last-Event-ID` より後を送り直す。15 秒ごとに空のコメント。同時の購読は 16 まで）
+- Web API から始めたスキャン・更新は、スキャン画面・定義更新画面も実行中の表示にする（`show_started_elsewhere`）
+- イベントに入れるファイル名・メッセージ・freshclam の出力は、制御文字を見える形にする
+- uvicorn は止めるとき、つながったままの購読を 1 秒で切る（`timeout_graceful_shutdown`）
+
+設計書と異なる点・決めた点:
+- クイックスキャンで `targets` を省いたときは、画面と同じ場所（`quick_scan_targets()`）を使う。アプリが利用者の権限で動く 12-2 までの扱いで、12-3 からは設定 `scan.quick_targets` に変える
+- スケジュールのスキャン・更新は dispatcher を通らない（APScheduler のスレッドで直接実行）ため、ジョブにならず、Web API から中止もできない。そのため「スケジュールから始めたスキャンの中止は admin」は 12-3（スケジュールの実行をジョブにまとめるとき）に行う。`schedule.finished` イベントも 12-3
+- `scan.activity` の内容は `{job_id, state, path, seconds}`（`ScanWorker.activity` のまま。`state`: `queued`|`stalled`|`scanning`）
+- `status` イベントは `GET /status` の一部（clamd の到達性、定義の古さ、監視、スキャン・更新の実行中とジョブの id）。全部が要るときは `GET /status` を読む
+- `scan.started`・`update.started` を追加した（ジョブの内容をそのまま送る）
+- `notification`・`notification.acked` は通知の保存（12-3）とあわせて行う
+- `PUT /realtime`（12-2a）の `{"running": true}` は「開始を受け付けた」の意味。clamonacc 方式では pkexec の認証の前に返り、認証のキャンセル・起動の失敗は後から `realtime.error` で、状態が戻ったことは `status` で届く（Linux 実機の確認で指摘。方式で応答の形を変えると使う側が分かりにくいため、200 のまま説明する）
+
+確認: 全テスト（Windows・WSL）成功。WSL で実際のアプリを API を有効にして起動し、`/events` を購読しながら `POST /scans`（custom）・`POST /updates` を呼び、ジョブが記録されて `scan.started`・`scan.progress`・`scan.finished`・`status`・`update.started` が届くことを確認した。
+
+## 48. 段階 12-2c: スキャン履歴
+
+サービス化・Web API設計書 6.2節。手動（画面・トレイ・Web API）とスケジュールのすべてのスキャンを、終了時に記録する。
+
+構成:
+- Alembic `0004_add_scan_history`: `scan_history`（`started_at`・`finished_at`・`source`（`gui`|`api`|`schedule`）・`scan_type`（`quick`|`full`|`custom`|`schedule`）・`label`・`targets`（JSON）・`scanned`・`detected`・`errors`・`errors_truncated`・`result`（`completed`|`cancelled`|`failed`）・`detail`）、`scan_history_detection`（`path`・`virus_name`・`action`（`quarantined`|`notified`））、`scan_history_error`（`path`・`reason`（`size_limit`|`permission`|`vanished`|`other`）・`detail`）
+- `core/scan_history_service.py`: `ScanHistoryService`（記録・一覧・詳細・保持期間を過ぎたものの削除）、`ScanHistoryCollector`（スキャン中の結果を集める。検査できなかったファイルは 1,000 件まで、超えた分は件数だけ）、`ScanHistoryRecorder`（`ScanDispatcher` のシグナルから手動のスキャンを記録）
+- `ScanDispatcher.start` に `source`・`scan_type` を足した（スキャン画面・Web API が渡す）
+- スケジュールのスキャン（`run_scheduled_scan`）は、成功・失敗（対象が無い、clamd に接続できない）とも記録する。検知の `action` は検知時アクションの結果
+- 起動時に `logging.retention_days` を過ぎた履歴を消す（SQLite の外部キーの連鎖削除は有効にしていないため、子の行も明示して消す）
+- Web API（user）: `GET /scans/history`（`?source=&since=&limit=&offset=`、新しい順）、`GET /scans/history/{id}`（`detections`・`error_files` を含む。無ければ 404 E8109）。`scan.finished` とジョブに `history_id` を付ける
+- `realtime.error` に `reason` を足した（`auth_cancelled`・`exited`・`monitoring_failed`・`start_failed`・`not_found`・`config`・`clamd_unavailable`・`target`・`unsafe_path`・`other`）。detail（clamonacc の出力の一部・パス）は送らない（Linux 実機の確認で指摘）
+
+見つけた不具合: 1ファイルのエラー（応答待ちのタイムアウトなど。スキャンは続く）でも、Web API のジョブを `failed` にしていた（12-2b）。clamd に接続できない・対象の列挙に失敗した、のときだけ失敗にする（`is_fatal_scan_error`）。履歴も同じ判定で、1ファイルのエラーは直前に検査を始めたファイルのエラーとして残す。
+
+設計書と異なる点・決めた点:
+- マイグレーションの番号は 0004（設計書の案では 0005。0004 の予定だった通知の保存（12-3）より先に作るため。12-3 の分は 0005 以降にする）
+- 詳細の検査できなかったファイルの一覧は `error_files`（件数の `errors` と名前が重ならないように）
+- 履歴の一覧の画面（トレイGUI のスキャン画面）は、GUI を API のクライアントにする 12-4 で作る
+
+確認: 全テスト（Windows・WSL）成功。WSL で実際のアプリから Web API でスキャンし、ジョブの `history_id`、`/scans/history`・`/scans/history/{id}` を確認した。
+
+## 49. 段階 12-2 の修正（Linux 実機の確認から）
+
+- **イベントの購読（SSE）がつながったままアプリを終了すると、ログに ERROR と Traceback が残り、終了が約 1 秒遅れていた**（PR #15 の確認で発見。12-2b から）。待ち受けを止めるとき、uvicorn が購読の処理を打ち切っていた（`timeout_graceful_shutdown`）。止める前に `EventHub.end_all()` で全部の購読に終わりの印（`END`）を送り、配信を自分で終わらせるようにした
+- Web API のカスタムスキャンの名前を、画面と同じ「カスタムスキャン」にした（従来は「手動スキャン」。履歴の label が経路で違っていた）
+- 名前の付け方の違い（変えない。互換のため）: スケジュールの `scan_type` は `scan`・`update`（ジョブの種類）、`POST /scans` の `type` は `quick`・`full`・`custom`（スキャンの範囲）、スキャン履歴の `scan_type` は `quick`・`full`・`custom`・`schedule`
+
+## 50. Windows のスキャンが遅かった件（clamd への接続の方法）
+
+Rust 化の事前検証（`feat/rust-poc`）で見つかった、Python 版の問題。`socket.create_connection(..., timeout=...)` は、Windows では1回の接続ごとに時間がかかる。スキャンは1ファイルに1回接続するため、件数が多いと大きく遅くなっていた。
+
+- Windows で接続先がこのPC 自身（127.0.0.1・::1・localhost。既定の接続先）のときは、タイムアウトを付けずに接続し、つないだ後で読み取りのタイムアウトを設定する（`core/clamd_client.py` の `_connect_without_timeout`）
+- 別のマシンへの接続と Linux は従来どおり（タイムアウトを付けないと、届かないアドレスで約 21 秒待つ。従来は 5 秒）
+
+測った値（Windows 11、本物の clamd、127.0.0.1:3310）:
+
+| 場面 | 修正前 | 修正後 |
+|---|---|---|
+| 接続だけ（中央値） | 0.90 ms | 0.11 ms |
+| 1ファイルの検査（2,000 件、2 回） | 18.5 ms・11.9 ms | 1.4 ms・3.6 ms |
+| clamd が止まっている（127.0.0.1） | 約 2.0 秒で失敗 | 約 2.0 秒で失敗（変わらない。Windows がループバックへの接続を数回やり直すため） |
+| clamd が止まっている（localhost） | 約 4.1 秒 | 約 4.1 秒（変わらない） |
+| 届かないアドレス（別のマシン） | 5.0 秒 | 5.0 秒（従来どおりの方法のまま） |
+
+1ファイルの検査は、もう一つの作業で PC の負荷が揺れていたため値がばらついたが、3〜13 倍速くなった。
+
+## 51. UTF-8 として正しくない名前のファイルの扱い
+
+Linux のファイル名は UTF-8 として正しくないバイト列でもよい。そうした名前のファイルがあると、TCP 接続（clamd にパスを送る `SCAN`）のスキャンが途中で止まり、画面も「スキャン中」のまま戻らなかった（Rust 化の事前検証で発見）。
+
+- clamd に送るパスは、OS のファイル名の元のバイト列のまま送る（`surrogateescape`）
+- それでも送れない名前（Windows の対になっていないサロゲート）は、アプリが開いて内容を送る（`INSTREAM`）方法で検査する（`ClamdPathEncodingError`）
+- スキャンの処理は、1ファイルの想定外の失敗でも止めず、そのファイルのエラーとして続ける
+- ログ・イベント・スキャン履歴などへの書き出しでは、こうした名前の文字（対になっていないサロゲート）を `\udcff` のような見える形にする（`visible_controls`。そのままではファイル・JSON・DB に書けない）
+
+- **パスを渡す Qt のシグナルは `object` にした**（`ScanWorker`・`ScanDispatcher` の `progress`・`file_scanned`・`activity`、リアルタイム監視の `detected`・`detection_handled`・`watch_target_lost`）。`Signal(str)` では、Qt の文字列に変わるときにこうした名前の文字が黙って消え、受け取った側（スキャン履歴・イベント・スキャン画面の一覧）で別のファイルの名前になっていた（Linux 実機の確認で発見。PySide6 6.12）
+- スキャン画面の一覧は見える形で表示し、隔離・無視には表示の文字ではなく、検査したファイルのパスそのものを使う（従来は表示の文字で隔離していたため、同じに見える別のファイルを隔離するおそれがあった）
+- 隔離の記録（DB）に書けない名前は、ファイルを動かす前に断る（E3001）
+- clamonacc の出力は `surrogateescape` で読む（`errors="replace"` では読んだ時点で名前が置き換え文字になり、検査し直せずに通知だけになっていた。Linux 実機の確認で発見）
+- notify-send に渡す文字はバックスラッシュを二重にする（notify-send は `\n` などの並びを解釈するため、見える形の `\udcff` のバックスラッシュが消え、`reportudcff.txt` のような、ありそうな別の名前に見えていた）
+- スキャン画面で隔離できなかったときも、どのファイルかをログに残す
+
+残すもの: こうした名前のファイルは隔離の記録に書けないため、隔離できずに通知だけになる。隔離の保存の形を変える 12-2d で扱う。
+
+## 52. 配布版が Python 3.15 で起動の直後に落ちていた件
+
+Python 3.15.2・PyInstaller 6.22.3 で作った配布版が、起動の直後に APScheduler のところで `TypeError: 'lazy_import' object is not callable` で落ちていた。
+
+- 原因: Python 3.15 の `concurrent.futures` は `ThreadPoolExecutor` 等を遅延 import（PEP 810）する。PySide6 を読み込んだ後では、`concurrent.futures.ThreadPoolExecutor` が遅延 import の印のまま返る。従来の対策（app.py の最初、PySide6 より前に属性を読んで実体化する）は、配布版では PySide6 の runtime hook が本体より先に PySide6 を読み込むため間に合わなかった（PySide6 を先に読み込む小さなプログラムを配布版にして確認した）
+- 対策: `core/lazy_import_fix.py` の `reify_concurrent_futures()` で、下位のモジュール（`concurrent.futures.thread`・`process`）から本物のクラスを読み込み、`concurrent.futures` の名前を置き換える（読み込みの順番に関係なく効く）。app.py と `tests/conftest.py` の最初に呼ぶ
+- テスト: PySide6 を先に読み込んだ別のプロセスで、APScheduler が起動できること
+- 確認: Windows で配布版（UAC を求めない確認用の写し）を作り、起動シーケンスの完了まで進むことを確認した
+
+## 53. 段階 12-2d: 隔離ファイルの変換・所有者の復帰
+
+サービス化・Web API設計書 6.3節（12章 45、S-11）と、所有者の復帰。あわせて §51 の残り（UTF-8 にできない名前のファイルを隔離できない）を直した。
+
+- **隔離ファイルの変換**（`core/quarantine_codec.py`）: 隔離したファイルは、先頭に識別用のヘッダ（`CQPQ`・形式の番号・元の大きさ・元の SHA-256）を付け、中身を固定の鍵で XOR して保存する（他のウイルス対策ソフトに検知・削除されたり、誤って実行されたりしないように。暗号としての強さが目的ではなく、鍵は秘密にしない）。隔離フォルダへ移した元のファイル（`<uuid>.moving`）を変換してから消す
+- **復元**: 元に戻したファイル（`<uuid>.restoring`）の大きさ・SHA-256 が記録と一致しなければ、復元せずに E3005（`QuarantineCorruptedError`、新設）。一致すれば従来どおり `safe_fs.restore_move` で元の場所に置く
+- **所有者・権限**（`core/file_owner.py`）: 隔離するときに記録し、復元したときに戻す（Linux は uid・gid・mode。所有者は root のときだけ戻し、setuid・setgid は戻さない。Windows は SDDL の所有者・DACL。所有者を変える権限が無ければ DACL だけ）。戻せなくても復元は成功とし、ログに残す
+- **UTF-8 にできない名前**: DB の文字列に書けないため、元のバイト列を `original_path_raw` に持ち、`original_path` は見える形にした表示用にする。復元はバイト列から元のパスに戻して行う（§51 で入れた「隔離の前に断る」はやめた）
+- Alembic `0005_quarantine_hardening`: `quarantine` に `encoding`（既定 `none`）・`owner_info`・`original_path_raw`。以前の版で隔離したファイルは `none` のまま扱い、変換し直さない（移行の失敗で隔離ファイルを失わないため）
+
+設計書と異なる点・決めた点:
+- マイグレーションは設計書の案の 0007（所有者）・0008（変換）を 1 つにまとめ、0005 にした（12-3 の通知の保存・スケジュールの `wake` は 0006 以降）
+- 記録の無い以前の隔離データの復元は、所有者・権限に手を付けない（設計書の「復元先フォルダの継承 ACL・所有者に合わせる」は、サービス化（12-3）で SYSTEM・root が復元するときに行う）
+
+残すもの: 隔離・復元の途中でアプリが落ちると、隔離フォルダに途中のファイル（`.moving`・`.restoring`。元の内容）が残ることがある（読み取りは本人だけ）。
+
+確認: 全テスト（Windows・WSL）成功。Windows・Linux とも、UTF-8 にできない名前のファイル（Windows は対になっていないサロゲート、Linux は正しくないバイト列）を実際に作って隔離・復元し、同じに見える別のファイルが変わらないことを確かめた。
+
+## 54. v0.9.3 の公開
+
+v0.9.2 の後の修正（§49〜§53 のうち、Web API に関わらないもの: Windows のスキャンの高速化 §50、UTF-8 として正しくない名前のファイルの扱い §51・§53、Python 3.15 の配布版の起動 §52、リアルタイム監視（clamonacc）を起動の直後に止めても確実に止まるようにした修正）と、サービス化・Web API の段階 12-1〜12-2（§45〜§49。既定は OFF で、`config.json` の `"api": {"enabled": true}` のときだけ待ち受ける）を v0.9.3 として公開する。`core/version.py` の `APP_VERSION`、`version_info.txt`、README と `build_release.py` のビルド例を 0.9.3 にそろえた。
+
+隔離の形式（§53）を変えたため、v0.9.3 で隔離したファイルは v0.9.2 以前では復元できない（以前の版で隔離したファイルは v0.9.3 でそのまま復元できる）。DB は起動時に 0005 まで上がる。
+

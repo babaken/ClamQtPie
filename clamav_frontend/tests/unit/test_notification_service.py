@@ -20,6 +20,16 @@ def _service_for(tmp_path, **notif_overrides) -> tuple[NotificationService, Conf
     return service, config_service
 
 
+
+def _flush_detections(service: NotificationService) -> None:
+    """集約中の検知をその場で確定させる（集約のタイマーの発火を待たない）
+
+    決まった時間だけ待つ形では、CIのマシンが遅いとタイマーが待ち時間内に動かず、
+    後のテストの途中で発火して結果を乱していた。確定はロックの中で行われるため、
+    タイマーが先に動いていても、その処理が終わってから戻る
+    """
+    service._aggregator._flush()
+
 def test_mail_body_template_reflects_detection_count(tmp_path):
     # NT-U03
     service, config_service = _service_for(
@@ -53,9 +63,7 @@ def test_mail_body_template_reflects_detection_count(tmp_path):
         config_service, "get_smtp_password", return_value=None
     ), patch("subprocess.run"):
         service.notify_detection("/tmp/eicar.txt", "Eicar-Test-Signature", quarantined=True)
-        import time
-
-        time.sleep(0.3)
+        _flush_detections(service)
 
     assert len(sent_bodies) == 1
     import email
@@ -91,9 +99,7 @@ def test_mail_skipped_when_smtp_unconfigured(tmp_path):
     # subprocess.runもモック化する（実際のToast/notify-sendを出さず、待ち時間内に処理を終えるため）
     with patch("smtplib.SMTP") as mock_smtp, patch("subprocess.run"):
         service.notify_detection("/tmp/eicar.txt", "Eicar-Test-Signature", quarantined=False)
-        import time
-
-        time.sleep(0.3)
+        _flush_detections(service)
 
     mock_smtp.assert_not_called()
 
@@ -121,9 +127,7 @@ def test_mail_send_failure_does_not_raise_and_is_not_retried(tmp_path):
     ), patch("subprocess.run"):
         # 例外を送出せず処理が完了することを確認
         service.notify_detection("/tmp/eicar.txt", "Eicar-Test-Signature", quarantined=False)
-        import time
-
-        time.sleep(0.3)
+        _flush_detections(service)
 
     assert call_count["n"] == 1  # リトライされていない
 
@@ -136,9 +140,7 @@ def test_desktop_notification_uses_notify_send_on_linux(tmp_path):
     ) as mock_run:
         mock_run.return_value = MagicMock(returncode=0)
         service.notify_detection("/tmp/eicar.txt", "Eicar-Test-Signature", quarantined=True)
-        import time
-
-        time.sleep(0.3)
+        _flush_detections(service)
 
     mock_run.assert_called_once()
     args = mock_run.call_args[0][0]
@@ -154,9 +156,7 @@ def test_desktop_notification_uses_powershell_toast_on_windows(tmp_path):
     ) as mock_run:
         mock_run.return_value = MagicMock(returncode=0)
         service.notify_detection("C:\\eicar.txt", "Eicar-Test-Signature", quarantined=True)
-        import time
-
-        time.sleep(0.3)
+        _flush_detections(service)
 
     mock_run.assert_called_once()
     args = mock_run.call_args[0][0]
@@ -197,9 +197,7 @@ def test_detection_toast_opens_quarantine_on_click_but_failure_toast_does_not(tm
     ) as mock_run:
         mock_run.return_value = MagicMock(returncode=0)
         service.notify_detection(r"C:\eicar.txt", "Eicar-Test-Signature", quarantined=True)
-        import time
-
-        time.sleep(0.3)
+        _flush_detections(service)
         service.notify_update_failure("接続エラー")
 
     detection_script, failure_script = (c.args[0][-1] for c in mock_run.call_args_list)
@@ -334,9 +332,7 @@ def test_toast_does_not_embed_detection_content_in_script(tmp_path):
     ) as mock_run:
         mock_run.return_value = MagicMock(returncode=0)
         service.notify_detection(f"C:\\Users\\u\\Downloads\\{evil}", "Eicar-Test-Signature", quarantined=True)
-        import time
-
-        time.sleep(0.3)
+        _flush_detections(service)
 
     script = mock_run.call_args[0][0][-1]
     env = mock_run.call_args.kwargs["env"]
@@ -355,9 +351,7 @@ def test_toast_passes_title_and_body_only_via_env(tmp_path):
     ) as mock_run, patch.dict("os.environ", {"CLAMQT_TEST_INHERITED": "1"}):
         mock_run.return_value = MagicMock(returncode=0)
         service.notify_detection("C:\\a.txt", "Win.Test.EICAR", quarantined=False)
-        import time
-
-        time.sleep(0.3)
+        _flush_detections(service)
 
     env = mock_run.call_args.kwargs["env"]
     # 管理者権限のPowerShellには、利用者が変えられる環境変数を引き継がず、決まった変数と通知用の2つだけを渡す
@@ -414,3 +408,14 @@ def test_smtp_without_encryption_does_not_send_password(tmp_path):
         service._smtp_send(config_service.current.smtp, "pw", "s", "b")
 
     assert calls == ["sendmail"]
+
+
+def test_notify_send_shows_backslashes_literally(tmp_path):
+    # notify-send はバックスラッシュの並びを解釈する。ファイル名の見える形（\\udcff・\\n）の
+    # バックスラッシュが消えて、ありそうな別の名前（reportudcff.txt）や改行に見えないこと
+    service, _ = _service_for(tmp_path)
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+        service._send_linux_notify_send("検知", r"/tmp/report\udcff.txt: Eicar" + "\n" + r"/tmp/a\nb: X")
+    body = mock_run.call_args[0][0][2]
+    assert body == r"/tmp/report\\udcff.txt: Eicar" + "\n" + r"/tmp/a\\nb: X"  # 本物の改行はそのまま

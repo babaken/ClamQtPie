@@ -17,7 +17,13 @@ import time
 from pathlib import Path
 from typing import BinaryIO, Callable
 
-from core.clamd_client import ClamdClient, FdPassUnsupportedError, ScanResult, fdpass_available
+from core.clamd_client import (
+    ClamdClient,
+    ClamdPathEncodingError,
+    FdPassUnsupportedError,
+    ScanResult,
+    fdpass_available,
+)
 from core.config_model import ClamdConfig
 from core.exceptions import ClamdConnectionError, ClamdProcessError, ClamdStreamSizeError
 
@@ -223,7 +229,11 @@ class ClamAVService:
                 result = self._scan_by_fdpass(path)
                 if result is not None:
                     return [result]
-            results = _bind_to_requested_path(self._client.scan_path(path, multi=False), path)
+            try:
+                results = _bind_to_requested_path(self._client.scan_path(path, multi=False), path)
+            except ClamdPathEncodingError as exc:
+                # パスを送れない名前のファイルも検査を逃さないよう、アプリが開いて内容を送る
+                return [self._scan_by_stream(path, ScanResult(path=str(path), status="ERROR", detail=exc.message))]
             if _is_permission_error(results[0]):
                 return [self._scan_by_stream(path, results[0])]
             return results

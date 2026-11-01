@@ -15,7 +15,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from core.exceptions import DatabaseConnectionError, DatabaseMigrationError
@@ -25,6 +25,22 @@ logger = logging.getLogger("clamav_frontend")
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ALEMBIC_INI = _PROJECT_ROOT / "alembic.ini"
 _ALEMBIC_SCRIPT_LOCATION = _PROJECT_ROOT / "alembic"
+
+
+#: 書き込みが重なったときに待つ時間（ミリ秒）。サービス化・Web API設計書 8章
+_BUSY_TIMEOUT_MS = 5000
+
+
+def _configure_sqlite(dbapi_connection, _record) -> None:
+    """接続ごとの設定。WAL にして読み取りが書き込みを待たないようにし、書き込みどうしが重なったら少し待つ
+    （画面・Web API・スケジュール・リアルタイム監視のスレッドから同じ DB を使うため）。
+    WAL の付随ファイル（-wal・-shm）は、SQLite が DB ファイルと同じ権限で作る"""
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+    finally:
+        cursor.close()
 
 
 class DatabaseService:
@@ -51,6 +67,7 @@ class DatabaseService:
             self._engine = create_engine(db_url, future=True)
         except Exception as exc:
             raise DatabaseConnectionError(detail=str(exc)) from exc
+        event.listen(self._engine, "connect", _configure_sqlite)
 
         self.migrate()
         self._session_factory = sessionmaker(bind=self._engine, future=True)

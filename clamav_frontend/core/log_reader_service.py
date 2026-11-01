@@ -8,6 +8,7 @@ LogReaderService — ログファイルの読込・フィルタ・CSV出力
 from __future__ import annotations
 
 import csv
+import io
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -148,17 +149,27 @@ class LogReaderService:
         数式として扱われないようにする（_csv_safe）。
         """
         with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["日時", "レベル", "カテゴリ", "メッセージ"])
-            for e in entries:
-                writer.writerow(
-                    [
-                        e.datetime.strftime("%Y-%m-%d %H:%M:%S"),
-                        _csv_safe(e.level),
-                        _csv_safe(e.category),
-                        _csv_safe(e.message),
-                    ]
-                )
+            _write_csv(f, entries)
+
+    def csv_bytes(self, entries: list[LogEntry]) -> bytes:
+        """export_csv と同じ内容をバイト列で返す（Web API の CSV 出力用、UTF-8 BOM付き）"""
+        buffer = io.StringIO(newline="")
+        _write_csv(buffer, entries)
+        return buffer.getvalue().encode("utf-8-sig")
+
+
+def _write_csv(f, entries: list[LogEntry]) -> None:
+    writer = csv.writer(f)
+    writer.writerow(["日時", "レベル", "カテゴリ", "メッセージ"])
+    for e in entries:
+        writer.writerow(
+            [
+                e.datetime.strftime("%Y-%m-%d %H:%M:%S"),
+                _csv_safe(e.level),
+                _csv_safe(e.category),
+                _csv_safe(e.message),
+            ]
+        )
 
 
 #: 表計算ソフトが数式の始まりとして扱う文字

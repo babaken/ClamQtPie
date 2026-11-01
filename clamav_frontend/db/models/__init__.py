@@ -7,7 +7,7 @@ Phase5で0002_add_watch_targetにより watch_target を追加予定
 """
 from __future__ import annotations
 
-from sqlalchemy import Column, Integer, Text
+from sqlalchemy import Column, ForeignKey, Integer, LargeBinary, Text
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -25,6 +25,11 @@ class Quarantine(Base):
     detected_at = Column(Text)
     restored = Column(Integer, default=0)
     deleted = Column(Integer, default=0)
+    # 段階 12-2d（0005）: 隔離ファイルの変換の方式（"none" | "xor-v1"）、元の所有者・権限（JSON）、
+    # UTF-8 にできない名前の元のバイト列（その場合 original_path は見える形にした表示用）
+    encoding = Column(Text, nullable=False, default="none", server_default="none")
+    owner_info = Column(Text)
+    original_path_raw = Column(LargeBinary)
 
 
 class Schedule(Base):
@@ -77,3 +82,48 @@ class UpdateHistory(Base):
     result = Column(Text)  # "success" | "failure" | "no_change"
     before_version = Column(Text)
     after_version = Column(Text)
+
+
+class ScanHistory(Base):
+    """スキャン履歴（サービス化・Web API設計書 6.2節。0004_add_scan_history）
+
+    手動（画面・Web API）とスケジュールのすべてのスキャンを、終了時に1行記録する。
+    """
+
+    __tablename__ = "scan_history"
+
+    id = Column(Integer, primary_key=True)
+    started_at = Column(Text, index=True)
+    finished_at = Column(Text)
+    source = Column(Text)  # "gui" | "api" | "schedule"
+    scan_type = Column(Text)  # "quick" | "full" | "custom" | "schedule"
+    label = Column(Text)
+    targets = Column(Text)  # JSON の配列
+    scanned = Column(Integer, default=0)
+    detected = Column(Integer, default=0)
+    errors = Column(Integer, default=0)
+    errors_truncated = Column(Integer, default=0)  # 記録の上限を超えて、ファイルを残さなかったエラーの数
+    result = Column(Text)  # "completed" | "cancelled" | "failed"
+    detail = Column(Text)  # 失敗の理由
+
+
+class ScanHistoryDetection(Base):
+    __tablename__ = "scan_history_detection"
+
+    id = Column(Integer, primary_key=True)
+    history_id = Column(Integer, ForeignKey("scan_history.id", ondelete="CASCADE"), nullable=False, index=True)
+    path = Column(Text)
+    virus_name = Column(Text)
+    action = Column(Text)  # "quarantined" | "notified"
+
+
+class ScanHistoryError(Base):
+    """検査できなかったファイル（12章 46。サイズの上限超えなどで検査を逃れる手口があるため、理由とともに残す）"""
+
+    __tablename__ = "scan_history_error"
+
+    id = Column(Integer, primary_key=True)
+    history_id = Column(Integer, ForeignKey("scan_history.id", ondelete="CASCADE"), nullable=False, index=True)
+    path = Column(Text)
+    reason = Column(Text)  # "size_limit" | "permission" | "vanished" | "other"
+    detail = Column(Text)

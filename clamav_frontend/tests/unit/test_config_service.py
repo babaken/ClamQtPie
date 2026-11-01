@@ -100,3 +100,21 @@ def test_future_schema_version_is_not_overwritten(tmp_path):
     assert model.schema_version == 999
     # 上書き保存されていないこと（mtimeが変わっていない）
     assert config_path.stat().st_mtime_ns == original_mtime
+
+
+def test_api_is_disabled_by_default(tmp_path):
+    # Web API は利用者が有効にするまで待ち受けない
+    model = ConfigService(tmp_path / "config.json").load()
+    assert model.api.enabled is False
+    assert model.api.port == 8765
+
+
+@pytest.mark.parametrize("api", [{"enabled": "yes", "port": 80}, {"enabled": 1, "port": 70000}, {"port": True}])
+def test_invalid_api_settings_are_auto_corrected(tmp_path, api):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"schema_version": 1, "api": api}))
+
+    model = ConfigService(config_path).load()
+
+    assert model.api.enabled is False
+    assert model.api.port == 8765

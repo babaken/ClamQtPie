@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -36,6 +36,7 @@ from core.clamav_service import (
     error_reason,
 )
 from core.logger import CATEGORY_SCAN, log_event
+from core.text_safety import visible_controls
 from gui.error_dialog import show_confirm_dialog, show_error_dialog
 from gui.plain_text import plain, plain_tooltip
 from gui.screens.base import BaseScreen, wrap_layout
@@ -46,6 +47,8 @@ _VIEW_UPDATE_INTERVAL_MS = 200
 #: 判定列の表示（画面設計書2章: 正常・検知・エラー）
 _STATUS_LABELS = {"FOUND": "検知", "ERROR": "エラー", "OK": "正常"}
 _QUARANTINED_LABEL = "隔離済み"
+#: 結果の行のパスの番号（ScanScreen._row_paths の位置）を入れる場所
+_PATH_INDEX_ROLE = Qt.ItemDataRole.UserRole
 #: 検査できなかったファイルの判定列の表示。サイズの上限で検査していないものは、
 #: 検査済みと誤解されないよう、ほかのエラーと区別して表示する
 _ERROR_REASON_LABELS = {
@@ -58,9 +61,12 @@ _ERROR_REASON_LABELS = {
 
 class ScanScreen(BaseScreen):
     screen_title = "ウイルス スキャン"
+    #: 結果の行の、検査したファイルのパスそのもの（表示の文字は見える形に変えているため、隔離・無視にはこちらを使う）
+    _row_paths: list[str]
     screen_subtitle = "ClamAV のスキャン エンジンで、ファイル・フォルダー・ドライブを検査します。"
 
     def build_content(self) -> None:
+        self._row_paths = []
         # 1. スキャン対象選択エリア
         self.begin_card("スキャン対象の選択")
         self.quick_radio = QRadioButton("クイックスキャン（デスクトップ・ダウンロード・ドキュメント・一時フォルダ等）")
@@ -199,7 +205,24 @@ class ScanScreen(BaseScreen):
             )
             return False
 
+        self._show_running()
+        self._scan_dispatcher.start(
+            targets,
+            include_subfolders=self.include_subfolder_check.isChecked(),
+            apply_exclude=self.apply_exclude_check.isChecked(),
+            label=self._scan_label(),
+            skip_dirs=scan_targets.full_scan_skip_dirs() if self.full_radio.isChecked() else (),
+            scan_type="quick" if self.quick_radio.isChecked() else "full" if self.full_radio.isChecked() else "custom",
+        )
+        return True
+
+    def show_started_elsewhere(self) -> None:
+        """画面以外（Web API）から始めたスキャンを、実行中として表示する（結果はシグナルで届く）"""
+        self._show_running()
+
+    def _show_running(self) -> None:
         self.result_table.setRowCount(0)
+        self._row_paths = []
         self._scanned_count = 0
         self._detected_count = 0
         self._error_count = 0
@@ -209,15 +232,6 @@ class ScanScreen(BaseScreen):
 
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-
-        self._scan_dispatcher.start(
-            targets,
-            include_subfolders=self.include_subfolder_check.isChecked(),
-            apply_exclude=self.apply_exclude_check.isChecked(),
-            label=self._scan_label(),
-            skip_dirs=scan_targets.full_scan_skip_dirs() if self.full_radio.isChecked() else (),
-        )
-        return True
 
     def _scan_label(self) -> str:
         if self.quick_radio.isChecked():
@@ -305,11 +319,18 @@ class ScanScreen(BaseScreen):
             label = _ERROR_REASON_LABELS[error_reason(detail)]
         else:
             label = _STATUS_LABELS.get(status, status)
-        values = [path, label, detail, detected_at]
+        # 表示は見える形にする（UTF-8 にできない名前の文字は、Qt の文字列では消えて別のファイルの名前に見えるため）
+        values = [visible_controls(path), label, detail, detected_at]
         for col, value in enumerate(values):
             item = QTableWidgetItem(value)
             item.setToolTip(plain_tooltip(value))  # 列の幅で切れた内容（検査できなかった理由等）も読めるようにする
             self.result_table.setItem(row, col, item)
+        # 隔離・無視には表示の文字ではなく、検査したファイルのパスそのものを使う（行に番号を付けて引く）
+        self._row_paths.append(path)
+        self.result_table.item(row, 0).setData(_PATH_INDEX_ROLE, len(self._row_paths) - 1)
+
+    def _row_path(self, row: int) -> str:
+        return self._row_paths[self.result_table.item(row, 0).data(_PATH_INDEX_ROLE)]
 
     def _selected_detection_rows(self) -> list[int]:
         rows = sorted({idx.row() for idx in self.result_table.selectedIndexes()})
@@ -327,7 +348,7 @@ class ScanScreen(BaseScreen):
             return
 
         for row in selected_rows:
-            path = self.result_table.item(row, 0).text()
+            path = self._row_path(row)
             virus_name = self.result_table.item(row, 2).text()
             try:
                 self._quarantine_service.quarantine(path, virus_name)
@@ -336,12 +357,15 @@ class ScanScreen(BaseScreen):
                 from core.exceptions import AppError, QuarantineWriteError
 
                 err = exc if isinstance(exc, AppError) else QuarantineWriteError(detail=str(exc))
+                # どのファイルの隔離ができなかったかを、後から追えるように残す
+                log_event(CATEGORY_SCAN, f"検知したファイルを隔離できませんでした: {path} ({virus_name})",
+                          level=logging.WARNING, error_code=err.code)
                 show_error_dialog(self, err)
 
     def _on_ignore_clicked(self) -> None:
         """検知行を一覧から外す（ファイルには何もしない。対応しなかったことをログに残す）"""
         for row in reversed(self._selected_detection_rows()):
-            path = self.result_table.item(row, 0).text()
+            path = self._row_path(row)
             virus_name = self.result_table.item(row, 2).text()
             log_event(
                 CATEGORY_SCAN,

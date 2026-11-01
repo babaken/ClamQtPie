@@ -288,6 +288,7 @@ class UpdateService:
 class _UpdateWorker(QObject):
     log_line = Signal(str)
     finished = Signal(object)  # UpdateHistoryRecord
+    started = Signal()  # 更新を始めたとき（画面・トレイ・Web API のどこから始めても出す）
 
     def __init__(self, update_service: UpdateService) -> None:
         super().__init__()
@@ -304,6 +305,7 @@ class UpdateDispatcher(QObject):
 
     log_line = Signal(str)
     finished = Signal(object)  # UpdateHistoryRecord
+    started = Signal()  # 更新を始めたとき（画面・トレイ・Web API のどこから始めても出す）
 
     def __init__(self, update_service: UpdateService) -> None:
         super().__init__()
@@ -327,6 +329,7 @@ class UpdateDispatcher(QObject):
         self._worker.finished.connect(self._on_finished)
 
         self._thread.start()
+        self.started.emit()
 
     def _on_finished(self, record: UpdateHistoryRecord) -> None:
         self.finished.emit(record)

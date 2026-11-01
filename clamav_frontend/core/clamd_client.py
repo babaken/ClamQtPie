@@ -9,6 +9,7 @@ ClamdClient — clamdソケット通信の低レベルプロトコル層
 """
 from __future__ import annotations
 
+import ipaddress
 import platform
 import re
 import socket
@@ -47,6 +48,36 @@ class ScanResult:
     path: str
     status: ScanStatus
     detail: str = ""
+
+
+def _is_loopback(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _connect_without_timeout(host: str) -> bool:
+    """TCP の接続にタイムアウトを付けないか（Windows で、接続先がこのPC 自身のときだけ）"""
+    return platform.system() == "Windows" and _is_loopback(host)
+
+
+class ClamdPathEncodingError(ClamdProtocolError):
+    """パスを clamd に送れない（呼び出し側は、ファイルの内容を送る INSTREAM で検査する）"""
+
+    default_message = "ファイル名を ClamAV サービスに送れないため、内容を送って検査します"
+
+
+def _encode_command(command: str) -> bytes:
+    """コマンドを送る形にする。Linux 等の UTF-8 として正しくないファイル名（Python では surrogateescape の文字）は、
+    OS のファイル名の元のバイト列のまま送る（clamd は同じバイト列のパスでファイルを開く）。
+    それでも表せない名前（Windows の対になっていないサロゲートなど）は ClamdPathEncodingError"""
+    try:
+        return f"z{command}\0".encode("utf-8", errors="surrogateescape")
+    except UnicodeEncodeError as exc:
+        raise ClamdPathEncodingError(detail=str(exc)) from exc
 
 
 class ClamdClient:
@@ -106,7 +137,13 @@ class ClamdClient:
                 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 sock.settimeout(self.config.connect_timeout_sec)
                 sock.connect(self.config.unix_socket_path)
+            elif _connect_without_timeout(self.config.tcp_host):
+                # Windows でこのPC 自身へつなぐときは、タイムアウトを付けずに接続し、つないだ後で設定する。
+                # タイムアウト付きの接続は1回ごとに数倍の時間がかかり、1ファイルに1回接続するスキャンが遅くなる。
+                # つながらないとき（clamd の停止）は、どちらでも Windows が約2秒で諦めるため、待ち時間は変わらない
+                sock = socket.create_connection((self.config.tcp_host, self.config.tcp_port))
             else:
+                # 別のマシンへは従来どおり（タイムアウトを付けないと、届かないアドレスで約21秒待つ）
                 sock = socket.create_connection(
                     (self.config.tcp_host, self.config.tcp_port),
                     timeout=self.config.connect_timeout_sec,
@@ -124,7 +161,7 @@ class ClamdClient:
 
     # -- 送受信 ---------------------------------------------------------
     def _send_command(self, sock: socket.socket, command: str) -> None:
-        sock.sendall(f"z{command}\0".encode("utf-8"))
+        sock.sendall(_encode_command(command))
 
     def _recv_until_close(self, sock: socket.socket) -> bytes:
         chunks: list[bytes] = []
@@ -179,8 +216,11 @@ class ClamdClient:
         return response == "RELOADING"
 
     def scan_path(self, path: str | Path, multi: bool = False) -> list[ScanResult]:
-        """SCAN / MULTISCAN（2.1節: ディレクトリはMULTISCAN、単一ファイルはSCAN）"""
+        """SCAN / MULTISCAN（2.1節: ディレクトリはMULTISCAN、単一ファイルはSCAN）
+
+        パスを clamd に送れない（UTF-8 の名前として表せない）場合は、接続する前に ClamdPathEncodingError"""
         command = f"{'MULTISCAN' if multi else 'SCAN'} {path}"
+        _encode_command(command)
         response = self._run_command(command, no_read_timeout=True)
         return self._parse_scan_response(response)
 

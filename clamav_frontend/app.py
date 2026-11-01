@@ -7,17 +7,15 @@ Phase8: 多重起動防止・タスクトレイ統合・自動起動・ログ画
 """
 from __future__ import annotations
 
-import concurrent.futures
 import copy
 import sys
 from pathlib import Path
 
-# Python 3.15以降、concurrent.futuresはThreadPoolExecutor等を遅延import（PEP 810）する。
-# PySide6を先にimportすると遅延importが解決されないまま残り、APSchedulerの起動時に
-# "TypeError: 'lazy_import' object is not callable" で落ちるため、PySide6より前に実体化しておく。
-# （Windows実機テストで発見。tests/conftest.pyにも同じ処理がある）
-concurrent.futures.ThreadPoolExecutor  # noqa: B018
-concurrent.futures.ProcessPoolExecutor  # noqa: B018
+# Python 3.15 の遅延 import 対策（APScheduler の起動時に落ちる。配布版では PySide6 が先に読み込まれるため、
+# 読み込みの順番に頼らない方法で行う。core/lazy_import_fix.py）
+from core.lazy_import_fix import reify_concurrent_futures
+
+reify_concurrent_futures()
 
 from PySide6.QtCore import QObject, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import QIcon  # noqa: E402
@@ -38,6 +36,7 @@ from core.notification_service import NotificationService
 from core.quarantine_service import QuarantineService
 from core.realtime_factory import create_realtime_manager
 from core.scan_dispatcher import ScanDispatcher
+from core.scan_history_service import ScanHistoryRecorder, ScanHistoryService
 from core.scheduled_scan import run_scheduled_scan
 from core.scheduler_service import SchedulerService
 from core.single_instance import SingleInstanceLock
@@ -133,6 +132,13 @@ def main() -> int:
     exclude_service = ExcludeService(db_service)
     quarantine_service = QuarantineService(db_service, _APP_DIR / "quarantine")
     scan_dispatcher = ScanDispatcher(clamav_service, exclude_service)
+    # スキャン履歴（段階12-2c）: 手動（画面・トレイ・Web API）のスキャンを記録し、保持期間を過ぎたものを消す
+    scan_history_service = ScanHistoryService(db_service)
+    scan_history_recorder = ScanHistoryRecorder(scan_history_service, scan_dispatcher)
+    try:
+        scan_history_service.purge(config.logging.retention_days)
+    except Exception as exc:  # noqa: BLE001 - 古い履歴を消せなくても起動は続ける
+        logger.warning(f"古いスキャン履歴を削除できませんでした (detail: {exc})")
     watch_target_service = WatchTargetService(db_service)
     # Windows=watchdog / Linux=clamonacc（利用不可ならwatchdogへフォールバック）
     realtime_manager = create_realtime_manager(
@@ -190,6 +196,7 @@ def main() -> int:
             quarantine_service,
             notification_service,
             config.realtime,
+            history_service=scan_history_service,
         )
         if result.detected:
             # APSchedulerのスレッドから呼ばれるため、トレイ表示等はシグナル経由でGUIスレッドへ渡す
@@ -243,6 +250,9 @@ def main() -> int:
         config_service=config_service,
         on_open_settings=lambda: window.navigate_to("settings"),
     )
+    #: 設定を保存した後に呼ぶもの（Web API のイベント config.changed など。画面・Web API のどちらで保存しても呼ぶ）
+    config_saved_listeners: list = []
+
     def _on_settings_saved(saved_config) -> None:
         # 画面設計書8章「即時反映が必要な項目は保存直後に該当サービスへ再読込を通知する」
         setup_logger(
@@ -264,6 +274,8 @@ def main() -> int:
         clamd_controller.config = saved_config.clamd
         engine_screen.reload_service_name()
         logger.info("設定を保存し、ログ設定・自動更新設定・freshclamの場所を反映しました")
+        for listener in config_saved_listeners:
+            listener()
 
     realtime_screen = window.get_screen("realtime")
     window.get_screen("settings").bind_services(
@@ -509,11 +521,86 @@ def main() -> int:
     if not config.general.start_minimized:
         window.show()
 
+    # Web API（サービス化・Web API設計書。段階12-1〜12-2: 従来のアプリの中で動かす。既定はOFFで、config.api.enabledで有効にする）
+    # OFFのときはFastAPI・uvicornを読み込まない（起動時間を延ばさない）
+    api_server = None
+    if config.api.enabled:
+        from api.app import create_app as create_api_app
+        from api.bridge import EventHub, QtInvoker
+        from api.context import ApiContext
+        from api.events import StatusPublisher, connect_realtime, publish_config_changed
+        from api.jobs import JobTracker
+        from api.server import start_api_server
+
+        def _on_api_changed(what: str) -> None:
+            # APIで変えた内容を画面に反映する（メインスレッドで呼ばれる。api/actions.py）
+            if what == "excludes":
+                realtime_screen.reload_excludes()
+            elif what == "targets":
+                realtime_screen.reload_targets()
+            elif what == "quarantine":
+                quarantine_screen.reload()
+                home_screen.refresh_status(check_clamd=False)
+            elif what == "schedules":
+                window.get_screen("schedule").reload()
+            elif what == "config":
+                window.get_screen("settings").reload_from_config()
+            elif what == "realtime":
+                home_screen.refresh_status(check_clamd=False)  # トレイ・リアルタイム画面のボタンも合わせる
+            elif what == "logs":
+                window.get_screen("log").reload()
+            elif what == "clamd":
+                home_screen.refresh_status()
+            elif what == "scan_started":
+                scan_screen.show_started_elsewhere()
+            elif what == "update_started":
+                update_screen.show_started_elsewhere()
+
+        api_invoker = QtInvoker()  # メインスレッドで作る（APIのスレッドから状態を変える処理を渡す先）
+        # SSEで配るイベント（段階12-2b）: スキャン・定義更新のジョブ、リアルタイム監視、稼働状態、設定の保存
+        api_events = EventHub()
+        api_jobs = JobTracker(api_events, last_scan_history_id=lambda: scan_history_recorder.last_history_id)
+        api_jobs.connect(scan_dispatcher, update_dispatcher)
+        connect_realtime(api_events, realtime_manager)
+        status_publisher = StatusPublisher(api_events, realtime_manager, scan_dispatcher, update_dispatcher, api_jobs)
+        home_screen.status_refreshed.connect(status_publisher.on_status)
+        config_saved_listeners.append(lambda: publish_config_changed(api_events))
+        api_context = ApiContext(
+            config_service=config_service,
+            clamav_service=clamav_service,
+            realtime_manager=realtime_manager,
+            scan_dispatcher=scan_dispatcher,
+            update_service=update_service,
+            update_dispatcher=update_dispatcher,
+            scheduler_service=scheduler_service,
+            quarantine_service=quarantine_service,
+            exclude_service=exclude_service,
+            watch_target_service=watch_target_service,
+            log_reader_service=log_reader_service,
+            scan_history_service=scan_history_service,
+            invoker=api_invoker,
+            events=api_events,
+            jobs=api_jobs,
+            notification_service=notification_service,
+            diagnostics_service=diagnostics_service,
+            notify_changed=_on_api_changed,
+            apply_config=_on_settings_saved,
+            start_clamd=lambda: _start_clamd(manual=True),
+            clamd_controller=clamd_controller,
+            on_clamd_stop_requested=_on_clamd_stop_requested,
+            on_clamd_stop_failed=_on_clamd_stop_failed,
+        )
+        api_server = start_api_server(
+            config.api, lambda tokens: create_api_app(tokens, api_context), _APP_DIR
+        )
+
     logger.info("アプリ起動シーケンス完了")
 
     exit_code = app.exec()
 
     logger.info("アプリ終了シーケンス開始")
+    if api_server is not None:
+        api_server.stop()
     if realtime_manager.is_running:
         realtime_manager.stop()
     scheduler_service.shutdown()

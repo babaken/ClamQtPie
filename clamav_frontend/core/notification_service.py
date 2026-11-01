@@ -66,6 +66,12 @@ def _quarantine_status_summary(events: list[DetectionEvent]) -> str:
         "（隔離に失敗したか、対応しない設定です）。ログを確認し、手動で対応してください"
     )
 
+def _notify_send_text(text: str) -> str:
+    """notify-send に渡す文字。マークアップ（<b> など）を解釈させないよう <・>・& をエスケープし、
+    バックスラッシュを二重にする（notify-send は \\n などのバックスラッシュの並びを解釈するため、ファイル名の
+    見える形（\\udcff・\\n）のバックスラッシュが消えて、ありそうな別の名前に見えていた）"""
+    return html.escape(text, quote=False).replace("\\", "\\\\")
+
 
 class NotificationService:
     def __init__(self, config_service: ConfigService, icon_path: str | None = None) -> None:
@@ -201,12 +207,13 @@ class NotificationService:
             raise DesktopNotifyError(detail=str(exc)) from exc
 
     def _send_linux_notify_send(self, title: str, body: str) -> None:
+        """title・body は、改行（本物の改行文字）のほかは文字どおりに表示させる（_notify_send_text）"""
         # 多くの通知デーモンは本文の一部のマークアップ（<b>・<a href>等）を解釈するため、ファイル名などに
         # 含まれる<・>・&をエスケープして、文字どおりに表示させる
         cmd = [
             system_tool("notify-send", "Linux"),
-            html.escape(title, quote=False),
-            html.escape(body, quote=False),
+            _notify_send_text(title),
+            _notify_send_text(body),
             "--urgency=critical",
             # 差出人の名前（固定値）。付けないと通知デーモンに「notify-send」と表示される
             f"--app-name={APP_NAME}",

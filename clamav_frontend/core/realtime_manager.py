@@ -143,9 +143,10 @@ class _EventHandler(FileSystemEventHandler):
 
 
 class RealtimeManager(QObject):
-    detected = Signal(str, str)  # path, virus_name（検知した時点。隔離の前）
-    detection_handled = Signal(str, str, bool)  # path, virus_name, 隔離できたか（検知時アクションの後）
-    watch_target_lost = Signal(str)  # path
+    # パスは object で渡す（str で渡すと、UTF-8 にできない名前の文字が Qt の文字列への変換で消える）
+    detected = Signal(object, str)  # path, virus_name（検知した時点。隔離の前）
+    detection_handled = Signal(object, str, bool)  # path, virus_name, 隔離できたか（検知時アクションの後）
+    watch_target_lost = Signal(object)  # path
     scan_error = Signal(object)  # AppError
 
     #: 画面設計書3章「現在の監視方式ラベル」に表示する名称
@@ -345,7 +346,7 @@ class RealtimeManager(QObject):
                 self._quarantine_service.quarantine(path, virus_name)
                 quarantined = True
             except Exception as exc:  # noqa: BLE001 - GUI通知のため広く捕捉
-                logger.error(f"リアルタイム検知の自動隔離に失敗しました (detail: {exc})")
+                logger.error(f"リアルタイム検知の自動隔離に失敗しました: {path} (detail: {exc})")
         # 通知（トースト・メール）は隔離を試した後の実際の結果で送る（コードレビューで修正。
         # 以前は設定値から「自動的に隔離されました」と通知し、隔離に失敗しても同じ文面だった）
         self.detection_handled.emit(path, virus_name, quarantined)

@@ -456,6 +456,8 @@ def test_pkexec_auth_cancel_emits_e2005(env, qtbot):
         process.finish(126, marker=False)
 
     assert "管理者認証" in blocker.args[0].detail
+    # Web API の利用者が、認証のキャンセルと clamonacc の失敗を見分けられるよう理由を付ける
+    assert blocker.args[0].reason == "auth_cancelled"
     manager.stop()
 
 
@@ -550,13 +552,20 @@ def test_pkexec_is_not_taken_from_path(env, monkeypatch):
 
 
 # -- rootシェル（_SUPERVISOR_SCRIPT）の実動作 -----------------------------------
+# /bin/sh は配布元によって dash（Debian・Ubuntu）や bash（Arch・Fedora）。どちらでも確かめる
+_POSIX_SHELLS = [pytest.param(name, marks=pytest.mark.skipif(shutil.which(name) is None, reason=f"{name} が無い"))
+                 for name in ("sh", "bash", "dash")]
+
+
 @requires_posix_sh
-def test_supervisor_script_stops_child_when_stdin_closes():
+@pytest.mark.parametrize("shell", _POSIX_SHELLS)
+def test_supervisor_script_stops_child_when_stdin_closes(shell):
     # clamonaccの代わりにsleepを監視させ、標準入力を閉じたら終了マーカーが出ることを確認
     # （rootシェルが付ける--log等は、sh -cの位置引数として渡るだけで無視される）
     # （子はexecでsleepに置き換え、1つのプロセスとして止める。shによっては最後のコマンドをexecしないため）
+    # 起動の直後に閉じる（子が exec する前に停止の合図が届いても止まること）
     process = subprocess.Popen(
-        [shutil.which("sh"), "-c", _SUPERVISOR_SCRIPT, "supervisor", "n1", "0", "0", "sh", "-c", "exec sleep 30"],
+        [shutil.which(shell), "-c", _SUPERVISOR_SCRIPT, "supervisor", "n1", "0", "0", "sh", "-c", "exec sleep 30"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
@@ -905,7 +914,9 @@ def test_factory_passes_app_dirs_to_watchdog_manager(env):
     # watchdog方式でもアプリ自身のフォルダを除外する（隔離の無限ループ対策）
     manager = _factory(env, "Windows", _which)
     app_dir = env["tmp_path"]
-    assert manager._extra_exclude_dirs == [app_dir / "logs", app_dir / "quarantine", app_dir / "clamonacc"]
+    assert manager._extra_exclude_dirs[:3] == [app_dir / "logs", app_dir / "quarantine", app_dir / "clamonacc"]
+    # アプリのDB（WALの付随ファイルを含む）も検査しない（アプリのフォルダを監視したとき、DBに書くたびに検査されないように）
+    assert manager._extra_exclude_dirs[3:] == [app_dir / f"app.db{s}" for s in ("", "-wal", "-shm", "-journal")]
 
 
 def test_detection_handled_reports_actual_quarantine_result(env, qtbot):
@@ -986,3 +997,14 @@ def test_clamonacc_config_file_in_user_writable_folder_is_not_used(env, tmp_path
     assert manager.start() is False
     assert env["processes"] == []
     assert errors[0].code == "E6005"
+
+
+def test_clamonacc_output_keeps_undecodable_names(env):
+    # clamonacc はファイル名をそのままのバイトで書く。正しくない UTF-8 の名前を置き換え文字にせず、
+    # 元のバイトとして読む（検査し直し・隔離ができるように）
+    env["watch_target_service"].add(str(env["watched"]))
+    manager = env["build"]()
+    manager.start()
+    process = env["processes"][0]
+    assert process.kwargs.get("errors") == "surrogateescape"
+    manager.stop()

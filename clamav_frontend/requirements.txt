@@ -14,6 +14,10 @@ keyring>=24.0
 # ファイルシステム監視（Windows: watchdog経由でReadDirectoryChangesW）
 watchdog>=4.0
 
+# Web API（サービス化・Web API設計書。段階12-1から）
+fastapi>=0.115
+uvicorn>=0.30
+
 # パッケージング
 pyinstaller>=6.3
 
@@ -23,6 +27,7 @@ pytest-cov>=4.1
 pytest-qt>=4.4
 freezegun>=1.4
 psutil>=6.0
+httpx2>=2.16  # fastapi.testclient（Starlette）が使う。旧来の httpx は非推奨
 
 # Windows専用（Linux開発機ではインストール不可のため環境マーカーで制御）
 pywin32>=306; sys_platform == "win32"
