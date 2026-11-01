@@ -111,6 +111,12 @@ class QuarantineRestoreError(QuarantineError):
     default_message = "ファイルの復元に失敗しました"
 
 
+class QuarantineRestoreConflictError(QuarantineRestoreError):
+    """復元先に同じ名前のものがある（上書きを選べば復元できる。Web API では 400 にする）"""
+
+    default_message = "復元先に同じ名前のファイルがあります"
+
+
 class QuarantineNotFoundError(QuarantineError):
     default_code = "E3003"
     default_message = "対象のデータが見つかりません"
@@ -294,3 +300,10 @@ class ServiceVersionMismatchError(ApiError):
 class ApiReauthRequiredError(ApiError):
     default_code = "E8108"
     default_message = "この操作の前に、確認コード（またはパスワード）を入力してください"
+
+
+class ApiNotFoundError(ApiError):
+    """指定した ID の除外・監視対象・スケジュールがない（隔離データは E3003）"""
+
+    default_code = "E8109"
+    default_message = "対象が見つかりません"

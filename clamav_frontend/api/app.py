@@ -13,14 +13,15 @@ from fastapi import FastAPI, Request
 from api.auth import ApiTokens, check_request
 from api.context import ApiContext
 from api.errors import install_error_handlers
-from api.routes import info, read
+from api.routes import info, read, write
 from core.version import APP_NAME, APP_VERSION
 
 API_PREFIX = "/api/v1"
 
 
 def create_app(tokens: ApiTokens, context: ApiContext | None = None) -> FastAPI:
-    """context: 読み取りの API が使うサービス（None なら読み取りの API は付けない。骨組みのテスト用）"""
+    """context: API が使うサービス（None なら読み取りの API も付けない。骨組みのテスト用）。
+    context.invoker があるときだけ、状態を変える API を付ける"""
     app = FastAPI(
         title=f"{APP_NAME} API",
         version=APP_VERSION,
@@ -42,4 +43,6 @@ def create_app(tokens: ApiTokens, context: ApiContext | None = None) -> FastAPI:
     app.include_router(info.router, prefix=API_PREFIX)
     if context is not None:
         app.include_router(read.router, prefix=API_PREFIX)
+        if context.can_write:
+            app.include_router(write.router, prefix=API_PREFIX)
     return app

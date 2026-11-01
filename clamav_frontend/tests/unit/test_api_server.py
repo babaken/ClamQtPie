@@ -126,3 +126,29 @@ def test_forwarded_headers_do_not_change_the_client(tmp_path):
     finally:
         server.stop()
     assert seen == [LOOPBACK_HOST]
+
+
+def test_stopping_the_server_is_logged(tmp_path, monkeypatch):
+    events = []
+    monkeypatch.setattr("api.server.log_event", lambda category, message: events.append(message))
+    server = ApiServer(create_app(ApiTokens(tmp_path)), 0)
+    server.start()
+    server.stop()
+    server.stop()  # 2回止めても1回だけ残す
+    assert events == ["Web API の待ち受けを停止しました"]
+
+
+def test_uvicorn_warnings_go_to_the_app_log(monkeypatch):
+    # uvicorn の警告（不正な要求など）もアプリのログに残す。1件の記録が複数行に分かれない
+    import logging
+
+    from api import server as server_module
+
+    records = []
+    monkeypatch.setattr(server_module, "logger", SimpleNamespace(
+        log=lambda level, message, **kwargs: records.append((level, message, kwargs["extra"]["error_code"]))))
+    server_module._route_uvicorn_logs()
+    server_module._route_uvicorn_logs()  # 何度呼んでも1回だけ書く
+    logging.getLogger("uvicorn.error").info("Started server process")
+    logging.getLogger("uvicorn.error").warning("Invalid HTTP request received.\nforged line")
+    assert records == [(logging.WARNING, r"Web API（uvicorn）: Invalid HTTP request received.\nforged line", "E8100")]

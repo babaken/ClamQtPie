@@ -260,6 +260,11 @@ class SchedulerService:
                 record.next_run = next_time.isoformat() if next_time else ""
         return records
 
+    def is_job_running(self, job_id: int) -> bool:
+        """ジョブを実行中か（Web API の「今すぐ実行」で、別のスレッドに渡す前に 409 を返すため）"""
+        with self._running_lock:
+            return job_id in self._running_job_ids
+
     def run_now(self, job_id: int) -> None:
         with self.db.session() as session:
             row = session.get(Schedule, job_id)

@@ -39,6 +39,9 @@ def create_realtime_manager(
     # アプリ自身が書き込むフォルダは検査対象外にする（自己検査・隔離ファイルの再検知防止。
     # watchdog方式で除外していなかったため、隔離フォルダへの移動が再検知されて隔離が無限に繰り返された）
     app_dirs = [app_dir / "logs", app_dir / "quarantine", app_dir / "clamonacc"]
+    # アプリのDB（WALの付随ファイルを含む）も、DBに書くたびに変わるため検査しない（アプリのフォルダを監視した場合）。
+    # watchdog方式だけに渡す（clamonaccの--exclude-listはフォルダを指定するもので、ファイルを渡すと監視の設定に失敗する）
+    app_files = [app_dir / f"app.db{suffix}" for suffix in ("", "-wal", "-shm", "-journal")]
 
     if system == "Linux" and config.linux_backend == "clamonacc":
         available, reason = is_clamonacc_available(config, which)
@@ -60,5 +63,5 @@ def create_realtime_manager(
         exclude_service,
         quarantine_service,
         config,
-        extra_exclude_dirs=app_dirs,
+        extra_exclude_dirs=app_dirs + app_files,
     )

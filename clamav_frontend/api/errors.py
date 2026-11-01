@@ -20,6 +20,7 @@ from core.exceptions import (
     ApiError,
     ApiForbiddenError,
     ApiLoginLockedError,
+    ApiNotFoundError,
     ApiReauthRequiredError,
     ApiRequestRejectedError,
     AppError,
@@ -28,6 +29,7 @@ from core.exceptions import (
     JobAlreadyRunningError,
     JobValidationError,
     QuarantineNotFoundError,
+    QuarantineRestoreConflictError,
     UnsafeExecutablePathError,
 )
 
@@ -43,6 +45,8 @@ _STATUS_BY_ERROR: tuple[tuple[type[AppError], int], ...] = (
     (JobAlreadyRunningError, 409),
     (ApiLoginLockedError, 429),
     (QuarantineNotFoundError, 404),
+    (ApiNotFoundError, 404),
+    (QuarantineRestoreConflictError, 400),
     (JobValidationError, 400),
     (ConfigValidationError, 400),
     (UnsafeExecutablePathError, 400),

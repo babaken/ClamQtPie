@@ -990,3 +990,34 @@ Linux配布版がWaylandのデスクトップで起動しない不具合（v0.9.
 依存: `fastapi`・`uvicorn`（テスト用に `httpx2`。Starlette 1.10 の TestClient は旧来の `httpx` を非推奨にした）。配布版は PyInstaller の標準のフック（`hook-uvicorn`）で取り込まれ、`ClamQtPie.spec` の変更は要らなかった。Zip は Windows 39.9→44.3 MB、Linux 97.7→102.0 MB。
 
 確認: 全テスト（Windows・WSL）成功。WSL で配布版をビルドし、API を有効にして起動して、トークンファイルの権限（700/600）、`/version`・`/status`・`/logs`・CSV、トークンなしの 401、Host 違いの 400、`/docs` の 404、127.0.0.1 だけで待ち受けることを curl で確認した。
+
+## 46. 段階 12-2a: Web API（状態を変える操作）
+
+サービス化・Web API設計書の段階 12-2 のうち、状態を変える API と SQLite の WAL 化。12-2 は大きいため 4 つに分けた（12-2a: 状態を変える API、12-2b: ジョブの API と SSE、12-2c: スキャン履歴、12-2d: 隔離の所有者の復帰と隔離ファイルの変換）。
+
+構成:
+- `api/actions.py`: 状態を変える処理。`QtInvoker` でメインスレッドに渡して実行する（実行中かどうかの判定もメインスレッドで行い、画面・API・スケジュールの同時操作の取り合いを防ぐ）。中身は画面の操作と同じにし、変えた後は `ApiContext.notify_changed` で `app.py` に知らせて画面を読み直させる。変えた内容は `Web API: …` としてログに残す（設定は値を残さず、変えた項目の名前だけ）
+- `api/routes/write.py`（すべて admin）:
+  - 隔離: `POST /quarantine/{id}/restore`（`{"overwrite": bool}`。元の場所にだけ復元する。同じ名前があり上書きしないなら 400 E3002）、`DELETE /quarantine/{id}`
+  - 除外: `POST /excludes`、`PATCH /excludes/{id}`、`DELETE /excludes/{id}`（ファイル・フォルダは絶対パス、拡張子は画面と同じく小文字・先頭に `.`、重複は 400）
+  - 監視: `PUT /realtime`（`{"enabled": bool}`。有効な監視対象が無ければ 400）、`POST/PATCH/DELETE /realtime/targets`（存在するフォルダを絶対パスで）
+  - スケジュール: `POST /schedules`、`PUT/PATCH/DELETE /schedules/{id}`、`POST /schedules/{id}/run`（202。スケジュール画面の「今すぐ実行」と同じく別のスレッドで実行。実行中なら 409）。スキャンの対象は絶対パス
+  - 設定: `PUT /config`（全体を置き換える）、`PUT/DELETE /config/smtp-password`、`POST /notifications/test-mail`
+  - clamd・診断・ログ: `POST /clamd/start`（202。試行中なら 409）、`POST /clamd/stop`（停止検知時の自動起動の抑止を含め、エンジン サービス画面と同じ）、`POST /diagnostics`（伏せ字にしたレポート）、`DELETE /logs`
+- `GET /config`（user）: API 自身の設定（`api`）を除き、SMTP のパスワードは `smtp.has_password` で有無だけ返す。Web API で変えられない項目を `protected` に並べる
+- 入力は余計な項目・型の違う値（`"true"`・`1` を真偽値として扱うなど）を受け付けない（400 E8100）
+- 見つからない除外・監視対象・スケジュールは 404 E8109（`ApiNotFoundError`、新設）。隔離データは従来どおり E3003
+- `db/database.py`: 接続ごとに `PRAGMA journal_mode=WAL`・`busy_timeout=5000`。WAL の付随ファイル（`-wal`・`-shm`）は SQLite が DB ファイルと同じ権限（POSIX は 0600）で作る
+- `api/server.py`: 待ち受けの停止をログに残す。uvicorn の警告・エラー（不正な HTTP の要求など）をアプリのログに書く（制御文字は見える形にする）
+
+設計書と異なる点・決めた点:
+- **Web API で変えられる設定は、設定画面で変えられる項目（と `update.stale_days`）に限る。** 設計書の保護された項目（実行ファイルの場所、clamd の接続先、サービス名）に加え、`clamd.tcp_port` も変えられない（ポートだけでも、このPC の一般の利用者が待ち受けたポートに向けられるため。設計書の一覧に漏れていた）。画面に無い項目（タイムアウト・同時接続数など）と `general`（画面ごとの設定。12-3 で利用者ごとの GUI の設定に移す）も読み取りだけ。範囲外の値は読み込み時のように直さず 400 にし、項目の名前を返す
+- 設定は、現在の設定のオブジェクトをその場で書き換えてから保存する（各サービスは起動時に受け取った設定の部分を持ち続けているため。設定画面と同じ）
+- 復元・削除済みの隔離データへの復元・削除は 400
+- 隔離の「同じ名前がある」は `QuarantineRestoreConflictError`（E3002 のまま）で区別し、400 にする。ほかの復元の失敗は 500
+- スケジュールのスキャンの中止を admin に限ること（設計書 6.2）は、スキャンのジョブの API とあわせて 12-2b
+- `/schedules` の `wake` 列（スリープからの復帰）は 12-3
+
+見つけた不具合: WAL にすると、アプリのフォルダを監視したとき、DB に書くたび（隔離の記録など）に `app.db-wal` が変わって検査され、検知の扱いによっては隔離されてしまう（WSL のテストで発見。従来も `app.db` 自体が検査されていた）。watchdog 方式では、`realtime_factory` がアプリの DB のファイル（`app.db`・`-wal`・`-shm`・`-journal`）も検査から外すようにした（clamonacc の `--exclude-list` はフォルダを指定するもので、ファイルを渡すと監視の設定に失敗するため、clamonacc には渡さない）。
+
+確認: 全テスト（Windows・WSL）成功。WSL で実際のアプリ（ソースから、offscreen）を API を有効にして起動し、user での 403、除外・監視対象の追加、監視の ON/OFF、スケジュールの追加と今すぐ実行、設定の保存（`config.json` への反映）と保護された項目の拒否、診断を curl で確認した。DB が WAL になることも確認した。

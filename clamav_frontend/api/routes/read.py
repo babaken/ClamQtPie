@@ -13,6 +13,7 @@ from datetime import date, datetime, time
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
 
+from api.actions import config_view
 from api.auth import require_user
 from core.definitions import definitions_age_days
 from core.text_safety import visible_controls
@@ -100,12 +101,13 @@ def list_quarantine(request: Request, limit: int = Limit, offset: int = Offset) 
     return _page(items, limit, offset)
 
 
+def exclude_item(row) -> dict:
+    return {"id": row.id, "type": row.type, "value": row.value, "enabled": bool(row.enabled)}
+
+
 @router.get("/excludes")
 def list_excludes(request: Request, limit: int = Limit, offset: int = Offset) -> dict:
-    items = [
-        {"id": row.id, "type": row.type, "value": row.value, "enabled": bool(row.enabled)}
-        for row in _ctx(request).exclude_service.list_all()
-    ]
+    items = [exclude_item(row) for row in _ctx(request).exclude_service.list_all()]
     return _page(items, limit, offset)
 
 
@@ -137,6 +139,13 @@ def list_update_history(request: Request, limit: int = Limit, offset: int = Offs
     for item in items:
         item.pop("detail", None)  # DB には保存しない項目（常に空）
     return _page(items, limit, offset)
+
+
+# -- 6.8 設定 ---------------------------------------------------------------------------
+@router.get("/config")
+def get_config(request: Request) -> dict:
+    # API 自身の設定は返さない。SMTP のパスワードは有無だけ。Web API で変えられない項目は protected に並べる
+    return config_view(_ctx(request))
 
 
 # -- 6.9 ログ ---------------------------------------------------------------------------

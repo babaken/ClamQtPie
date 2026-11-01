@@ -19,6 +19,7 @@ import uvicorn
 
 from api.auth import TOKEN_DIR_NAME, ApiTokens
 from core.logger import CATEGORY_SYSTEM, log_event
+from core.text_safety import visible_controls
 
 logger = logging.getLogger("clamav_frontend")
 
@@ -27,6 +28,27 @@ LOOPBACK_HOST = "127.0.0.1"
 
 _START_TIMEOUT_SEC = 5.0
 _STOP_TIMEOUT_SEC = 5.0
+
+
+class _UvicornLogHandler(logging.Handler):
+    """uvicorn の警告・エラー（不正な HTTP の要求、処理中の例外など）をアプリのログに書く。
+    uvicorn のロガーはアプリのロガーと別で、log_config=None のままでは どこにも残らないため"""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        logger.log(
+            record.levelno,
+            f"Web API（uvicorn）: {visible_controls(record.getMessage())}",
+            exc_info=record.exc_info,
+            extra={"error_code": "E8100"},
+        )
+
+
+def _route_uvicorn_logs() -> None:
+    uvicorn_logger = logging.getLogger("uvicorn")
+    if not any(isinstance(h, _UvicornLogHandler) for h in uvicorn_logger.handlers):
+        uvicorn_logger.addHandler(_UvicornLogHandler(logging.WARNING))
+    uvicorn_logger.setLevel(logging.WARNING)  # 起動・停止の案内（INFO）は残さない（こちらで記録する）
+    uvicorn_logger.propagate = False
 
 
 def create_listen_socket(port: int, host: str = LOOPBACK_HOST) -> socket.socket:
@@ -60,6 +82,7 @@ class ApiServer:
         self._socket: socket.socket | None = None
         self._server: uvicorn.Server | None = None
         self._thread: threading.Thread | None = None
+        self._started = False  # 待ち受けを始められたか（止めたときにログに残すかどうか）
 
     @property
     def port(self) -> int:
@@ -73,6 +96,7 @@ class ApiServer:
     def start(self) -> None:
         """待ち受けを始める。ポートを使えない・起動しない場合は OSError / RuntimeError"""
         self._socket = create_listen_socket(self._port)
+        _route_uvicorn_logs()
         config = uvicorn.Config(
             self._app,
             log_config=None,  # アプリのロガーの設定を変えない
@@ -90,6 +114,7 @@ class ApiServer:
         if not self._wait_started():
             self.stop()
             raise RuntimeError("Web API の待ち受けを開始できませんでした")
+        self._started = True
 
     def _wait_started(self) -> bool:
         deadline = time.monotonic() + _START_TIMEOUT_SEC
@@ -102,6 +127,8 @@ class ApiServer:
         return self._server.started
 
     def stop(self) -> None:
+        was_started = self._started
+        self._started = False
         if self._server is not None:
             self._server.should_exit = True
         if self._thread is not None:
@@ -113,6 +140,8 @@ class ApiServer:
         self._socket = None
         if self._tokens is not None:
             self._tokens.remove_files()
+        if was_started:
+            log_event(CATEGORY_SYSTEM, "Web API の待ち受けを停止しました")
 
 
 def start_api_server(api_config, app_factory, app_dir: Path) -> ApiServer | None:

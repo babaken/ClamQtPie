@@ -912,7 +912,9 @@ def test_factory_passes_app_dirs_to_watchdog_manager(env):
     # watchdog方式でもアプリ自身のフォルダを除外する（隔離の無限ループ対策）
     manager = _factory(env, "Windows", _which)
     app_dir = env["tmp_path"]
-    assert manager._extra_exclude_dirs == [app_dir / "logs", app_dir / "quarantine", app_dir / "clamonacc"]
+    assert manager._extra_exclude_dirs[:3] == [app_dir / "logs", app_dir / "quarantine", app_dir / "clamonacc"]
+    # アプリのDB（WALの付随ファイルを含む）も検査しない（アプリのフォルダを監視したとき、DBに書くたびに検査されないように）
+    assert manager._extra_exclude_dirs[3:] == [app_dir / f"app.db{s}" for s in ("", "-wal", "-shm", "-journal")]
 
 
 def test_detection_handled_reports_actual_quarantine_result(env, qtbot):

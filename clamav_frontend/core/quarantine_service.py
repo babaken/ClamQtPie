@@ -20,6 +20,7 @@ from core.exclude_service import is_under_any_folder
 from core.logger import CATEGORY_QUARANTINE, log_event
 from core.exceptions import (
     QuarantineNotFoundError,
+    QuarantineRestoreConflictError,
     QuarantineRestoreError,
     QuarantineWriteError,
 )
@@ -116,18 +117,14 @@ class QuarantineService:
             if not source.exists():
                 raise QuarantineRestoreError(detail=f"隔離ファイルが見つかりません: {source}")
             if os.path.lexists(target) and not overwrite:
-                raise QuarantineRestoreError(
-                    "復元先に同じ名前のファイルがあります", detail=str(target)
-                )
+                raise QuarantineRestoreConflictError(detail=str(target))
 
             try:
                 os.chmod(source, stat.S_IRUSR | stat.S_IWUSR)
                 # 復元先のフォルダをリンクをたどらずに開いて置く。既にあるものがリンク・フォルダ等なら置き換えない
                 restore_move(source, target, overwrite)
             except FileExistsError as exc:
-                raise QuarantineRestoreError(
-                    "復元先に同じ名前のファイルがあります", detail=str(target)
-                ) from exc
+                raise QuarantineRestoreConflictError(detail=str(target)) from exc
             except OSError as exc:
                 raise QuarantineRestoreError(detail=str(exc)) from exc
 

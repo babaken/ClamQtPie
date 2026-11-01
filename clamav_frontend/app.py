@@ -509,14 +509,36 @@ def main() -> int:
     if not config.general.start_minimized:
         window.show()
 
-    # Web API（サービス化・Web API設計書。段階12-1: 従来のアプリの中で動かす。既定はOFFで、config.api.enabledで有効にする）
+    # Web API（サービス化・Web API設計書。段階12-1〜12-2: 従来のアプリの中で動かす。既定はOFFで、config.api.enabledで有効にする）
     # OFFのときはFastAPI・uvicornを読み込まない（起動時間を延ばさない）
     api_server = None
     if config.api.enabled:
         from api.app import create_app as create_api_app
+        from api.bridge import QtInvoker
         from api.context import ApiContext
         from api.server import start_api_server
 
+        def _on_api_changed(what: str) -> None:
+            # APIで変えた内容を画面に反映する（メインスレッドで呼ばれる。api/actions.py）
+            if what == "excludes":
+                realtime_screen.reload_excludes()
+            elif what == "targets":
+                realtime_screen.reload_targets()
+            elif what == "quarantine":
+                quarantine_screen.reload()
+                home_screen.refresh_status(check_clamd=False)
+            elif what == "schedules":
+                window.get_screen("schedule").reload()
+            elif what == "config":
+                window.get_screen("settings").reload_from_config()
+            elif what == "realtime":
+                home_screen.refresh_status(check_clamd=False)  # トレイ・リアルタイム画面のボタンも合わせる
+            elif what == "logs":
+                window.get_screen("log").reload()
+            elif what == "clamd":
+                home_screen.refresh_status()
+
+        api_invoker = QtInvoker()  # メインスレッドで作る（APIのスレッドから状態を変える処理を渡す先）
         api_context = ApiContext(
             config_service=config_service,
             clamav_service=clamav_service,
@@ -529,6 +551,15 @@ def main() -> int:
             exclude_service=exclude_service,
             watch_target_service=watch_target_service,
             log_reader_service=log_reader_service,
+            invoker=api_invoker,
+            notification_service=notification_service,
+            diagnostics_service=diagnostics_service,
+            notify_changed=_on_api_changed,
+            apply_config=_on_settings_saved,
+            start_clamd=lambda: _start_clamd(manual=True),
+            clamd_controller=clamd_controller,
+            on_clamd_stop_requested=_on_clamd_stop_requested,
+            on_clamd_stop_failed=_on_clamd_stop_failed,
         )
         api_server = start_api_server(
             config.api, lambda tokens: create_api_app(tokens, api_context), _APP_DIR

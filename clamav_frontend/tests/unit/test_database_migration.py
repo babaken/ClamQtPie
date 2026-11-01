@@ -89,3 +89,43 @@ def test_existing_world_readable_db_is_tightened(tmp_path):
         assert stat.S_IMODE(os.stat(db_path).st_mode) == 0o600
     finally:
         service.close()
+
+
+def test_db_uses_wal_and_waits_for_writers(tmp_path):
+    # 画面・Web API・スケジュール・リアルタイム監視のスレッドから同じDBを使うため、
+    # 読み取りが書き込みを待たず、書き込みどうしが重なっても少し待つ
+    from sqlalchemy import text
+
+    service = DatabaseService(tmp_path / "app.db")
+    service.connect()
+    try:
+        with service.session() as session:
+            assert session.execute(text("PRAGMA journal_mode")).scalar() == "wal"
+            assert session.execute(text("PRAGMA busy_timeout")).scalar() == 5000
+    finally:
+        service.close()
+
+
+@pytest.mark.skipif(
+    __import__("platform").system() == "Windows", reason="POSIXのパーミッションのみ対象"
+)
+def test_wal_files_are_owner_only_on_posix(tmp_path):
+    # WALの付随ファイルにもDBの中身が入るため、DBと同じく本人だけが読めること
+    import os
+    import stat
+
+    from sqlalchemy import text
+
+    service = DatabaseService(tmp_path / "app.db")
+    service.connect()
+    try:
+        with service.session() as session:
+            session.execute(text("CREATE TABLE t (x INTEGER)"))
+            session.execute(text("INSERT INTO t VALUES (1)"))
+            session.commit()
+        for suffix in ("-wal", "-shm"):
+            path = tmp_path / f"app.db{suffix}"
+            assert path.exists()
+            assert stat.S_IMODE(os.stat(path).st_mode) == 0o600, suffix
+    finally:
+        service.close()
