@@ -1066,3 +1066,9 @@ Linux配布版がWaylandのデスクトップで起動しない不具合（v0.9.
 - 履歴の一覧の画面（トレイGUI のスキャン画面）は、GUI を API のクライアントにする 12-4 で作る
 
 確認: 全テスト（Windows・WSL）成功。WSL で実際のアプリから Web API でスキャンし、ジョブの `history_id`、`/scans/history`・`/scans/history/{id}` を確認した。
+
+## 49. 段階 12-2 の修正（Linux 実機の確認から）
+
+- **イベントの購読（SSE）がつながったままアプリを終了すると、ログに ERROR と Traceback が残り、終了が約 1 秒遅れていた**（PR #15 の確認で発見。12-2b から）。待ち受けを止めるとき、uvicorn が購読の処理を打ち切っていた（`timeout_graceful_shutdown`）。止める前に `EventHub.end_all()` で全部の購読に終わりの印（`END`）を送り、配信を自分で終わらせるようにした
+- Web API のカスタムスキャンの名前を、画面と同じ「カスタムスキャン」にした（従来は「手動スキャン」。履歴の label が経路で違っていた）
+- 名前の付け方の違い（変えない。互換のため）: スケジュールの `scan_type` は `scan`・`update`（ジョブの種類）、`POST /scans` の `type` は `quick`・`full`・`custom`（スキャンの範囲）、スキャン履歴の `scan_type` は `quick`・`full`・`custom`・`schedule`

@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from api import actions
 from api.auth import require_user
+from api.bridge import END
 from core.exceptions import ApiConflictError
 
 router = APIRouter(dependencies=[Depends(require_user)])
@@ -120,6 +121,8 @@ async def events(request: Request, last_event_id: str | None = Header(None, max_
                         break
                     yield ": keepalive\n\n"
                     continue
+                if event is END:
+                    break  # 待ち受けを止める
                 if event.id <= sent:
                     continue
                 sent = event.id

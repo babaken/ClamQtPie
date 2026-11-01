@@ -70,6 +70,10 @@ class Event:
     data: dict = field(default_factory=dict)
 
 
+#: 配信の終わりを知らせる印（Subscription.queue に入る。Event ではない）
+END = object()
+
+
 class Subscription:
     """1つの購読。queue からイベントを読み出す。closed になったら（読み出しが追いつかない等）接続を終える"""
 
@@ -92,6 +96,20 @@ class Subscription:
     def close(self) -> None:
         self.closed = True
         self._hub.unsubscribe(self)
+
+    def end(self) -> None:
+        """配信を終える（待ち受けを止めるとき。任意のスレッドから呼べる）。読み出し側は END を受け取って終わる"""
+        self.closed = True
+        try:
+            self.loop.call_soon_threadsafe(self._put_end)
+        except RuntimeError:  # 購読者のイベントループが閉じている
+            pass
+
+    def _put_end(self) -> None:
+        try:
+            self.queue.put_nowait(END)
+        except asyncio.QueueFull:
+            pass  # 満杯なら、読み出し側は closed を見て終わる
 
 
 class EventHub:
@@ -130,6 +148,15 @@ class EventHub:
         """last_id より後のイベント（再接続時の再送用）。保持している範囲のものだけ"""
         with self._lock:
             return [event for event in self._history if event.id > last_id]
+
+    def end_all(self) -> None:
+        """すべての購読の配信を終える（待ち受けを止める前に呼ぶ。つながったままの SSE を自分で終わらせ、
+        uvicorn に打ち切らせない）"""
+        with self._lock:
+            subscribers = list(self._subscribers)
+            self._subscribers.clear()
+        for subscription in subscribers:
+            subscription.end()
 
     @property
     def subscriber_count(self) -> int:

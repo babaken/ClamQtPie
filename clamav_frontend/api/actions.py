@@ -428,7 +428,8 @@ def clear_logs(ctx: ApiContext) -> int:
 
 
 # -- 6.2 スキャン・6.7 定義の更新（ジョブ。段階 12-2b） -----------------------------------
-SCAN_LABELS = {"quick": "クイックスキャン", "full": "フルスキャン", "custom": "手動スキャン"}
+# 画面のスキャンと同じ名前にする
+SCAN_LABELS = {"quick": "クイックスキャン", "full": "フルスキャン", "custom": "カスタムスキャン"}
 
 
 def _scan_targets(scan_type: str, targets: list[str] | None) -> tuple[list[str], tuple[str, ...]]:

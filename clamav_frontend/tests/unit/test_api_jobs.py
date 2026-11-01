@@ -290,8 +290,8 @@ def test_start_custom_scan(env):
     response = _call(env, "POST", "/scans", {"type": "custom", "targets": [str(env.tmp)], "apply_exclude": False})
     assert response.status_code == 202
     job = response.json()["job"]
-    assert job["state"] == "running" and job["source"] == "api" and job["label"] == "手動スキャン"
-    assert env.scan.started == [([str(env.tmp)], True, False, "手動スキャン", ())]
+    assert job["state"] == "running" and job["source"] == "api" and job["label"] == "カスタムスキャン"
+    assert env.scan.started == [([str(env.tmp)], True, False, "カスタムスキャン", ())]
     assert env.scan.kwargs == {"source": "api", "scan_type": "custom"}  # スキャン履歴に残す出どころと種類
     assert env.changed == ["scan_started"]  # 画面を実行中の表示にする
     assert _call(env, "GET", "/scans/current").json()["job"]["id"] == job["id"]
@@ -373,3 +373,43 @@ def test_events_stream_and_resend_after_reconnect(env):
         server.stop()
     assert received == ['data: {"n": 2}', 'data: {"n": 3}']
     assert env.hub.subscriber_count == 0  # 切断したら購読をやめる
+
+
+def test_stopping_with_an_open_subscription_ends_it_cleanly(env, monkeypatch):
+    # 購読（SSE）がつながったままアプリを終了しても、配信を自分で終わらせ、uvicorn に打ち切らせない
+    # （打ち切られるとログにエラーが残り、終了も遅れる。Linux 実機の確認で発見）
+    import httpx2 as httpx
+
+    from api import server as server_module
+    from api.server import LOOPBACK_HOST, ApiServer
+
+    logged = []
+    monkeypatch.setattr(server_module, "logger", SimpleNamespace(
+        log=lambda level, message, **kwargs: logged.append(message)))
+    server = ApiServer(create_app(env.tokens, env.context), 0)
+    server.start()
+    connected = threading.Event()
+    ended = threading.Event()
+
+    def subscribe():
+        try:
+            with httpx.stream("GET", f"http://{LOOPBACK_HOST}:{server.port}{API_PREFIX}/events",
+                              headers=env.user, timeout=10) as response:
+                connected.set()
+                for _ in response.iter_lines():
+                    pass
+        except httpx.HTTPError:
+            pass
+        ended.set()
+
+    threading.Thread(target=subscribe, daemon=True).start()
+    assert connected.wait(5)
+    deadline = time.monotonic() + 5
+    while env.hub.subscriber_count == 0 and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    started = time.monotonic()
+    server.stop()
+    assert time.monotonic() - started < 0.9  # 打ち切りの待ち（1 秒）まで待たない
+    assert ended.wait(5)  # クライアント側も配信の終わりを受け取る
+    assert logged == []

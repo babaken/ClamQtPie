@@ -131,6 +131,12 @@ class ApiServer:
     def stop(self) -> None:
         was_started = self._started
         self._started = False
+        # つながったままのイベントの購読（SSE）を先に終わらせる（uvicorn に打ち切らせると、ログにエラーが残り、
+        # 終了も timeout_graceful_shutdown の分だけ遅れる）
+        context = getattr(getattr(self._app, "state", None), "context", None)
+        events = getattr(context, "events", None)
+        if events is not None:
+            events.end_all()
         if self._server is not None:
             self._server.should_exit = True
         if self._thread is not None:
