@@ -122,6 +122,11 @@ class QuarantineNotFoundError(QuarantineError):
     default_message = "対象のデータが見つかりません"
 
 
+class QuarantineCorruptedError(QuarantineError):
+    default_code = "E3005"
+    default_message = "隔離ファイルが破損しているため復元できません"
+
+
 # ---------------------------------------------------------------------------
 # E4000番台: スケジュール（エラーコード一覧・例外設計書4.4節）
 # ---------------------------------------------------------------------------

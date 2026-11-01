@@ -160,32 +160,3 @@ def test_scan_screen_quarantines_the_scanned_file_itself(qtbot, monkeypatch):
     monkeypatch.setattr(scan_module, "show_confirm_dialog", lambda *a, **k: True)
     screen.quarantine_button.click()
     quarantine_service.quarantine.assert_called_once_with(path, "Eicar")
-
-
-def test_unrecordable_name_is_refused_before_moving_the_file(tmp_path):
-    # 隔離の記録に書けない名前は、ファイルを動かす前に断る（動かしてから記録に失敗しないように）
-    from core.exceptions import QuarantineWriteError
-    from core.quarantine_service import QuarantineService
-
-    db = DatabaseService(tmp_path / "app.db")
-    db.connect()
-    try:
-        service = QuarantineService(db, tmp_path / "quarantine")
-        target = tmp_path / "target.bin"
-        target.write_bytes(b"x")
-        # OS から実際に来る種類の名前（Linux は surrogateescape の文字、Windows は対になっていないサロゲート）。
-        # 存在の確認を通すため、exists を差し替える
-        monkey_path = str(target) + (UNDECODABLE if os.name == "posix" else LONE_SURROGATE)
-        import core.quarantine_service as qs
-
-        original_exists = qs.Path.exists
-        qs.Path.exists = lambda self: True if str(self) == monkey_path else original_exists(self)
-        try:
-            with pytest.raises(QuarantineWriteError):
-                service.quarantine(monkey_path, "Eicar")
-        finally:
-            qs.Path.exists = original_exists
-        assert list((tmp_path / "quarantine").iterdir()) == []
-        assert service.list_all() == []
-    finally:
-        db.close()

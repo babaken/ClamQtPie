@@ -7,7 +7,7 @@ Phase5で0002_add_watch_targetにより watch_target を追加予定
 """
 from __future__ import annotations
 
-from sqlalchemy import Column, ForeignKey, Integer, Text
+from sqlalchemy import Column, ForeignKey, Integer, LargeBinary, Text
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -25,6 +25,11 @@ class Quarantine(Base):
     detected_at = Column(Text)
     restored = Column(Integer, default=0)
     deleted = Column(Integer, default=0)
+    # 段階 12-2d（0005）: 隔離ファイルの変換の方式（"none" | "xor-v1"）、元の所有者・権限（JSON）、
+    # UTF-8 にできない名前の元のバイト列（その場合 original_path は見える形にした表示用）
+    encoding = Column(Text, nullable=False, default="none", server_default="none")
+    owner_info = Column(Text)
+    original_path_raw = Column(LargeBinary)
 
 
 class Schedule(Base):
