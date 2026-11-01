@@ -29,6 +29,9 @@ class ApiContext:
     # -- 状態を変える API（段階 12-2）で使う。None なら状態を変える API は付けない ------------------
     #: api.bridge.QtInvoker（メインスレッドで作ったもの）
     invoker: Any = None
+    #: api.bridge.EventHub（SSE で配るイベント）と api.jobs.JobTracker（スキャン・定義の更新のジョブ。段階 12-2b）
+    events: Any = None
+    jobs: Any = None
     notification_service: Any = None
     diagnostics_service: Any = None
     #: 変更した対象の名前（"excludes"・"targets"・"quarantine"・"schedules"・"config"・"realtime"・"logs"）を受け取り、

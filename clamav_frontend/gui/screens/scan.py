@@ -199,6 +199,21 @@ class ScanScreen(BaseScreen):
             )
             return False
 
+        self._show_running()
+        self._scan_dispatcher.start(
+            targets,
+            include_subfolders=self.include_subfolder_check.isChecked(),
+            apply_exclude=self.apply_exclude_check.isChecked(),
+            label=self._scan_label(),
+            skip_dirs=scan_targets.full_scan_skip_dirs() if self.full_radio.isChecked() else (),
+        )
+        return True
+
+    def show_started_elsewhere(self) -> None:
+        """画面以外（Web API）から始めたスキャンを、実行中として表示する（結果はシグナルで届く）"""
+        self._show_running()
+
+    def _show_running(self) -> None:
         self.result_table.setRowCount(0)
         self._scanned_count = 0
         self._detected_count = 0
@@ -209,15 +224,6 @@ class ScanScreen(BaseScreen):
 
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-
-        self._scan_dispatcher.start(
-            targets,
-            include_subfolders=self.include_subfolder_check.isChecked(),
-            apply_exclude=self.apply_exclude_check.isChecked(),
-            label=self._scan_label(),
-            skip_dirs=scan_targets.full_scan_skip_dirs() if self.full_radio.isChecked() else (),
-        )
-        return True
 
     def _scan_label(self) -> str:
         if self.quick_radio.isChecked():

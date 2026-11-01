@@ -13,8 +13,22 @@ from dataclasses import fields
 
 from api.context import ApiContext
 from core.config_model import ConfigModel, validate_and_fix
-from core.exceptions import ApiNotFoundError, ConfigValidationError, JobAlreadyRunningError, RealtimeError
-from core.logger import CATEGORY_QUARANTINE, CATEGORY_REALTIME, CATEGORY_SCAN, CATEGORY_SYSTEM, log_event
+from core import scan_targets
+from core.exceptions import (
+    ApiConflictError,
+    ApiNotFoundError,
+    ConfigValidationError,
+    JobAlreadyRunningError,
+    RealtimeError,
+)
+from core.logger import (
+    CATEGORY_QUARANTINE,
+    CATEGORY_REALTIME,
+    CATEGORY_SCAN,
+    CATEGORY_SYSTEM,
+    CATEGORY_UPDATE,
+    log_event,
+)
 
 #: 変更した対象の名前（ApiContext.notify_changed に渡す）
 CHANGED_EXCLUDES = "excludes"
@@ -25,6 +39,9 @@ CHANGED_CONFIG = "config"
 CHANGED_REALTIME = "realtime"
 CHANGED_LOGS = "logs"
 CHANGED_CLAMD = "clamd"
+#: 画面以外（Web API）からスキャン・定義の更新を始めた（画面を「実行中」の表示にする）
+CHANGED_SCAN_STARTED = "scan_started"
+CHANGED_UPDATE_STARTED = "update_started"
 
 
 def _notify(ctx: ApiContext, what: str) -> None:
@@ -408,3 +425,57 @@ def clear_logs(ctx: ApiContext) -> int:
     audit(CATEGORY_SYSTEM, "ログを消去しました")  # 消去の後の最初の行として残す
     _notify(ctx, CHANGED_LOGS)
     return count
+
+
+# -- 6.2 スキャン・6.7 定義の更新（ジョブ。段階 12-2b） -----------------------------------
+SCAN_LABELS = {"quick": "クイックスキャン", "full": "フルスキャン", "custom": "手動スキャン"}
+
+
+def _scan_targets(scan_type: str, targets: list[str] | None) -> tuple[list[str], tuple[str, ...]]:
+    if scan_type == "full":
+        return scan_targets.full_scan_targets(), scan_targets.full_scan_skip_dirs()
+    if scan_type == "quick" and not targets:
+        # 段階 12-2 まではアプリが利用者の権限で動くため、画面と同じ場所（ダウンロード等）を使う。
+        # サービス化（12-3）の後は、利用者が設定で指定した場所（scan.quick_targets）だけにする
+        return scan_targets.quick_scan_targets(), ()
+    if not targets:
+        raise ValueError("スキャンの対象を指定してください")
+    missing = [t for t in targets if not os.path.isabs(t) or not os.path.exists(t)]
+    if missing:
+        raise ValueError("スキャンの対象は存在するファイル・フォルダを絶対パスで指定してください")
+    return list(targets), ()
+
+
+def start_scan(ctx: ApiContext, scan_type: str, targets: list[str] | None, include_subfolders: bool,
+               apply_exclude: bool) -> dict:
+    if scan_type not in SCAN_LABELS:
+        raise ValueError("スキャンの種類が正しくありません")
+    if ctx.scan_dispatcher.is_running:
+        raise ApiConflictError(detail="スキャンを実行中です")
+    paths, skip_dirs = _scan_targets(scan_type, targets)
+    if not paths:
+        raise ValueError("スキャンの対象がありません")
+    label = SCAN_LABELS[scan_type]
+    audit(CATEGORY_SCAN, f"{label}を開始しました: {', '.join(paths)}")
+    ctx.jobs.expect_source("scan", "api")
+    ctx.scan_dispatcher.start(paths, include_subfolders=include_subfolders, apply_exclude=apply_exclude,
+                              label=label, skip_dirs=skip_dirs)
+    _notify(ctx, CHANGED_SCAN_STARTED)
+    return ctx.jobs.current("scan")
+
+
+def cancel_scan(ctx: ApiContext) -> None:
+    if not ctx.scan_dispatcher.is_running:
+        raise ApiConflictError("実行中のスキャンはありません")
+    audit(CATEGORY_SCAN, "スキャンの中止を要求しました")
+    ctx.scan_dispatcher.stop()
+
+
+def start_update(ctx: ApiContext) -> dict:
+    if ctx.update_dispatcher.is_running:
+        raise ApiConflictError(detail="定義の更新を実行中です")
+    audit(CATEGORY_UPDATE, "定義の更新を開始しました")
+    ctx.jobs.expect_source("update", "api")
+    ctx.update_dispatcher.start()
+    _notify(ctx, CHANGED_UPDATE_STARTED)
+    return ctx.jobs.current("update")

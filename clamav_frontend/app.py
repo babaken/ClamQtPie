@@ -243,6 +243,9 @@ def main() -> int:
         config_service=config_service,
         on_open_settings=lambda: window.navigate_to("settings"),
     )
+    #: 設定を保存した後に呼ぶもの（Web API のイベント config.changed など。画面・Web API のどちらで保存しても呼ぶ）
+    config_saved_listeners: list = []
+
     def _on_settings_saved(saved_config) -> None:
         # 画面設計書8章「即時反映が必要な項目は保存直後に該当サービスへ再読込を通知する」
         setup_logger(
@@ -264,6 +267,8 @@ def main() -> int:
         clamd_controller.config = saved_config.clamd
         engine_screen.reload_service_name()
         logger.info("設定を保存し、ログ設定・自動更新設定・freshclamの場所を反映しました")
+        for listener in config_saved_listeners:
+            listener()
 
     realtime_screen = window.get_screen("realtime")
     window.get_screen("settings").bind_services(
@@ -514,8 +519,10 @@ def main() -> int:
     api_server = None
     if config.api.enabled:
         from api.app import create_app as create_api_app
-        from api.bridge import QtInvoker
+        from api.bridge import EventHub, QtInvoker
         from api.context import ApiContext
+        from api.events import StatusPublisher, connect_realtime, publish_config_changed
+        from api.jobs import JobTracker
         from api.server import start_api_server
 
         def _on_api_changed(what: str) -> None:
@@ -537,8 +544,20 @@ def main() -> int:
                 window.get_screen("log").reload()
             elif what == "clamd":
                 home_screen.refresh_status()
+            elif what == "scan_started":
+                scan_screen.show_started_elsewhere()
+            elif what == "update_started":
+                update_screen.show_started_elsewhere()
 
         api_invoker = QtInvoker()  # メインスレッドで作る（APIのスレッドから状態を変える処理を渡す先）
+        # SSEで配るイベント（段階12-2b）: スキャン・定義更新のジョブ、リアルタイム監視、稼働状態、設定の保存
+        api_events = EventHub()
+        api_jobs = JobTracker(api_events)
+        api_jobs.connect(scan_dispatcher, update_dispatcher)
+        connect_realtime(api_events, realtime_manager)
+        status_publisher = StatusPublisher(api_events, realtime_manager, scan_dispatcher, update_dispatcher, api_jobs)
+        home_screen.status_refreshed.connect(status_publisher.on_status)
+        config_saved_listeners.append(lambda: publish_config_changed(api_events))
         api_context = ApiContext(
             config_service=config_service,
             clamav_service=clamav_service,
@@ -552,6 +571,8 @@ def main() -> int:
             watch_target_service=watch_target_service,
             log_reader_service=log_reader_service,
             invoker=api_invoker,
+            events=api_events,
+            jobs=api_jobs,
             notification_service=notification_service,
             diagnostics_service=diagnostics_service,
             notify_changed=_on_api_changed,

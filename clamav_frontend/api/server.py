@@ -105,6 +105,8 @@ class ApiServer:
             server_header=False,
             # X-Forwarded-For 等で接続元を書き換えさせない（接続元の確認は実際の接続の相手で行う）
             proxy_headers=False,
+            # 止めるときは、つながったままのイベントの購読（SSE）を待ち続けずに切る
+            timeout_graceful_shutdown=1,
         )
         self._server = uvicorn.Server(config)
         self._thread = threading.Thread(

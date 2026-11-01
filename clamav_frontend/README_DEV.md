@@ -1021,3 +1021,26 @@ Linux配布版がWaylandのデスクトップで起動しない不具合（v0.9.
 見つけた不具合: WAL にすると、アプリのフォルダを監視したとき、DB に書くたび（隔離の記録など）に `app.db-wal` が変わって検査され、検知の扱いによっては隔離されてしまう（WSL のテストで発見。従来も `app.db` 自体が検査されていた）。watchdog 方式では、`realtime_factory` がアプリの DB のファイル（`app.db`・`-wal`・`-shm`・`-journal`）も検査から外すようにした（clamonacc の `--exclude-list` はフォルダを指定するもので、ファイルを渡すと監視の設定に失敗するため、clamonacc には渡さない）。
 
 確認: 全テスト（Windows・WSL）成功。WSL で実際のアプリ（ソースから、offscreen）を API を有効にして起動し、user での 403、除外・監視対象の追加、監視の ON/OFF、スケジュールの追加と今すぐ実行、設定の保存（`config.json` への反映）と保護された項目の拒否、診断を curl で確認した。DB が WAL になることも確認した。
+
+## 47. 段階 12-2b: Web API（ジョブとイベント配信）
+
+サービス化・Web API設計書 4.3節・5章・6.2節・6.7節。スキャンと定義の更新をジョブとして扱い、イベントを SSE で配る。
+
+構成:
+- `api/jobs.py`（`JobTracker`）: `ScanDispatcher`・`UpdateDispatcher` のシグナルからジョブ（`id`・`kind`・`label`・`source`（`gui`|`api`）・`state`（`running`→`finished`|`cancelled`|`failed`）・`started_at`・`finished_at`・`progress`・`error`）を作り、イベントを出す。画面・トレイから始めたものも記録する（両 dispatcher に開始のシグナル `started` を足した）。終わったジョブは種類ごとに直近 1 件
+- `api/events.py`: `realtime.detected`・`realtime.handled`・`realtime.target_lost`・`realtime.error`、`status`（ホーム画面の定期確認の結果から、変わったときだけ）、`config.changed`（画面・Web API のどちらで保存しても）
+- `api/routes/jobs.py`（すべて user）: `POST /scans`（202。`type`: `quick`|`full`|`custom`、`targets`、`include_subfolders`、`apply_exclude`。実行中は 409）、`GET /scans/current`、`POST /scans/current/cancel`、`POST /updates`（202。実行中は 409）、`GET /updates/current`、`GET /events`（`text/event-stream`。連番の `id`、`Last-Event-ID` より後を送り直す。15 秒ごとに空のコメント。同時の購読は 16 まで）
+- Web API から始めたスキャン・更新は、スキャン画面・定義更新画面も実行中の表示にする（`show_started_elsewhere`）
+- イベントに入れるファイル名・メッセージ・freshclam の出力は、制御文字を見える形にする
+- uvicorn は止めるとき、つながったままの購読を 1 秒で切る（`timeout_graceful_shutdown`）
+
+設計書と異なる点・決めた点:
+- クイックスキャンで `targets` を省いたときは、画面と同じ場所（`quick_scan_targets()`）を使う。アプリが利用者の権限で動く 12-2 までの扱いで、12-3 からは設定 `scan.quick_targets` に変える
+- スケジュールのスキャン・更新は dispatcher を通らない（APScheduler のスレッドで直接実行）ため、ジョブにならず、Web API から中止もできない。そのため「スケジュールから始めたスキャンの中止は admin」は 12-3（スケジュールの実行をジョブにまとめるとき）に行う。`schedule.finished` イベントも 12-3
+- `scan.activity` の内容は `{job_id, state, path, seconds}`（`ScanWorker.activity` のまま。`state`: `queued`|`stalled`|`scanning`）
+- `status` イベントは `GET /status` の一部（clamd の到達性、定義の古さ、監視、スキャン・更新の実行中とジョブの id）。全部が要るときは `GET /status` を読む
+- `scan.started`・`update.started` を追加した（ジョブの内容をそのまま送る）
+- `notification`・`notification.acked` は通知の保存（12-3）とあわせて行う
+- `PUT /realtime`（12-2a）の `{"running": true}` は「開始を受け付けた」の意味。clamonacc 方式では pkexec の認証の前に返り、認証のキャンセル・起動の失敗は後から `realtime.error` で、状態が戻ったことは `status` で届く（Linux 実機の確認で指摘。方式で応答の形を変えると使う側が分かりにくいため、200 のまま説明する）
+
+確認: 全テスト（Windows・WSL）成功。WSL で実際のアプリを API を有効にして起動し、`/events` を購読しながら `POST /scans`（custom）・`POST /updates` を呼び、ジョブが記録されて `scan.started`・`scan.progress`・`scan.finished`・`status`・`update.started` が届くことを確認した。

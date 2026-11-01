@@ -263,6 +263,8 @@ class ScanDispatcher(QObject):
     finished = Signal(dict)
     error = Signal(object)
     activity = Signal(str, str, int)  # ScanWorker.activityの中継（待機中・応答待ちの表示用）
+    #: スキャンを始めたとき（label）。画面・トレイ・Web API のどこから始めても出す（Web API のジョブの記録に使う）
+    started = Signal(str)
 
     def __init__(
         self,
@@ -310,6 +312,7 @@ class ScanDispatcher(QObject):
         self._worker.finished.connect(self._on_finished)
 
         self._thread.start()
+        self.started.emit(label)
 
     def stop(self) -> None:
         if self._worker is not None:
