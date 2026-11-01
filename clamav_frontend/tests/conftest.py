@@ -9,7 +9,6 @@ Phase 1以降で以下のfixtureを実装していく:
   - real_clamd_available: 実clamdへの疎通確認（テスト仕様書5章、CLM-I01等のスキップ判定に使用）
   - qapp: PySide6 QApplication（Phase3以降のGUIテスト用、offscreenモード）
 """
-import concurrent.futures
 import os
 import socket
 import sys
@@ -19,9 +18,10 @@ from pathlib import Path
 
 import pytest
 
-# Python 3.15の遅延import対策（app.pyと同じ。PySide6より前に実体化しておく必要がある）
-concurrent.futures.ThreadPoolExecutor  # noqa: B018
-concurrent.futures.ProcessPoolExecutor  # noqa: B018
+# Python 3.15の遅延import対策（app.pyと同じ。core/lazy_import_fix.py）
+from core.lazy_import_fix import reify_concurrent_futures  # noqa: E402
+
+reify_concurrent_futures()
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 

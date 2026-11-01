@@ -7,17 +7,15 @@ Phase8: 多重起動防止・タスクトレイ統合・自動起動・ログ画
 """
 from __future__ import annotations
 
-import concurrent.futures
 import copy
 import sys
 from pathlib import Path
 
-# Python 3.15以降、concurrent.futuresはThreadPoolExecutor等を遅延import（PEP 810）する。
-# PySide6を先にimportすると遅延importが解決されないまま残り、APSchedulerの起動時に
-# "TypeError: 'lazy_import' object is not callable" で落ちるため、PySide6より前に実体化しておく。
-# （Windows実機テストで発見。tests/conftest.pyにも同じ処理がある）
-concurrent.futures.ThreadPoolExecutor  # noqa: B018
-concurrent.futures.ProcessPoolExecutor  # noqa: B018
+# Python 3.15 の遅延 import 対策（APScheduler の起動時に落ちる。配布版では PySide6 が先に読み込まれるため、
+# 読み込みの順番に頼らない方法で行う。core/lazy_import_fix.py）
+from core.lazy_import_fix import reify_concurrent_futures
+
+reify_concurrent_futures()
 
 from PySide6.QtCore import QObject, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import QIcon  # noqa: E402

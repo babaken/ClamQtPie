@@ -1091,3 +1091,12 @@ Rust 化の事前検証（`feat/rust-poc`）で見つかった、Python 版の�
 | 届かないアドレス（別のマシン） | 5.0 秒 | 5.0 秒（従来どおりの方法のまま） |
 
 1ファイルの検査は、もう一つの作業で PC の負荷が揺れていたため値がばらついたが、3〜13 倍速くなった。
+
+## 52. 配布版が Python 3.15 で起動の直後に落ちていた件
+
+Python 3.15.2・PyInstaller 6.22.3 で作った配布版が、起動の直後に APScheduler のところで `TypeError: 'lazy_import' object is not callable` で落ちていた。
+
+- 原因: Python 3.15 の `concurrent.futures` は `ThreadPoolExecutor` 等を遅延 import（PEP 810）する。PySide6 を読み込んだ後では、`concurrent.futures.ThreadPoolExecutor` が遅延 import の印のまま返る。従来の対策（app.py の最初、PySide6 より前に属性を読んで実体化する）は、配布版では PySide6 の runtime hook が本体より先に PySide6 を読み込むため間に合わなかった（PySide6 を先に読み込む小さなプログラムを配布版にして確認した）
+- 対策: `core/lazy_import_fix.py` の `reify_concurrent_futures()` で、下位のモジュール（`concurrent.futures.thread`・`process`）から本物のクラスを読み込み、`concurrent.futures` の名前を置き換える（読み込みの順番に関係なく効く）。app.py と `tests/conftest.py` の最初に呼ぶ
+- テスト: PySide6 を先に読み込んだ別のプロセスで、APScheduler が起動できること
+- 確認: Windows で配布版（UAC を求めない確認用の写し）を作り、起動シーケンスの完了まで進むことを確認した
