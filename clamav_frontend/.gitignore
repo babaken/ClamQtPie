@@ -4,6 +4,10 @@
 __pycache__/
 *.pyc
 *.db
+# SQLite の付随ファイル（WAL にしたため、アプリの起動中・異常終了の後に残る）
+*.db-wal
+*.db-shm
+*.db-journal
 config.json
 logs/
 quarantine/
