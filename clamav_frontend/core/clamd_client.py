@@ -64,6 +64,22 @@ def _connect_without_timeout(host: str) -> bool:
     return platform.system() == "Windows" and _is_loopback(host)
 
 
+class ClamdPathEncodingError(ClamdProtocolError):
+    """パスを clamd に送れない（呼び出し側は、ファイルの内容を送る INSTREAM で検査する）"""
+
+    default_message = "ファイル名を ClamAV サービスに送れないため、内容を送って検査します"
+
+
+def _encode_command(command: str) -> bytes:
+    """コマンドを送る形にする。Linux 等の UTF-8 として正しくないファイル名（Python では surrogateescape の文字）は、
+    OS のファイル名の元のバイト列のまま送る（clamd は同じバイト列のパスでファイルを開く）。
+    それでも表せない名前（Windows の対になっていないサロゲートなど）は ClamdPathEncodingError"""
+    try:
+        return f"z{command}\0".encode("utf-8", errors="surrogateescape")
+    except UnicodeEncodeError as exc:
+        raise ClamdPathEncodingError(detail=str(exc)) from exc
+
+
 class ClamdClient:
     """clamdへの1コマンド分の通信を担う低レベルクライアント
 
@@ -145,7 +161,7 @@ class ClamdClient:
 
     # -- 送受信 ---------------------------------------------------------
     def _send_command(self, sock: socket.socket, command: str) -> None:
-        sock.sendall(f"z{command}\0".encode("utf-8"))
+        sock.sendall(_encode_command(command))
 
     def _recv_until_close(self, sock: socket.socket) -> bytes:
         chunks: list[bytes] = []
@@ -200,8 +216,11 @@ class ClamdClient:
         return response == "RELOADING"
 
     def scan_path(self, path: str | Path, multi: bool = False) -> list[ScanResult]:
-        """SCAN / MULTISCAN（2.1節: ディレクトリはMULTISCAN、単一ファイルはSCAN）"""
+        """SCAN / MULTISCAN（2.1節: ディレクトリはMULTISCAN、単一ファイルはSCAN）
+
+        パスを clamd に送れない（UTF-8 の名前として表せない）場合は、接続する前に ClamdPathEncodingError"""
         command = f"{'MULTISCAN' if multi else 'SCAN'} {path}"
+        _encode_command(command)
         response = self._run_command(command, no_read_timeout=True)
         return self._parse_scan_response(response)
 

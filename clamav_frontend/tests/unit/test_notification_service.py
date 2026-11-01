@@ -408,3 +408,14 @@ def test_smtp_without_encryption_does_not_send_password(tmp_path):
         service._smtp_send(config_service.current.smtp, "pw", "s", "b")
 
     assert calls == ["sendmail"]
+
+
+def test_notify_send_shows_backslashes_literally(tmp_path):
+    # notify-send はバックスラッシュの並びを解釈する。ファイル名の見える形（\\udcff・\\n）の
+    # バックスラッシュが消えて、ありそうな別の名前（reportudcff.txt）や改行に見えないこと
+    service, _ = _service_for(tmp_path)
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+        service._send_linux_notify_send("検知", r"/tmp/report\udcff.txt: Eicar" + "\n" + r"/tmp/a\nb: X")
+    body = mock_run.call_args[0][0][2]
+    assert body == r"/tmp/report\\udcff.txt: Eicar" + "\n" + r"/tmp/a\\nb: X"  # 本物の改行はそのまま

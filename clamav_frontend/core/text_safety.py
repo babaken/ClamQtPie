@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import re
 
-_CONTROL_RE = re.compile("[\x00-\x1f\x7f  ]")
+# 制御文字と、対になっていないサロゲート（UTF-8 にできない名前。そのままではファイル・JSON に書けない）
+_CONTROL_RE = re.compile("[\x00-\x1f\x7f\u2028\u2029\ud800-\udfff]")
 _NAMED = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
 
 
@@ -23,5 +24,6 @@ def _escape(match: re.Match) -> str:
 
 
 def visible_controls(text: str) -> str:
-    """制御文字（U+0000〜U+001F、U+007F、U+2028、U+2029）を見える形に置き換える"""
+    """制御文字（U+0000〜U+001F、U+007F、U+2028、U+2029）と、対になっていないサロゲート（U+D800〜U+DFFF。
+    Linux の UTF-8 として正しくないファイル名など）を見える形に置き換える"""
     return _CONTROL_RE.sub(_escape, text)

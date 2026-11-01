@@ -25,6 +25,7 @@ from core.exceptions import (
     QuarantineWriteError,
 )
 from core.safe_fs import quarantine_move, restore_move
+from core.text_safety import visible_controls
 
 _READONLY_NO_EXEC = stat.S_IRUSR  # 読み取り専用・実行不可（オーナーのみ読み取り可）
 
@@ -49,6 +50,15 @@ class QuarantineService:
             raise QuarantineWriteError(detail=f"隔離フォルダ内のファイルは隔離しません: {original_path}")
         if not original_path.exists():
             raise QuarantineWriteError(detail=f"隔離対象が存在しません: {original_path}")
+        try:
+            str(original_path).encode("utf-8")
+        except UnicodeEncodeError:
+            # UTF-8 にできない名前は隔離の記録（DB）に書けない。ファイルを動かす前に断る
+            # （記録の形を変えて隔離できるようにするのは段階 12-2d）
+            raise QuarantineWriteError(
+                "この名前のファイルは隔離の記録に書けないため、隔離できません",
+                detail=visible_controls(str(original_path)),
+            ) from None
 
         file_uuid = str(uuid.uuid4())
         dest_path = self.quarantine_dir / file_uuid

@@ -28,6 +28,9 @@ from core.clamav_service import ERROR_REASON_SIZE_LIMIT, ClamAVService, error_re
 from core.exceptions import AppError, ClamdConnectionError
 from core.exclude_service import ExcludeService
 from core.logger import CATEGORY_SCAN, log_event
+from core.text_safety import visible_controls
+
+logger = logging.getLogger("clamav_frontend")
 
 
 def _now_iso() -> str:
@@ -37,13 +40,15 @@ def _now_iso() -> str:
 class ScanWorker(QObject):
     """QThread上で実行される実処理本体"""
 
-    progress = Signal(int, int, str)  # scanned_count, total_count, current_path
-    file_scanned = Signal(str, str, str, str)  # path, status, detail, detected_at(iso)
+    # パスは object で渡す（str で渡すと、Qt の文字列に変わるときに UTF-8 にできない名前の文字
+    # （対になっていないサロゲート）が黙って消え、受け取った側（隔離・履歴・画面）で別のファイルの名前になる）
+    progress = Signal(int, int, object)  # scanned_count, total_count, current_path
+    file_scanned = Signal(object, str, str, str)  # path, status, detail, detected_at(iso)
     finished = Signal(dict)  # {"scanned": int, "detected": int, "errors": int, "cancelled": bool}
     error = Signal(object)  # AppError
     # 待ち状態の通知（state, path, 経過秒）。state: "queued"=clamdの接続枠の空き待ち（待機中）、
     # "stalled"=clamdの応答待ちがSTALL_NOTICE_SEC以上続いている（応答待ち）、"scanning"=通常に戻った
-    activity = Signal(str, str, int)
+    activity = Signal(str, object, int)
 
     #: 1ファイルの応答待ちがこの秒数を超えたら「応答待ち」を表示する（プロトコル設計書4章: 10秒）
     STALL_NOTICE_SEC = 10.0
@@ -144,6 +149,14 @@ class ScanWorker(QObject):
                 errors += 1
                 self.error.emit(exc)
                 scanned += 1
+                continue
+            except Exception as exc:  # noqa: BLE001 - 1ファイルの想定外の失敗でスキャン全体を止めない
+                # 止まると完了の合図も出ず、画面が「スキャン中」のまま戻らなくなる
+                logger.exception(f"スキャン中に想定外のエラーが発生しました: {visible_controls(str(path))}",
+                                 extra={"error_code": "E9001"})
+                errors += 1
+                scanned += 1
+                self.file_scanned.emit(str(path), "ERROR", f"想定外のエラー: {type(exc).__name__}", _now_iso())
                 continue
             if self._stop_requested:
                 break  # 接続枠の空き待ち・応答待ちの途中で停止された
@@ -258,11 +271,12 @@ class ScanDispatcher(QObject):
     QThread上でScanWorkerを実行し、GUIスレッドをブロックしない。
     """
 
-    progress = Signal(int, int, str)
-    file_scanned = Signal(str, str, str, str)
+    # パスは object で渡す（ScanWorker と同じ理由）
+    progress = Signal(int, int, object)
+    file_scanned = Signal(object, str, str, str)
     finished = Signal(dict)
     error = Signal(object)
-    activity = Signal(str, str, int)  # ScanWorker.activityの中継（待機中・応答待ちの表示用）
+    activity = Signal(str, object, int)  # ScanWorker.activityの中継（待機中・応答待ちの表示用）
     #: スキャンを始めたとき（label）。画面・トレイ・Web API のどこから始めても出す（Web API のジョブの記録に使う）
     started = Signal(str)
 

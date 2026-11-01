@@ -209,9 +209,10 @@ def _has_line_break(text: str) -> bool:
 class ClamonaccRealtimeManager(QObject):
     """RealtimeManager（watchdog実装）と同じインターフェースを持つclamonacc実装"""
 
-    detected = Signal(str, str)  # path, virus_name（検知した時点。隔離の前）
-    detection_handled = Signal(str, str, bool)  # path, virus_name, 隔離できたか（検知時アクションの後）
-    watch_target_lost = Signal(str)  # path
+    # パスは object で渡す（str で渡すと、UTF-8 にできない名前の文字が Qt の文字列への変換で消える）
+    detected = Signal(object, str)  # path, virus_name（検知した時点。隔離の前）
+    detection_handled = Signal(object, str, bool)  # path, virus_name, 隔離できたか（検知時アクションの後）
+    watch_target_lost = Signal(object)  # path
     scan_error = Signal(object)  # AppError
 
     mode_name = "clamonacc"
@@ -323,7 +324,9 @@ class ClamonaccRealtimeManager(QObject):
                 stderr=subprocess.STDOUT,
                 text=True,
                 encoding="utf-8",
-                errors="replace",
+                # 正しくない UTF-8 の名前（clamonacc がそのままのバイトで書く）を、置き換え文字にせず元のバイトとして
+                # 保つ（surrogateescape の文字になり、検査し直し・隔離ができる。スキャンのパスと同じ形）
+                errors="surrogateescape",
             )
         except OSError as exc:
             self._process = None
@@ -634,7 +637,7 @@ class ClamonaccRealtimeManager(QObject):
                 self._quarantine_service.quarantine(path, virus_name)
                 quarantined = True
             except Exception as exc:  # noqa: BLE001 - GUI通知のため広く捕捉
-                logger.error(f"リアルタイム検知の自動隔離に失敗しました (detail: {exc})")
+                logger.error(f"リアルタイム検知の自動隔離に失敗しました: {path} (detail: {exc})")
         # 通知は隔離を試した後の実際の結果で送る（RealtimeManagerと同じ）
         self.detection_handled.emit(path, virus_name, quarantined)
 

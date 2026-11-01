@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from core.clamav_service import error_reason
 from core.exceptions import ClamdConnectionError
+from core.text_safety import visible_controls
 from db.database import DatabaseService
 from db.models import ScanHistory, ScanHistoryDetection, ScanHistoryError
 
@@ -47,6 +48,8 @@ class ScanHistoryCollector:
     errors_truncated: int = 0
 
     def add(self, path: str, status: str, detail: str) -> None:
+        # DB に書けない文字（UTF-8 にできない名前のサロゲート）や制御文字は、見える形にして残す
+        path, detail = visible_controls(str(path)), visible_controls(detail or "")
         if status == "FOUND":
             self.detections.append((path, detail))
         elif status == "ERROR":

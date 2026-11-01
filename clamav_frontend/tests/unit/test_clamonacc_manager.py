@@ -997,3 +997,14 @@ def test_clamonacc_config_file_in_user_writable_folder_is_not_used(env, tmp_path
     assert manager.start() is False
     assert env["processes"] == []
     assert errors[0].code == "E6005"
+
+
+def test_clamonacc_output_keeps_undecodable_names(env):
+    # clamonacc はファイル名をそのままのバイトで書く。正しくない UTF-8 の名前を置き換え文字にせず、
+    # 元のバイトとして読む（検査し直し・隔離ができるように）
+    env["watch_target_service"].add(str(env["watched"]))
+    manager = env["build"]()
+    manager.start()
+    process = env["processes"][0]
+    assert process.kwargs.get("errors") == "surrogateescape"
+    manager.stop()
