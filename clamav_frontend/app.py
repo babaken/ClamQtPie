@@ -38,6 +38,7 @@ from core.notification_service import NotificationService
 from core.quarantine_service import QuarantineService
 from core.realtime_factory import create_realtime_manager
 from core.scan_dispatcher import ScanDispatcher
+from core.scan_history_service import ScanHistoryRecorder, ScanHistoryService
 from core.scheduled_scan import run_scheduled_scan
 from core.scheduler_service import SchedulerService
 from core.single_instance import SingleInstanceLock
@@ -133,6 +134,13 @@ def main() -> int:
     exclude_service = ExcludeService(db_service)
     quarantine_service = QuarantineService(db_service, _APP_DIR / "quarantine")
     scan_dispatcher = ScanDispatcher(clamav_service, exclude_service)
+    # スキャン履歴（段階12-2c）: 手動（画面・トレイ・Web API）のスキャンを記録し、保持期間を過ぎたものを消す
+    scan_history_service = ScanHistoryService(db_service)
+    scan_history_recorder = ScanHistoryRecorder(scan_history_service, scan_dispatcher)
+    try:
+        scan_history_service.purge(config.logging.retention_days)
+    except Exception as exc:  # noqa: BLE001 - 古い履歴を消せなくても起動は続ける
+        logger.warning(f"古いスキャン履歴を削除できませんでした (detail: {exc})")
     watch_target_service = WatchTargetService(db_service)
     # Windows=watchdog / Linux=clamonacc（利用不可ならwatchdogへフォールバック）
     realtime_manager = create_realtime_manager(
@@ -190,6 +198,7 @@ def main() -> int:
             quarantine_service,
             notification_service,
             config.realtime,
+            history_service=scan_history_service,
         )
         if result.detected:
             # APSchedulerのスレッドから呼ばれるため、トレイ表示等はシグナル経由でGUIスレッドへ渡す
@@ -552,7 +561,7 @@ def main() -> int:
         api_invoker = QtInvoker()  # メインスレッドで作る（APIのスレッドから状態を変える処理を渡す先）
         # SSEで配るイベント（段階12-2b）: スキャン・定義更新のジョブ、リアルタイム監視、稼働状態、設定の保存
         api_events = EventHub()
-        api_jobs = JobTracker(api_events)
+        api_jobs = JobTracker(api_events, last_scan_history_id=lambda: scan_history_recorder.last_history_id)
         api_jobs.connect(scan_dispatcher, update_dispatcher)
         connect_realtime(api_events, realtime_manager)
         status_publisher = StatusPublisher(api_events, realtime_manager, scan_dispatcher, update_dispatcher, api_jobs)
@@ -570,6 +579,7 @@ def main() -> int:
             exclude_service=exclude_service,
             watch_target_service=watch_target_service,
             log_reader_service=log_reader_service,
+            scan_history_service=scan_history_service,
             invoker=api_invoker,
             events=api_events,
             jobs=api_jobs,

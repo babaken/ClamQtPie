@@ -459,7 +459,7 @@ def start_scan(ctx: ApiContext, scan_type: str, targets: list[str] | None, inclu
     audit(CATEGORY_SCAN, f"{label}を開始しました: {', '.join(paths)}")
     ctx.jobs.expect_source("scan", "api")
     ctx.scan_dispatcher.start(paths, include_subfolders=include_subfolders, apply_exclude=apply_exclude,
-                              label=label, skip_dirs=skip_dirs)
+                              label=label, skip_dirs=skip_dirs, source="api", scan_type=scan_type)
     _notify(ctx, CHANGED_SCAN_STARTED)
     return ctx.jobs.current("scan")
 

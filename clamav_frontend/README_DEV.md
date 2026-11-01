@@ -1044,3 +1044,25 @@ Linux配布版がWaylandのデスクトップで起動しない不具合（v0.9.
 - `PUT /realtime`（12-2a）の `{"running": true}` は「開始を受け付けた」の意味。clamonacc 方式では pkexec の認証の前に返り、認証のキャンセル・起動の失敗は後から `realtime.error` で、状態が戻ったことは `status` で届く（Linux 実機の確認で指摘。方式で応答の形を変えると使う側が分かりにくいため、200 のまま説明する）
 
 確認: 全テスト（Windows・WSL）成功。WSL で実際のアプリを API を有効にして起動し、`/events` を購読しながら `POST /scans`（custom）・`POST /updates` を呼び、ジョブが記録されて `scan.started`・`scan.progress`・`scan.finished`・`status`・`update.started` が届くことを確認した。
+
+## 48. 段階 12-2c: スキャン履歴
+
+サービス化・Web API設計書 6.2節。手動（画面・トレイ・Web API）とスケジュールのすべてのスキャンを、終了時に記録する。
+
+構成:
+- Alembic `0004_add_scan_history`: `scan_history`（`started_at`・`finished_at`・`source`（`gui`|`api`|`schedule`）・`scan_type`（`quick`|`full`|`custom`|`schedule`）・`label`・`targets`（JSON）・`scanned`・`detected`・`errors`・`errors_truncated`・`result`（`completed`|`cancelled`|`failed`）・`detail`）、`scan_history_detection`（`path`・`virus_name`・`action`（`quarantined`|`notified`））、`scan_history_error`（`path`・`reason`（`size_limit`|`permission`|`vanished`|`other`）・`detail`）
+- `core/scan_history_service.py`: `ScanHistoryService`（記録・一覧・詳細・保持期間を過ぎたものの削除）、`ScanHistoryCollector`（スキャン中の結果を集める。検査できなかったファイルは 1,000 件まで、超えた分は件数だけ）、`ScanHistoryRecorder`（`ScanDispatcher` のシグナルから手動のスキャンを記録）
+- `ScanDispatcher.start` に `source`・`scan_type` を足した（スキャン画面・Web API が渡す）
+- スケジュールのスキャン（`run_scheduled_scan`）は、成功・失敗（対象が無い、clamd に接続できない）とも記録する。検知の `action` は検知時アクションの結果
+- 起動時に `logging.retention_days` を過ぎた履歴を消す（SQLite の外部キーの連鎖削除は有効にしていないため、子の行も明示して消す）
+- Web API（user）: `GET /scans/history`（`?source=&since=&limit=&offset=`、新しい順）、`GET /scans/history/{id}`（`detections`・`error_files` を含む。無ければ 404 E8109）。`scan.finished` とジョブに `history_id` を付ける
+- `realtime.error` に `reason` を足した（`auth_cancelled`・`exited`・`monitoring_failed`・`start_failed`・`not_found`・`config`・`clamd_unavailable`・`target`・`unsafe_path`・`other`）。detail（clamonacc の出力の一部・パス）は送らない（Linux 実機の確認で指摘）
+
+見つけた不具合: 1ファイルのエラー（応答待ちのタイムアウトなど。スキャンは続く）でも、Web API のジョブを `failed` にしていた（12-2b）。clamd に接続できない・対象の列挙に失敗した、のときだけ失敗にする（`is_fatal_scan_error`）。履歴も同じ判定で、1ファイルのエラーは直前に検査を始めたファイルのエラーとして残す。
+
+設計書と異なる点・決めた点:
+- マイグレーションの番号は 0004（設計書の案では 0005。0004 の予定だった通知の保存（12-3）より先に作るため。12-3 の分は 0005 以降にする）
+- 詳細の検査できなかったファイルの一覧は `error_files`（件数の `errors` と名前が重ならないように）
+- 履歴の一覧の画面（トレイGUI のスキャン画面）は、GUI を API のクライアントにする 12-4 で作る
+
+確認: 全テスト（Windows・WSL）成功。WSL で実際のアプリから Web API でスキャンし、ジョブの `history_id`、`/scans/history`・`/scans/history/{id}` を確認した。

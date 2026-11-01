@@ -43,7 +43,7 @@ def env(tmp_path, fake_clamd_server):
     db_service.close()
 
 
-def _run(env, action="quarantine", target=None, clamav_service=None):
+def _run(env, action="quarantine", target=None, clamav_service=None, history_service=None):
     # app.pyの_run_scheduled_scan()と同じ呼び出し方
     return run_scheduled_scan(
         str(target if target is not None else env["target"]),
@@ -53,6 +53,7 @@ def _run(env, action="quarantine", target=None, clamav_service=None):
         env["quarantine_service"],
         env["notification_service"],
         RealtimeConfig(default_action=action),
+        history_service=history_service,
     )
 
 
@@ -193,3 +194,31 @@ def test_last_run_records_unscanned_file_count(env, fake_clamd_server):
     scheduler.run_now(record.id)
 
     assert scheduler.list_all()[0].last_run.endswith("(未検査 1件)")
+
+
+# -- スキャン履歴（段階 12-2c） -------------------------------------------------------------
+def test_scheduled_scan_is_recorded_in_history(env):
+    from core.scan_history_service import ScanHistoryService
+
+    history = ScanHistoryService(env["db_service"])
+    _run(env, action="quarantine", history_service=history)
+    record = history.list_all()[0]
+    assert (record.source, record.scan_type, record.label, record.result) == ("schedule", "schedule", "日次スキャン",
+                                                                            "completed")
+    assert record.targets == [str(env["target"])] and record.detected == 1
+    detail = history.get(record.id)
+    assert detail["detections"] == [{"path": str(env["infected"]), "virus_name": "Eicar-Test-Signature",
+                                     "action": "quarantined"}]
+
+
+def test_failed_scheduled_scans_are_recorded(env, tmp_path):
+    from core.scan_history_service import ScanHistoryService
+
+    history = ScanHistoryService(env["db_service"])
+    with pytest.raises(FileNotFoundError):
+        _run(env, target=tmp_path / "missing", history_service=history)
+    unreachable = ClamAVService(ClamdConfig(connection_type="tcp", tcp_host="127.0.0.1", tcp_port=1))
+    with pytest.raises(ClamdConnectionError):
+        _run(env, clamav_service=unreachable, history_service=history)
+    assert [r.result for r in history.list_all()] == ["failed", "failed"]
+    assert all(r.detail for r in history.list_all())

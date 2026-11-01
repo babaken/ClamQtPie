@@ -456,6 +456,8 @@ def test_pkexec_auth_cancel_emits_e2005(env, qtbot):
         process.finish(126, marker=False)
 
     assert "管理者認証" in blocker.args[0].detail
+    # Web API の利用者が、認証のキャンセルと clamonacc の失敗を見分けられるよう理由を付ける
+    assert blocker.args[0].reason == "auth_cancelled"
     manager.stop()
 
 

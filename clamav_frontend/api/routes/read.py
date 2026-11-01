@@ -16,6 +16,7 @@ from fastapi.responses import Response
 from api.actions import config_view
 from api.auth import require_user
 from core.definitions import definitions_age_days
+from core.exceptions import ApiNotFoundError
 from core.text_safety import visible_controls
 
 router = APIRouter(dependencies=[Depends(require_user)])
@@ -139,6 +140,45 @@ def list_update_history(request: Request, limit: int = Limit, offset: int = Offs
     for item in items:
         item.pop("detail", None)  # DB には保存しない項目（常に空）
     return _page(items, limit, offset)
+
+
+# -- 6.2 スキャン履歴（段階 12-2c） -----------------------------------------------------------
+@router.get("/scans/history")
+def list_scan_history(
+    request: Request,
+    source: str | None = Query(None, pattern="^(gui|api|schedule)$"),
+    since: date | None = None,
+    limit: int = Limit,
+    offset: int = Offset,
+) -> dict:
+    service = _ctx(request).scan_history_service
+    if service is None:
+        return _page([], limit, offset)
+    # since はこのPC の日付（その日の 0 時から）
+    since_dt = datetime.combine(since, time.min).astimezone() if since else None
+    items = [_history_item(record) for record in service.list_all(source=source, since=since_dt)]
+    return _page(items, limit, offset)
+
+
+@router.get("/scans/history/{history_id}")
+def get_scan_history(request: Request, history_id: int) -> dict:
+    service = _ctx(request).scan_history_service
+    found = service.get(history_id) if service is not None else None
+    if found is None:
+        raise ApiNotFoundError()
+    return {
+        **_history_item(found["record"]),
+        "detections": [{**d, "path": visible_controls(d["path"] or "")} for d in found["detections"]],
+        # errors（件数）と名前が重ならないよう、検査できなかったファイルの一覧は error_files にする
+        "error_files": [{**e, "path": visible_controls(e["path"] or ""), "detail": visible_controls(e["detail"] or "")}
+                        for e in found["errors"]],
+    }
+
+
+def _history_item(record) -> dict:
+    item = asdict(record)
+    item["targets"] = [visible_controls(t) for t in item["targets"]]
+    return item
 
 
 # -- 6.8 設定 ---------------------------------------------------------------------------

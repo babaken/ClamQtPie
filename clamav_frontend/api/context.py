@@ -26,6 +26,8 @@ class ApiContext:
     exclude_service: Any
     watch_target_service: Any
     log_reader_service: Any
+    #: core.scan_history_service.ScanHistoryService（段階 12-2c。None なら履歴の API は空を返す）
+    scan_history_service: Any = None
     # -- 状態を変える API（段階 12-2）で使う。None なら状態を変える API は付けない ------------------
     #: api.bridge.QtInvoker（メインスレッドで作ったもの）
     invoker: Any = None

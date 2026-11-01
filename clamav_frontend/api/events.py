@@ -10,6 +10,12 @@
 from __future__ import annotations
 
 from api.bridge import EventHub
+from core.exceptions import (
+    ClamdConnectionError,
+    ClamonaccTargetError,
+    UnsafeExecutablePathError,
+    WatchTargetLostError,
+)
 from core.text_safety import visible_controls
 
 
@@ -25,7 +31,25 @@ def connect_realtime(events: EventHub, realtime_manager) -> None:
         lambda path: events.publish("realtime.target_lost", {"path": visible_controls(path)}))
     realtime_manager.scan_error.connect(
         lambda error: events.publish("realtime.error", {"code": getattr(error, "code", "E2000"),
-                                                        "message": getattr(error, "message", "")}))
+                                                        "message": getattr(error, "message", ""),
+                                                        "reason": error_reason_of(error)}))
+
+
+def error_reason_of(error) -> str:
+    """realtime.error の reason。決まった言葉だけを返す（detail には出力の一部やパスが入るため返さない）。
+    clamonacc の失敗は ClamonaccError.reason（core/clamonacc_manager.py の REASON_*）、それ以外は例外の種類から"""
+    reason = getattr(error, "reason", None)
+    if isinstance(reason, str) and reason:
+        return reason
+    if isinstance(error, ClamdConnectionError):
+        return "clamd_unavailable"
+    if isinstance(error, ClamonaccTargetError):
+        return "target"
+    if isinstance(error, UnsafeExecutablePathError):
+        return "unsafe_path"
+    if isinstance(error, WatchTargetLostError):
+        return "target_lost"
+    return "other"
 
 
 class StatusPublisher:

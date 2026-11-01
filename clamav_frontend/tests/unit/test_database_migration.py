@@ -17,6 +17,7 @@ def test_migration_creates_all_initial_tables(tmp_path):
     inspector = inspect(service._engine)
     tables = set(inspector.get_table_names())
     assert {"quarantine", "schedule", "exclude", "alembic_version"} <= tables
+    assert {"scan_history", "scan_history_detection", "scan_history_error"} <= tables  # 0004
     service.close()
 
 

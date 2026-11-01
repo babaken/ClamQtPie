@@ -276,6 +276,8 @@ class ScanDispatcher(QObject):
         self._exclude_service = exclude_service
         self._thread: QThread | None = None
         self._worker: ScanWorker | None = None
+        #: 実行中（または直前）のスキャンの出どころ・種類・対象（スキャン履歴の記録に使う）
+        self.current: dict = {"source": "gui", "scan_type": "custom", "targets": []}
 
     @property
     def is_running(self) -> bool:
@@ -288,9 +290,13 @@ class ScanDispatcher(QObject):
         apply_exclude: bool = True,
         label: str = "手動スキャン",
         skip_dirs: tuple[str, ...] = (),
+        source: str = "gui",
+        scan_type: str = "custom",
     ) -> None:
+        """source: "gui"（画面・トレイ）| "api"、scan_type: "quick" | "full" | "custom"（スキャン履歴に残す）"""
         if self.is_running:
             return  # 画面設計書2章: 開始/停止は排他制御
+        self.current = {"source": source, "scan_type": scan_type, "targets": list(targets)}
 
         self._thread = QThread()
         self._worker = ScanWorker(

@@ -62,7 +62,7 @@ def test_scan_job_lifecycle(tracker):
     assert [e.data["status"] for e in _events_of(tracker.hub, "scan.file")] == ["FOUND", "ERROR"]
     finished = _events_of(tracker.hub, "scan.finished")[0].data
     assert finished == {"job_id": job["id"], "state": "finished", "scanned": 3, "detected": 1, "errors": 1,
-                        "cancelled": False}
+                        "cancelled": False, "history_id": None}
 
 
 def test_progress_events_are_thinned_out(tracker):
@@ -88,6 +88,26 @@ def test_cancelled_and_failed_scans(tracker):
     jobs.on_scan_finished({"scanned": 0, "detected": 0, "errors": 0, "cancelled": False})
     job = jobs.current("scan")
     assert job["state"] == "failed" and job["error"]["code"] == "E1001"
+
+
+def test_single_file_error_does_not_fail_the_job(tracker):
+    # 1ファイルの応答待ちのタイムアウトなどではスキャンを続けるため、ジョブも失敗にしない
+    from core.exceptions import ClamdTimeoutError
+
+    jobs = tracker.jobs
+    jobs.on_scan_started("手動スキャン")
+    jobs.on_scan_progress(0, 2, "/a/slow.bin")
+    jobs.on_scan_error(ClamdTimeoutError())
+    jobs.on_scan_finished({"scanned": 2, "detected": 0, "errors": 1, "cancelled": False})
+    assert jobs.current("scan")["state"] == "finished"
+
+
+def test_scan_finished_carries_the_history_id(tracker):
+    jobs = JobTracker(tracker.hub, last_scan_history_id=lambda: 42)
+    jobs.on_scan_started("手動スキャン")
+    jobs.on_scan_finished({"scanned": 0, "detected": 0, "errors": 0, "cancelled": False})
+    assert jobs.current("scan")["history_id"] == 42
+    assert _events_of(tracker.hub, "scan.finished")[-1].data["history_id"] == 42
 
 
 def test_job_source_is_recorded(tracker):
@@ -152,8 +172,24 @@ def test_realtime_events(qapp):
         ("realtime.detected", {"path": "/w/a.exe", "virus_name": "Eicar"}),
         ("realtime.handled", {"path": "/w/a.exe", "virus_name": "Eicar", "quarantined": True}),
         ("realtime.target_lost", {"path": "/w"}),
-        ("realtime.error", {"code": "E1001", "message": ClamdConnectionError.default_message}),
+        ("realtime.error", {"code": "E1001", "message": ClamdConnectionError.default_message,
+                            "reason": "clamd_unavailable"}),
     ]
+
+
+def test_realtime_error_reason_without_details(qapp):
+    # 理由は決まった言葉だけで知らせ、detail（clamonacc の出力の一部・パス）は送らない
+    from core.exceptions import ClamonaccError
+
+    hub = EventHub()
+    manager = _RealtimeSignals()
+    connect_realtime(hub, manager)
+    error = ClamonaccError(detail="管理者認証がキャンセルされたか、失敗しました / /home/a/secret")
+    error.reason = "auth_cancelled"
+    manager.scan_error.emit(error)
+    data = _events_of(hub, "realtime.error")[0].data
+    assert data["reason"] == "auth_cancelled"
+    assert "secret" not in str(data)
 
 
 def test_status_event_only_when_something_changes():
@@ -192,9 +228,10 @@ class _FakeScanDispatcher:
         self.started = []
         self.stopped = 0
 
-    def start(self, targets, include_subfolders=True, apply_exclude=True, label="", skip_dirs=()):
+    def start(self, targets, include_subfolders=True, apply_exclude=True, label="", skip_dirs=(), **kwargs):
         self.is_running = True
         self.started.append((targets, include_subfolders, apply_exclude, label, skip_dirs))
+        self.kwargs = kwargs
         self.jobs.on_scan_started(label)
 
     def stop(self):
@@ -255,6 +292,7 @@ def test_start_custom_scan(env):
     job = response.json()["job"]
     assert job["state"] == "running" and job["source"] == "api" and job["label"] == "手動スキャン"
     assert env.scan.started == [([str(env.tmp)], True, False, "手動スキャン", ())]
+    assert env.scan.kwargs == {"source": "api", "scan_type": "custom"}  # スキャン履歴に残す出どころと種類
     assert env.changed == ["scan_started"]  # 画面を実行中の表示にする
     assert _call(env, "GET", "/scans/current").json()["job"]["id"] == job["id"]
     # 実行中は受け付けない

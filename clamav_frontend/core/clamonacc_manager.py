@@ -114,6 +114,15 @@ _SUPERVISOR_SCRIPT = (
 )
 _EXIT_MARKER = "__CLAMONACC_EXIT__"
 
+#: 監視を始められなかった・止まった理由（ClamonaccError.reason。Web API の realtime.error で知らせる）
+REASON_NOT_FOUND = "not_found"  # clamonacc が見つからない
+REASON_CONFIG = "config"  # clamd.conf の前提の設定が足りない
+REASON_START_FAILED = "start_failed"  # 起動できなかった
+REASON_AUTH_CANCELLED = "auth_cancelled"  # 管理者の認証をキャンセルした・失敗した
+REASON_MONITORING_FAILED = "monitoring_failed"  # 監視の設定に失敗した
+REASON_EXITED = "exited"  # clamonacc が終了した
+REASON_OTHER = "other"
+
 #: pkexecの認証キャンセル・認証失敗時の終了コード
 _PKEXEC_AUTH_FAILED_CODES = (126, 127)
 
@@ -278,7 +287,7 @@ class ClamonaccRealtimeManager(QObject):
 
         clamonacc = find_clamonacc(self.config, self._which)
         if clamonacc is None:
-            self._emit_error(f"clamonaccが見つかりません ({self.config.clamonacc_path})")
+            self._emit_error(f"clamonaccが見つかりません ({self.config.clamonacc_path})", REASON_NOT_FOUND)
             return False
         # clamonaccとその設定ファイルはrootで実行・読み込むため、root以外が書き換えられる場所のものは使わない
         try:
@@ -294,7 +303,7 @@ class ClamonaccRealtimeManager(QObject):
         self._clamd_conf = load_clamd_conf(self.config.clamonacc_config_file, self._clamd_conf_candidates)
         problem = self._check_clamd_conf(self._clamd_conf)
         if problem:
-            self._emit_error(problem)
+            self._emit_error(problem, REASON_CONFIG)
             return False
         targets, rejected = self._split_unwatchable(targets, self._clamd_conf)
         if not targets:
@@ -318,7 +327,7 @@ class ClamonaccRealtimeManager(QObject):
             )
         except OSError as exc:
             self._process = None
-            self._emit_error(f"clamonaccの起動に失敗しました: {exc}")
+            self._emit_error(f"clamonaccの起動に失敗しました: {exc}", REASON_START_FAILED)
             return False
 
         self._stopping = False
@@ -532,7 +541,7 @@ class ClamonaccRealtimeManager(QObject):
                 process.stdin.close()  # rootシェルがclamonaccを停止する
         except OSError:
             pass
-        self._emit_error(detail)
+        self._emit_error(detail, REASON_MONITORING_FAILED)
 
     def _watch_process_output(self) -> None:
         """rootシェルの出力を監視し、clamonaccの終了（異常終了・認証キャンセル）を検出する"""
@@ -559,10 +568,13 @@ class ClamonaccRealtimeManager(QObject):
             exit_code = process.wait()
             if exit_code in _PKEXEC_AUTH_FAILED_CODES:
                 detail = "管理者認証がキャンセルされたか、失敗しました"
+                reason = REASON_AUTH_CANCELLED
             else:
                 detail = f"終了コード {exit_code}"
+                reason = REASON_EXITED
         else:
             detail = f"clamonaccが終了しました（終了コード {exit_code}）"
+            reason = REASON_EXITED
 
         self._exited.set()
         if self._stopping:
@@ -579,7 +591,7 @@ class ClamonaccRealtimeManager(QObject):
         except OSError:
             pass
         self._stop_event.set()
-        self._emit_error(detail)
+        self._emit_error(detail, reason)
 
     # -- 検知時アクション（watchdog実装の6.3節と同じ） -----------------------
     def _handle_detection(self, path: str, virus_name: str) -> None:
@@ -660,7 +672,8 @@ class ClamonaccRealtimeManager(QObject):
         logger.warning(f"clamonaccが検知したファイルを検査し直せませんでした: {path} ({detail})")
         return "unverified", virus_name
 
-    def _emit_error(self, detail: str) -> None:
+    def _emit_error(self, detail: str, reason: str = REASON_OTHER) -> None:
         error = ClamonaccError(detail=detail)
+        error.reason = reason  # Web API のイベント（realtime.error）で理由を知らせる（detail は返さない）
         logger.error(f"{error.message} (detail: {detail})", extra={"error_code": error.code})
         self.scan_error.emit(error)

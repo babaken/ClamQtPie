@@ -18,6 +18,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 
 from api.bridge import EventHub
+from core.scan_history_service import is_fatal_scan_error
 from core.text_safety import visible_controls
 
 KIND_SCAN = "scan"
@@ -44,8 +45,11 @@ def _now() -> str:
 
 
 class JobTracker:
-    def __init__(self, events: EventHub, clock=time.monotonic) -> None:
+    def __init__(self, events: EventHub, clock=time.monotonic, last_scan_history_id=None) -> None:
+        """last_scan_history_id: 直前に記録したスキャン履歴の ID を返す関数（scan.finished に付ける。12-2c）。
+        履歴の記録（ScanHistoryRecorder）は先に finished を受けるよう、こちらより先に接続しておく"""
         self._events = events
+        self._last_scan_history_id = last_scan_history_id
         self._clock = clock
         self._lock = threading.Lock()
         self._seq = itertools.count(1)
@@ -96,6 +100,7 @@ class JobTracker:
                 "finished_at": None,
                 "progress": progress,
                 "error": None,
+                "history_id": None,
             }
             self._jobs[kind] = job
             return {**job, "progress": dict(progress)}
@@ -142,7 +147,8 @@ class JobTracker:
     def on_scan_error(self, error) -> None:
         with self._lock:
             job = self._running(KIND_SCAN)
-            if job is not None:
+            # 1ファイルのエラー（応答待ちのタイムアウトなど）ではジョブを失敗にしない
+            if job is not None and is_fatal_scan_error(error, job["progress"]["total"] > 0):
                 job["error"] = {"code": getattr(error, "code", "E9001"), "message": getattr(error, "message", "")}
 
     def on_scan_finished(self, summary: dict) -> None:
@@ -159,9 +165,10 @@ class JobTracker:
             else:
                 job["state"] = STATE_FINISHED
             job["finished_at"] = _now()
+            job["history_id"] = self._last_scan_history_id() if self._last_scan_history_id else None
             data = {"job_id": job["id"], "state": job["state"], "scanned": job["progress"]["scanned"],
                     "detected": job["progress"]["detected"], "errors": job["progress"]["errors"],
-                    "cancelled": bool(summary.get("cancelled"))}
+                    "cancelled": bool(summary.get("cancelled")), "history_id": job["history_id"]}
         self._events.publish("scan.finished", data)
 
     # -- 定義の更新 -------------------------------------------------------------------------

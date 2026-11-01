@@ -23,6 +23,16 @@ from core.logger import CATEGORY_SCAN, log_event
 from core.notification_service import NotificationService
 from core.quarantine_service import QuarantineService
 from core.scan_dispatcher import ScanWorker
+from core.scan_history_service import (
+    ACTION_NOTIFIED,
+    ACTION_QUARANTINED,
+    RESULT_COMPLETED,
+    RESULT_FAILED,
+    SOURCE_SCHEDULE,
+    ScanHistoryCollector,
+    ScanHistoryService,
+    is_fatal_scan_error,
+)
 
 
 @dataclass
@@ -41,14 +51,21 @@ def run_scheduled_scan(
     quarantine_service: QuarantineService,
     notification_service: NotificationService | None,
     realtime_config: RealtimeConfig,
+    history_service: ScanHistoryService | None = None,
 ) -> ScheduledScanResult:
     """スケジュールスキャンを同期実行する（APSchedulerのワーカースレッドから呼ばれる）
 
     対象パスが存在しない、またはclamdに接続できない場合は例外を送出し、
     SchedulerService側でジョブ失敗（E4003、on_job_fail通知）として扱わせる。
+    history_service があれば、成功・失敗ともスキャン履歴に残す（段階 12-2c）
     """
+    collector = ScanHistoryCollector(source=SOURCE_SCHEDULE, scan_type="schedule", label=job_name,
+                                     targets=[target] if target else [])
     if not target or not Path(target).exists():
-        raise FileNotFoundError(f"スキャン対象が見つかりません: {target or '（未指定）'}")
+        message = f"スキャン対象が見つかりません: {target or '（未指定）'}"
+        if history_service is not None:
+            history_service.record(collector, 0, RESULT_FAILED, message)
+        raise FileNotFoundError(message)
 
     worker = ScanWorker(
         clamav_service,
@@ -60,14 +77,23 @@ def run_scheduled_scan(
     result = ScheduledScanResult()
     fatal_errors: list[AppError] = []
 
+    current_path: list[str] = []  # 直前に検査を始めたファイル（1ファイルのエラーの記録に使う）
+
+    def on_progress(_scanned: int, total: int, path: str) -> None:
+        if total > 0:
+            current_path[:] = [path]
+
     def on_file_scanned(path: str, status: str, detail: str, _detected_at: str) -> None:
         if status == "FOUND":
             result.detections.append((path, detail))
+        collector.add(path, status, detail)
 
     def on_error(error: AppError) -> None:
         # clamdに接続できない場合はジョブ失敗とする（1ファイル単位のタイムアウト等では失敗にしない）
         if isinstance(error, ClamdConnectionError):
             fatal_errors.append(error)
+        elif not is_fatal_scan_error(error, bool(current_path)):
+            collector.add(current_path[0], "ERROR", error.detail or error.message)
 
     def on_finished(summary: dict) -> None:
         result.scanned = summary["scanned"]
@@ -76,16 +102,23 @@ def run_scheduled_scan(
 
     # ワーカーは呼び出し元スレッドで同期実行するため、シグナルも同じスレッドで直接受け取る
     direct = Qt.ConnectionType.DirectConnection
+    worker.progress.connect(on_progress, direct)
     worker.file_scanned.connect(on_file_scanned, direct)
     worker.error.connect(on_error, direct)
     worker.finished.connect(on_finished, direct)
     worker.run()
 
     if fatal_errors:
+        if history_service is not None:
+            history_service.record(collector, result.scanned, RESULT_FAILED, fatal_errors[0].message)
         raise fatal_errors[0]
 
+    actions = {}
     for path, virus_name in result.detections:
-        _handle_detection(path, virus_name, quarantine_service, notification_service, realtime_config)
+        quarantined = _handle_detection(path, virus_name, quarantine_service, notification_service, realtime_config)
+        actions[path] = ACTION_QUARANTINED if quarantined else ACTION_NOTIFIED
+    if history_service is not None:
+        history_service.record(collector, result.scanned, RESULT_COMPLETED, detection_actions=actions)
     return result
 
 
@@ -95,7 +128,8 @@ def _handle_detection(
     quarantine_service: QuarantineService,
     notification_service: NotificationService | None,
     realtime_config: RealtimeConfig,
-) -> None:
+) -> bool:
+    """検知時アクションを行い、隔離できたら True"""
     quarantined = False
     if realtime_config.default_action == "quarantine":
         try:
@@ -110,3 +144,4 @@ def _handle_detection(
             )
     if notification_service is not None:
         notification_service.notify_detection(path, virus_name, quarantined=quarantined)
+    return quarantined

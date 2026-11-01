@@ -206,6 +206,7 @@ class ScanScreen(BaseScreen):
             apply_exclude=self.apply_exclude_check.isChecked(),
             label=self._scan_label(),
             skip_dirs=scan_targets.full_scan_skip_dirs() if self.full_radio.isChecked() else (),
+            scan_type="quick" if self.quick_radio.isChecked() else "full" if self.full_radio.isChecked() else "custom",
         )
         return True
 
