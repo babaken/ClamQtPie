@@ -19,7 +19,7 @@ reify_concurrent_futures()
 
 from PySide6.QtCore import QObject, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import QIcon  # noqa: E402
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon  # noqa: E402
 
 from core.activation import ActivationWatcher, helper_command, register_protocol, user_state_dir
 from core.autostart_service import AutostartService
@@ -39,6 +39,7 @@ from core.scan_dispatcher import ScanDispatcher
 from core.scan_history_service import ScanHistoryRecorder, ScanHistoryService
 from core.scheduled_scan import run_scheduled_scan
 from core.scheduler_service import SchedulerService
+from core.service_status import service_running
 from core.single_instance import SingleInstanceLock
 from core.update_service import UpdateDispatcher, UpdateService
 from core.version import APP_NAME
@@ -108,6 +109,18 @@ def main() -> int:
     app_icon = _RESOURCE_DIR / "icons" / "clamQtPie.ico"  # scripts/generate_icons.pyで生成
     if app_icon.exists():
         app.setWindowIcon(QIcon(str(app_icon)))
+
+    # 段階12-3: ClamQtPie サービスが動いているときは起動しない（監視・スケジュールが二重に動かないように。
+    # 段階12-4で画面がサービスにつながるようになるまでの扱い。core/service_status.py）
+    if service_running():
+        _append_log_line("INFO", "ClamQtPie サービスが動いているため、アプリを起動しませんでした")
+        QMessageBox.warning(
+            None, APP_NAME,
+            "ClamQtPie サービスが動いているため、アプリを起動できません。\n"
+            "アプリを使う場合は、先にサービスを止めてください。",
+        )
+        instance_lock.release()
+        return 0
 
     # ステップ3: config.json読込
     config_service = ConfigService(_APP_DIR / "config.json")

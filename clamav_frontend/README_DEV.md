@@ -1143,3 +1143,24 @@ v0.9.2 の後の修正（§49〜§53 のうち、Web API に関わらないも�
 
 隔離の形式（§53）を変えたため、v0.9.3 で隔離したファイルは v0.9.2 以前では復元できない（以前の版で隔離したファイルは v0.9.3 でそのまま復元できる）。DB は起動時に 0005 まで上がる。
 
+## 55. 段階 12-3a: サービスの本体
+
+サービス化・Web API設計書 9章。画面を持たず、監視・スキャン・スケジュール・定義の更新・隔離と内部 API を動かすサービスを作った。12-3 は 4 つに分ける（12-3a: サービスの本体、12-3b: 管理用コマンドと設定、12-3c: スケジュールと通知、12-3d: 接続先の確認と残り）。
+
+構成:
+- `service_main.py`: `--console [--data-dir DIR]`（前面で動かす。開発中の確認用で登録は要らない）、`--systemd`（Linux。unit は `Type=notify`）、`install`・`remove`・`start`・`stop`（Windows サービスの登録・操作。pywin32 の `HandleCommandLine`）。配布版が SCM から起動されたときは `StartServiceCtrlDispatcher`
+- `core/runtime.py`: 画面に関わらないサービス一式を組み立てる（従来の `app.py` の起動の順番から画面に関わるものを除いたもの）。従来の `app.py` は、画面がサービスのクライアントになる 12-4 まで自分で組み立てる
+- `api/service_api.py`: サービスの内部 API。`config.api.enabled` に関係なく待ち受け、待ち受けられなければ起動を失敗にする（終了コード 3）。稼働状態のイベント（status）は 2 秒ごと、clamd への問い合わせは別のスレッドで 60 秒ごと
+- `core/service_paths.py`: データの置き場所（Windows `%ProgramData%\ClamQtPie\`、Linux 設定 `/etc/clamqtpie/`・データ `/var/lib/clamqtpie/`・ログ `/var/log/clamqtpie/`）。無ければ本人・SYSTEM・Administrators／root だけが使える権限で作る。サービスとして動くときは起動のたびに所有者と権限を確かめ、一般の利用者が書き込めるフォルダ・リンクがあれば起動しない（終了コード 2。`C:\ProgramData` の直下を先に作られた場合も含む）。`--console` では警告だけ
+- `core/systemd_notify.py`: 内部 API が待ち受けを始めてから `READY=1`、止めるときに `STOPPING=1`（libsystemd を使わず `NOTIFY_SOCKET` に送る）。Windows は待ち受けの後に `SERVICE_RUNNING` を報告する
+- SIGTERM・SIGINT で終了の処理を通って止まる（トークンファイルも消える）。`--console` はデータの置き場所のロック（`service.lock`）で二重起動を防ぐ（終了コード 4）。サービスとしての二重起動の防止は SCM・systemd に任せる
+- 起動の行に版を出す（`サービスの起動シーケンス開始（ClamQtPie 0.9.3）`）
+- `core/service_status.py`・`app.py`: 従来のアプリは、サービスが動いていれば警告を出して起動しない（監視・スケジュールが二重に動かないように。12-4 までの扱い）
+- `scripts/install_service.sh`・`uninstall_service.sh`（`sudo` で systemd に登録・削除。`--purge` で設定・データ・ログも消す）、`scripts/install_service.bat`・`uninstall_service.bat`（UAC で昇格して Windows サービスに登録・削除）。開発中の確認用で、配布物には入れない。サービスは SYSTEM・root で、開発中のソースのフォルダのコードを実行するため、確認が終わったら必ず削除する
+
+設計書と異なる点・決めた点:
+- トークンファイルは置き場所の `api/` に、SYSTEM・Administrators／root だけが読める権限で置く。`user.token` を `ClamQtPie Users` グループに読ませるのは、グループを作るインストーラ（12-4）とあわせて行う
+- サービスはデスクトップに通知を出せない（Windows はセッション 0）。メールの通知は従来どおり送る。画面に知らせる仕組み（通知の保存）は 12-3c
+- `status` イベントの定義の古さは、サービスでは 12-3d で出す（今は `null`）
+
+確認: 全テスト（Windows・WSL）成功。Windows・WSL で `--console` で動かし、API に応答すること、二重起動を防ぐこと、WSL で SIGTERM で止まりトークンファイルが消えることを確認した。Windows サービス・systemd としての登録は、管理者・root の権限が要るため、利用者に scripts のスクリプトで確かめてもらう。
