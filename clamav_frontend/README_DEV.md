@@ -1278,3 +1278,19 @@ clamd が止まっている間に、同じポート・ソケットで別のプ�
 - 従来のアプリ（利用者の権限）は確かめない（サービスだけ）。診断画面への表示は段階 12-4
 
 確認: 全テスト（Windows 868 件・WSL 884 件）成功。この PC の clamd（Windows のサービス、WSL の UNIX ソケット）を実際に確かめられること（1 回あたり約 0.6 ms）。
+
+## 62. 段階 12-3d-2: 内部 API の接続先の確認・endpoint.json・回復動作
+
+サービス化・Web API設計書 3.1節・9.4節（12章 19・20・22）。
+
+- `core/service_endpoint.py`:
+  - サービスは待ち受けたポートを `api/endpoint.json`（`{"port", "pid"}`、トークンと同じ権限）に書く。止まっている間も前回の値を残す
+  - `read_endpoint()`: 無い・正しくなければ None（呼び出し側は設定の `api.port` を使う）
+  - `verify_service_listener()`: トークンを送る前に、ループバックのそのポートで待ち受けているのがサービスかを確かめる。Windows は待ち受けているプロセスがすべて `ClamQtPie` のサービスの PID であること、Linux は待ち受けているソケットの所有者がすべて root であること（12-3d-1 の `core/peer_verify.py` を使う）。違う・確かめられなければ E8105（`ServiceUnavailableError`）
+- `clamqtpie-ctl status`: `endpoint.json` のポートを表示し、確かめてから問い合わせる。確かめられなければ問い合わせない。トレイGUI（段階 12-4）も同じ関数を使う
+- 回復動作:
+  - Windows（`scripts/install_service.bat`）: `sc failure`（60 秒後に起動し直す、2 回まで、1 日で数え直す）と `sc failureflag 1`（エラーで止まったときも対象）
+  - Linux（`scripts/install_service.sh`）: 12-3a で設定済み（`Restart=on-failure`、`RestartSec=60`、`StartLimitIntervalSec=1d`、`StartLimitBurst=3`。置き場所の権限・API のポートの失敗は起動し直さない）
+  - 正式なインストーラーへの組み込みは段階 12-4
+
+確認: 全テスト（Windows 883 件・WSL 899 件）成功。

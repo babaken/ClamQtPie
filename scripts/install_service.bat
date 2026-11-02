@@ -17,6 +17,9 @@ if "%PY%"=="" if exist ".venv\Scripts\python.exe" set "PY=%CD%\.venv\Scripts\pyt
 if "%PY%"=="" set "PY=python"
 echo “o˜^‚µ‚Ü‚·: "%PY%" service_main.py
 "%PY%" service_main.py --startup delayed install
+rem ¸”s‚µ‚½‚ç 60 •bŒã‚É‹N“®‚µ’¼‚·i2 ‰ñ‚Ü‚ÅB¸”s‚Ì‰ñ”‚Í 1 “ú‚Å”‚¦’¼‚·BƒGƒ‰[‚Å~‚Ü‚Á‚½‚Æ‚«‚à‘ÎÛ‚É‚·‚éj
+sc failure ClamQtPie reset= 86400 actions= restart/60000/restart/60000
+sc failureflag ClamQtPie 1
 "%PY%" service_main.py start
 sc query ClamQtPie
 pause

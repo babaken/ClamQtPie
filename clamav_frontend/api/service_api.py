@@ -29,6 +29,7 @@ from api.jobs import JobTracker
 from api.server import LOOPBACK_HOST, ApiServer
 from core.logger import CATEGORY_SYSTEM, log_event, setup_logger
 from core.runtime import Runtime
+from core.service_endpoint import write_endpoint
 
 logger = logging.getLogger("clamav_frontend")
 
@@ -81,8 +82,11 @@ class ServiceApi:
         try:
             tokens.write_files()
             server.start()
+            # 待ち受けたポートを知らせる（トレイGUI・clamqtpie-ctl が読む。止まっている間も残す。9.4節）
+            write_endpoint(rt.paths.api_dir, server.port)
         except (OSError, RuntimeError):
             tokens.remove_files()
+            server.stop()
             raise
         self.server = server
         log_event(CATEGORY_SYSTEM, f"Web API の待ち受けを開始しました（{LOOPBACK_HOST}:{server.port}）")

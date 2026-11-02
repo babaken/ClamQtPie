@@ -136,6 +136,8 @@ def test_service_answers_on_the_api_and_refuses_a_second_instance(tmp_path):
     try:
         assert _wait_for_log(data_dir, "サービスを開始しました"), process.stdout.read() if process.poll() else ""
         token = (data_dir / "api" / "user.token").read_text(encoding="ascii")
+        # 待ち受けたポートを endpoint.json で知らせる（段階 12-3d）
+        assert json.loads((data_dir / "api" / "endpoint.json").read_text(encoding="ascii"))["port"] == port
         response = httpx.get(f"http://127.0.0.1:{port}/api/v1/status",
                              headers={"Authorization": f"Bearer {token}"}, timeout=10)
         assert response.status_code == 200

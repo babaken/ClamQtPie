@@ -38,9 +38,10 @@ reify_concurrent_futures()
 
 from core.config_model import GUI_SECTIONS, ConfigModel, validate_and_fix  # noqa: E402
 from core.config_service import ConfigService  # noqa: E402
-from core.exceptions import AppError  # noqa: E402
+from core.exceptions import AppError, ServiceUnavailableError  # noqa: E402
 from core.exec_path import child_env, find_system_tool, validate_executable, validate_trusted_file  # noqa: E402
 from core.secret_store import FileSecretStore  # noqa: E402
+from core.service_endpoint import read_endpoint, verify_service_listener  # noqa: E402
 from core.service_paths import ServicePaths, UnsafeDataDirectoryError, prepare_directories  # noqa: E402
 from core.service_status import SYSTEMD_UNIT, WINDOWS_SERVICE_NAME, service_running  # noqa: E402
 from core.version import APP_NAME, APP_VERSION  # noqa: E402
@@ -76,9 +77,17 @@ def cmd_status(paths: ServicePaths, out) -> int:
     running = service_running()
     print(f"{APP_NAME} {APP_VERSION}", file=out)
     print(f"サービス: {'動いています' if running else '止まっています'}", file=out)
-    print(f"内部 API: 127.0.0.1:{config.api.port}", file=out)
+    # サービスが待ち受けたポート（endpoint.json）。無ければ設定の値
+    port = read_endpoint(paths.api_dir) or config.api.port
+    print(f"内部 API: 127.0.0.1:{port}", file=out)
     if running:
-        print(f"  応答: {_api_version(config.api.port) or '応答がありません'}", file=out)
+        # 待ち受けているのがサービスかを確かめてから問い合わせる（偽のサーバーに問い合わせない。12章 22）
+        try:
+            verify_service_listener(port)
+        except ServiceUnavailableError as exc:
+            print(f"  応答: 問い合わせませんでした（{exc.code}: {exc.message}。{exc.detail}）", file=out)
+        else:
+            print(f"  応答: {_api_version(port) or '応答がありません'}", file=out)
     from core.clamav_service import ClamAVService
 
     try:
