@@ -11,6 +11,9 @@ fi
 UNIT=/etc/systemd/system/clamqtpie.service
 systemctl disable --now clamqtpie.service 2>/dev/null || true
 rm -f "$UNIT"
+# スケジュールのためにスリープから起こすタイマー（サービスが止まるときにも消すが、残っていれば消す）
+systemctl stop clamqtpie-wake.timer 2>/dev/null || true
+rm -f /etc/systemd/system/clamqtpie-wake.timer /etc/systemd/system/clamqtpie-wake.service
 systemctl daemon-reload
 echo "登録を削除しました: $UNIT"
 

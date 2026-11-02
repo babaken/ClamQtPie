@@ -377,6 +377,15 @@ def test_schedules_crud(env):
     assert env.changed == ["schedules"] * 4
 
 
+def test_schedule_wake_flag(env):
+    body = {"name": "毎晩", "scan_type": "update", "cron": "0 3 * * *", "wake": True}
+    job = _call(env, "POST", "/schedules", body).json()
+    assert job["wake"] is True
+    # PUT は全体を置き換える（送らなければ起こさない）
+    assert _call(env, "PUT", f"/schedules/{job['id']}", {**body, "wake": False}).json()["wake"] is False
+    assert _call(env, "PUT", f"/schedules/{job['id']}", {**body, "wake": "yes"}).status_code in (400, 422)
+
+
 def test_scan_schedule_target_must_be_absolute(env):
     response = _call(env, "POST", "/schedules", {"name": "a", "scan_type": "scan", "cron": "0 3 * * *",
                                                  "target": "relative/dir"})

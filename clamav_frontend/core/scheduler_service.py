@@ -10,6 +10,9 @@ SchedulerService — APScheduler連携によるスケジュールジョブ管理
 - 復帰時は APScheduler の待ち時間も計算し直させる（wakeup。Linux では待ち時間にスリープ中の時間が数えられず、
   そのままでは次の回がスリープしていた時間だけ遅れる）
 - inhibit_sleep なら、ジョブの実行中はスリープを防ぐ（core/sleep_inhibit.py）
+- wake が有効なジョブのうち、次の実行時刻が最も早いものの WAKE_LEAD 前に、スリープから起こすタイマーを
+  1つだけ設定する（core/wake_timer.py。9.1節）。ジョブの追加・変更・削除・有効無効の切り替え・実行の後と、
+  復帰時に設定し直す。定義の自動更新では起こさない
 """
 from __future__ import annotations
 
@@ -24,6 +27,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from core.exceptions import JobAlreadyRunningError, JobExecutionError, JobValidationError
 from core.sleep_inhibit import prevent_sleep
+from core.wake_timer import WakeTimer
 from db.database import DatabaseService
 from db.models import Schedule
 
@@ -37,6 +41,10 @@ _AUTO_UPDATE_START_DELAY = timedelta(minutes=2)
 CATCH_UP_DELAY = timedelta(minutes=1)
 #: 予定の時刻を過ぎても実行する猶予（秒）の既定（設定の schedule.misfire_grace_sec）
 DEFAULT_MISFIRE_GRACE_SEC = 3600
+#: スリープから起こす時刻を実行時刻より早める長さ（ネットワークや clamd の準備を待つため）
+WAKE_LEAD = timedelta(minutes=2)
+#: 起こす時刻をまだ OS に設定していない印（起動の直後は、前回の異常終了で残ったタイマーも消すため必ず設定する）
+_WAKE_UNKNOWN = object()
 #: 標準のcron式の曜日（0と7が日曜）→ APSchedulerの曜日名
 _CRON_WEEKDAY_NAMES = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
 
@@ -100,6 +108,8 @@ class ScheduleRecord:
     scan_type: str
     last_run: str
     next_run: str
+    #: スリープ中でも起こして実行する（段階 12-3c）
+    wake: bool = False
 
 
 def _to_record(row: Schedule) -> ScheduleRecord:
@@ -112,6 +122,7 @@ def _to_record(row: Schedule) -> ScheduleRecord:
         scan_type=row.scan_type,
         last_run=row.last_run or "",
         next_run=row.next_run or "",
+        wake=bool(row.wake),
     )
 
 
@@ -124,6 +135,7 @@ class SchedulerService:
         on_job_fail: Callable[[str, str], None] | None = None,
         misfire_grace_sec: int = DEFAULT_MISFIRE_GRACE_SEC,
         inhibit_sleep: bool = False,
+        wake_timer: WakeTimer | None = None,
     ) -> None:
         """
         run_scan: スキャンジョブ実行時に呼ばれるコールバック（対象パス, ジョブ名）。
@@ -133,6 +145,7 @@ class SchedulerService:
                      通知機能詳細仕様書の on_job_fail 通知に接続する想定（Phase7）。
         misfire_grace_sec: 予定の時刻を過ぎても実行する猶予（秒）。重なった回は1回にまとめる
         inhibit_sleep: ジョブの実行中はスリープを防ぐ（サービス）
+        wake_timer: wake が有効なジョブのためにスリープから起こすタイマー（サービス。None なら起こさない）
         on_job_finished: 最終実行結果を記録したときに呼ばれる（ジョブID, ジョブ名, 結果, 補足）。
                          結果は "success" | "failure"。Web API の schedule.finished に使う
         """
@@ -143,6 +156,10 @@ class SchedulerService:
         self._scheduler = BackgroundScheduler(
             job_defaults={"coalesce": True, "misfire_grace_time": misfire_grace_sec})
         self._inhibit_sleep = inhibit_sleep
+        self._wake_timer = wake_timer
+        #: 設定中の起こす時刻（同じ時刻で設定し直さないため）
+        self._wake_at: datetime | None | object = _WAKE_UNKNOWN
+        self._wake_lock = threading.Lock()
         self.on_job_finished: Callable[[int, str, str, str], None] | None = None
         self._started = False
         # 同一ジョブの重複実行防止（「今すぐ実行」とスケジュール発火の重なり等）。
@@ -157,14 +174,18 @@ class SchedulerService:
             self._scheduler.start()
             self._started = True
             self._reload_all_jobs()
+            self.refresh_wake()
 
     def shutdown(self) -> None:
         if self._started:
             self._scheduler.shutdown(wait=False)
             self._started = False
+            # サービスが止まっている間に起こしても実行できないため消す（起動時に設定し直す）
+            self._apply_wake(None)
+            self._wake_at = _WAKE_UNKNOWN
 
     # -- ジョブCRUD -----------------------------------------------------
-    def add_job(self, name: str, scan_type: str, cron: str, target: str = "") -> ScheduleRecord:
+    def add_job(self, name: str, scan_type: str, cron: str, target: str = "", wake: bool = False) -> ScheduleRecord:
         self._validate(name, scan_type, cron, exclude_id=None)
 
         with self.db.session() as session:
@@ -176,6 +197,7 @@ class SchedulerService:
                 scan_type=scan_type,
                 last_run=None,
                 next_run=None,
+                wake=1 if wake else 0,
             )
             session.add(row)
             session.commit()
@@ -184,11 +206,13 @@ class SchedulerService:
 
         if self._started:
             self._schedule_job(record)
+            self.refresh_wake()
         return record
 
     def update_job(
-        self, job_id: int, name: str, scan_type: str, cron: str, target: str = ""
+        self, job_id: int, name: str, scan_type: str, cron: str, target: str = "", wake: bool | None = None
     ) -> ScheduleRecord:
+        """wake: None なら変えない（従来のアプリの編集画面には、まだこの項目が無い）"""
         self._validate(name, scan_type, cron, exclude_id=job_id)
 
         with self.db.session() as session:
@@ -199,12 +223,16 @@ class SchedulerService:
             row.scan_type = scan_type
             row.cron = cron
             row.target = target
+            if wake is not None:
+                row.wake = 1 if wake else 0
             session.commit()
             record = _to_record(row)
 
         if self._started:
             self._unschedule_job(job_id)
-            self._schedule_job(record)
+            if record.enabled:
+                self._schedule_job(record)
+            self.refresh_wake()
         return record
 
     def remove_job(self, job_id: int) -> None:
@@ -215,6 +243,7 @@ class SchedulerService:
                 session.commit()
         if self._started:
             self._unschedule_job(job_id)
+            self.refresh_wake()
 
     def set_enabled(self, job_id: int, enabled: bool) -> None:
         with self.db.session() as session:
@@ -230,6 +259,7 @@ class SchedulerService:
             self._unschedule_job(job_id)
             if enabled:
                 self._schedule_job(record)
+            self.refresh_wake()
 
     def set_auto_update(
         self,
@@ -321,7 +351,47 @@ class SchedulerService:
         logger.info(f"スリープからの復帰を検出しました（約 {int(slept_sec)} 秒）。スケジュールを確かめます")
         names = self.catch_up_missed()
         self._scheduler.wakeup()
+        self.refresh_wake()
         return names
+
+    # -- スリープから起こす ---------------------------------------------------
+    def next_wake_time(self) -> datetime | None:
+        """wake が有効なジョブの次の実行時刻のうち、最も早いものの WAKE_LEAD 前。無ければ None"""
+        if not self._started:
+            return None
+        times = [datetime.fromisoformat(record.next_run) for record in self.list_all()
+                 if record.enabled and record.wake and record.next_run]
+        return min(times) - WAKE_LEAD if times else None
+
+    def refresh_wake(self) -> None:
+        """スリープから起こすタイマーを設定し直す。起こす時刻が過ぎていれば（実行の直前）消す"""
+        if self._wake_timer is None:
+            return
+        try:
+            when = self.next_wake_time()
+        except Exception as exc:  # noqa: BLE001 - 起こせなくても、復帰後に取り返す
+            logger.warning(f"スリープから起こす時刻を決められませんでした (detail: {exc})")
+            return
+        if when is not None and when <= datetime.now(timezone.utc):
+            when = None
+        self._apply_wake(when)
+
+    def _apply_wake(self, when: datetime | None) -> None:
+        if self._wake_timer is None:
+            return
+        with self._wake_lock:
+            if when == self._wake_at:
+                return
+            try:
+                if when is None:
+                    self._wake_timer.clear()
+                    logger.info("スリープから起こす予定を消しました")
+                else:
+                    self._wake_timer.set(when)
+                    logger.info(f"スリープから起こす予定を設定しました: {when.isoformat()}")
+                self._wake_at = when
+            except Exception as exc:  # noqa: BLE001 - 起こせなくても、復帰後に取り返す
+                logger.warning(f"スリープから起こすタイマーを設定できませんでした (detail: {exc})")
 
     def is_job_running(self, job_id: int) -> bool:
         """ジョブを実行中か（Web API の「今すぐ実行」で、別のスレッドに渡す前に 409 を返すため）"""
@@ -405,6 +475,9 @@ class SchedulerService:
         finally:
             with self._running_lock:
                 self._running_job_ids.discard(record.id)
+            # 次の回に合わせて起こす時刻を設定し直す
+            if record.wake:
+                self.refresh_wake()
 
     def _execute_body(self, record: ScheduleRecord) -> None:
         now_iso = datetime.now(timezone.utc).isoformat()

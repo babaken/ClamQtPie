@@ -86,6 +86,10 @@ def cmd_status(paths: ServicePaths, out) -> int:
     except Exception:  # noqa: BLE001 - 応答しない clamd は「停止」
         reachable = False
     print(f"clamd: {'応答あり' if reachable else '応答なし'}", file=out)
+    # スケジュールのためにスリープから起こせるか（Windows は電源プランの設定、Linux は設定中の予定。段階 12-3c）
+    from core.wake_timer import wake_timer_policy
+
+    print(wake_timer_policy(), file=out)
     print(f"設定: {paths.config_file}", file=out)
     print(f"データ: {paths.data_dir}", file=out)
     print(f"ログ: {paths.log_dir}", file=out)

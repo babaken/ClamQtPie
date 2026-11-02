@@ -43,6 +43,8 @@ class Schedule(Base):
     scan_type = Column(Text)
     last_run = Column(Text)
     next_run = Column(Text)
+    # 段階 12-3c（0007）: スリープ中でも起こして実行する
+    wake = Column(Integer, nullable=False, default=0, server_default="0")
 
 
 class Exclude(Base):

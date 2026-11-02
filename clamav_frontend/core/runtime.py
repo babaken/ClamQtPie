@@ -34,6 +34,7 @@ from core.secret_store import FileSecretStore
 from core.service_paths import ServicePaths
 from core.update_service import UpdateDispatcher, UpdateService
 from core.version import APP_NAME, APP_VERSION
+from core.wake_timer import create_wake_timer
 from core.watch_target_service import WatchTargetService
 from db.database import DatabaseService
 
@@ -137,7 +138,8 @@ def build(paths: ServicePaths) -> Runtime:
 
     scheduler_service = SchedulerService(db_service, run_scan, run_update,
                                          on_job_fail=notification_service.notify_job_failure,
-                                         misfire_grace_sec=config.schedule.misfire_grace_sec, inhibit_sleep=True)
+                                         misfire_grace_sec=config.schedule.misfire_grace_sec, inhibit_sleep=True,
+                                         wake_timer=create_wake_timer())
     scheduler_service.start()
     scheduler_service.set_auto_update(run_update, config.update.auto_update, config.update.interval_hours,
                                       last_run=update_service.last_executed_at())

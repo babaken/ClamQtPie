@@ -204,19 +204,24 @@ def _check_schedule_target(scan_type: str, target: str) -> None:
         raise ValueError("スキャンの対象は絶対パスで指定してください")
 
 
-def add_schedule(ctx: ApiContext, name: str, scan_type: str, cron: str, target: str):
+def _wake_text(wake: bool) -> str:
+    return "、スリープから起こす" if wake else ""
+
+
+def add_schedule(ctx: ApiContext, name: str, scan_type: str, cron: str, target: str, wake: bool = False):
     _check_schedule_target(scan_type, target)
-    record = ctx.scheduler_service.add_job(name, scan_type, cron, target)  # 内容が正しくなければ E4001・E4002
-    audit(CATEGORY_SCAN, f"スケジュールを追加しました: id={record.id} {name}（{scan_type}、{cron}、{target}）")
+    record = ctx.scheduler_service.add_job(name, scan_type, cron, target, wake=wake)  # 内容が正しくなければ E4001・E4002
+    audit(CATEGORY_SCAN, f"スケジュールを追加しました: id={record.id} {name}（{scan_type}、{cron}、{target}{_wake_text(wake)}）")
     _notify(ctx, CHANGED_SCHEDULES)
     return record
 
 
-def update_schedule(ctx: ApiContext, job_id: int, name: str, scan_type: str, cron: str, target: str):
+def update_schedule(ctx: ApiContext, job_id: int, name: str, scan_type: str, cron: str, target: str,
+                    wake: bool = False):
     _ensure_schedule(ctx, job_id)
     _check_schedule_target(scan_type, target)
-    record = ctx.scheduler_service.update_job(job_id, name, scan_type, cron, target)
-    audit(CATEGORY_SCAN, f"スケジュールを変更しました: id={job_id} {name}（{scan_type}、{cron}、{target}）")
+    record = ctx.scheduler_service.update_job(job_id, name, scan_type, cron, target, wake=wake)
+    audit(CATEGORY_SCAN, f"スケジュールを変更しました: id={job_id} {name}（{scan_type}、{cron}、{target}{_wake_text(wake)}）")
     _notify(ctx, CHANGED_SCHEDULES)
     return record
 

@@ -58,6 +58,8 @@ class ScheduleBody(_Body):
     scan_type: str = Field(max_length=16)
     cron: str = Field(max_length=200)
     target: str = Field("", max_length=_MAX_TEXT)
+    #: スリープ中でも起こして実行する（段階 12-3c。PUT で送らなければ false になる）
+    wake: bool = False
 
 
 class PasswordBody(_Body):
@@ -168,14 +170,15 @@ async def remove_watch_target(request: Request, target_id: int) -> Response:
 # -- 6.6 スケジュール ---------------------------------------------------------------------
 @router.post("/schedules", status_code=201)
 async def add_schedule(request: Request, body: ScheduleBody) -> dict:
-    record = await _on_main(request, actions.add_schedule, body.name, body.scan_type, body.cron, body.target)
+    record = await _on_main(request, actions.add_schedule, body.name, body.scan_type, body.cron, body.target,
+                            body.wake)
     return asdict(record)
 
 
 @router.put("/schedules/{job_id}")
 async def update_schedule(request: Request, job_id: int, body: ScheduleBody) -> dict:
     record = await _on_main(
-        request, actions.update_schedule, job_id, body.name, body.scan_type, body.cron, body.target
+        request, actions.update_schedule, job_id, body.name, body.scan_type, body.cron, body.target, body.wake
     )
     return asdict(record)
 

@@ -1245,3 +1245,19 @@ PR #25 の Linux 実機の確認で直したもの:
   - イベント: `notification`（`{id, created_at, title, body, open_screen}`）・`notification.acked`（`{ids}`。既読にしたものが無ければ送らない）
 
 確認: 全テスト（Windows 840 件・WSL 858 件）成功。
+
+## 60. 段階 12-3c-3: スケジュールのためにスリープから起こす
+
+サービス化・Web API設計書 6.6節・9.1節。ジョブごとに「スリープ中でも起こして実行する」（`wake`）を選べるようにし、サービスが OS の復帰タイマーを設定する。既定は false（ノート PC が鞄の中などで起動しないように）。編集画面の項目は段階 12-4・12-5。
+
+- `schedule.wake`（Alembic `0007_add_schedule_wake`。設計書の案では 0006）。既存のジョブは false
+- `SchedulerService(wake_timer=...)`: `wake` が有効なジョブのうち、次の実行時刻が最も早いものの 2 分前（`WAKE_LEAD`）に、タイマーを1つだけ設定する。ジョブの追加・変更・削除・有効無効の切り替え・実行の後、起動時、スリープからの復帰時に設定し直す（同じ時刻なら設定し直さない）。サービスの停止時に消し、起動時は必ず一度設定し直す（異常終了で残ったタイマーも消す）。設定できなくてもスケジュールは止めない（復帰後に取り返す）。定義の自動更新では起こさない
+  - `update_job(wake=None)` は wake を変えない（従来のアプリの編集画面にはまだ項目が無いため）
+- `core/wake_timer.py`:
+  - Windows: `CreateWaitableTimer`（名前なし）と `SetWaitableTimer(fResume=True)`。タイマーはサービスのプロセスが持ち、終われば消える
+  - Linux（root のサービスだけ）: `/etc/systemd/system/clamqtpie-wake.timer`（`OnCalendar=<UTC の日時>`、`WakeSystem=true`）と、何もしない `clamqtpie-wake.service` を書き、`daemon-reload` と `restart` で読み直させる。不要になったら止めて消す。`uninstall_service.sh` も消す
+  - 一般の利用者の従来のアプリは起こさない
+- Web API: `POST /schedules`・`PUT /schedules/{id}` に `wake`（既定 false。PUT は全体を置き換えるため、送らなければ false）。`GET /schedules` の各ジョブにも `wake`
+- `clamqtpie-ctl status`: Windows は電源プランの「スリープ解除タイマーの許可」（`powercfg /query SCHEME_CURRENT SUB_SLEEP RTCWAKE`。表示の言語によらないよう値だけを読む）、Linux は設定中の起こす予定を表示する。診断画面への表示は段階 12-4
+
+確認: 全テスト（Windows 856 件・WSL 873 件）成功。
