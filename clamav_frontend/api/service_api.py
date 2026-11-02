@@ -18,7 +18,13 @@ from api.app import create_app
 from api.auth import ApiTokens
 from api.bridge import EventHub, QtInvoker
 from api.context import ApiContext
-from api.events import StatusPublisher, connect_realtime, connect_scheduler, publish_config_changed
+from api.events import (
+    StatusPublisher,
+    connect_notifications,
+    connect_realtime,
+    connect_scheduler,
+    publish_config_changed,
+)
 from api.jobs import JobTracker
 from api.server import LOOPBACK_HOST, ApiServer
 from core.logger import CATEGORY_SYSTEM, log_event, setup_logger
@@ -42,6 +48,7 @@ class ServiceApi:
         self.jobs.connect(runtime.scan_dispatcher, runtime.update_dispatcher)
         connect_realtime(self.events, runtime.realtime_manager)
         connect_scheduler(self.events, runtime.scheduler_service)
+        connect_notifications(self.events, runtime.notification_store)
         self._clamd_running: bool | None = None
         self._stop = threading.Event()
         self._status = StatusPublisher(self.events, runtime.realtime_manager, runtime.scan_dispatcher,
@@ -63,7 +70,8 @@ class ServiceApi:
             exclude_service=rt.exclude_service, watch_target_service=rt.watch_target_service,
             log_reader_service=rt.log_reader_service, scan_history_service=rt.scan_history_service,
             invoker=self.invoker, events=self.events, jobs=self.jobs,
-            notification_service=rt.notification_service, diagnostics_service=rt.diagnostics_service,
+            notification_service=rt.notification_service, notification_store=rt.notification_store,
+            diagnostics_service=rt.diagnostics_service,
             apply_config=self._apply_config, start_clamd=rt.clamd_starter.start,
             clamd_controller=rt.clamd_controller,
             on_clamd_stop_requested=lambda: None, on_clamd_stop_failed=lambda: None,

@@ -15,6 +15,7 @@ import ssl
 import smtplib
 import subprocess
 from email.mime.text import MIMEText
+from typing import Callable
 
 from core.activation import ALLOWED_SCREENS, SCREEN_QUARANTINE, toast_launch_uri
 from core.config_model import ConfigModel
@@ -74,9 +75,14 @@ def _notify_send_text(text: str) -> str:
 
 
 class NotificationService:
-    def __init__(self, config_service: ConfigService, icon_path: str | None = None) -> None:
+    def __init__(self, config_service: ConfigService, icon_path: str | None = None,
+                 desktop_sink: Callable[[str, str, str | None], object] | None = None) -> None:
+        """desktop_sink: デスクトップ通知を表示する代わりに (title, body, open_screen) を渡す先。
+        サービスはデスクトップに通知を出せないため、core.notification_store.NotificationStore.add を渡して保存する
+        （サービス化・Web API設計書 7.1節）。None なら従来どおり表示する"""
         self._config_service = config_service
         self._icon_path = icon_path
+        self._desktop_sink = desktop_sink
         self._aggregator: DetectionAggregator | None = None
         self._rebuild_aggregator()
 
@@ -107,6 +113,11 @@ class NotificationService:
             quarantined=quarantined,
         )
         self._aggregator.add(event)
+
+    def flush_pending(self) -> None:
+        """集約の途中の検知通知を、待たずに出す（サービスの終了のとき。保存されずに消えないように）"""
+        if self._aggregator is not None:
+            self._aggregator.flush()
 
     def _on_detection_batch_ready(self, events: list[DetectionEvent]) -> None:
         notif = self.config.notification
@@ -156,6 +167,12 @@ class NotificationService:
     # -- デスクトップ通知（4章） -----------------------------------------------
     def _send_desktop_notification(self, title: str, body: str, open_screen: str | None = None) -> None:
         """open_screen: クリック時に開く画面（Windows Toastのみ。Linuxのnotify-sendは仕様書4.2節どおりクリック動作なし）"""
+        if self._desktop_sink is not None:
+            try:
+                self._desktop_sink(title, body, open_screen)
+            except Exception as exc:  # noqa: BLE001 - 保存できなくても、メールの通知や検知後の処理は続ける
+                logger.warning(f"通知を保存できませんでした (detail: {exc})")
+            return
         try:
             if platform.system() == "Windows":
                 self._send_windows_toast(title, body, open_screen)

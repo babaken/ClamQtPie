@@ -5,6 +5,7 @@
 - status: 稼働状態が変わったとき（ホーム画面の定期確認の結果から。変わったときだけ出す）
 - config.changed: 設定を保存したとき（画面・Web API のどちらで保存しても。app.py から呼ぶ）
 - schedule.finished: スケジュールのジョブの最終実行結果を記録したとき（段階 12-3c）
+- notification・notification.acked: 通知を保存したとき・既読にしたとき（サービスのみ。段階 12-3c）
 
 リアルタイム監視のシグナルは監視のスレッドから出るため、EventHub.publish（任意のスレッドから呼べる）に直接つなぐ。
 """
@@ -40,6 +41,12 @@ def connect_scheduler(events: EventHub, scheduler_service) -> None:
     """スケジュールのジョブの結果を schedule.finished で知らせる（APScheduler のスレッドから呼ばれる）"""
     scheduler_service.on_job_finished = lambda job_id, name, result, note: events.publish(
         "schedule.finished", {"job_id": job_id, "name": visible_controls(name), "result": result, "note": note})
+
+
+def connect_notifications(events: EventHub, notification_store) -> None:
+    """通知の保存・既読を notification・notification.acked で知らせる（保存は検知の集約のスレッドなどから呼ばれる）"""
+    notification_store.on_added = lambda item: events.publish("notification", item)
+    notification_store.on_acked = lambda ids: events.publish("notification.acked", {"ids": ids})
 
 
 def error_reason_of(error) -> str:

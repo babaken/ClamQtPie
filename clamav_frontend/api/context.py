@@ -35,6 +35,8 @@ class ApiContext:
     events: Any = None
     jobs: Any = None
     notification_service: Any = None
+    #: core.notification_store.NotificationStore（サービスの通知の保存。段階 12-3c。None なら通知の API は付けない）
+    notification_store: Any = None
     diagnostics_service: Any = None
     #: 変更した対象の名前（"excludes"・"targets"・"quarantine"・"schedules"・"config"・"realtime"・"logs"）を受け取り、
     #: 画面を読み直す（メインスレッドで呼ぶ）

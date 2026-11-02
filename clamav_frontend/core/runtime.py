@@ -22,6 +22,7 @@ from core.exclude_service import ExcludeService
 from core.log_reader_service import LogReaderService
 from core.logger import setup_logger
 from core.notification_service import NotificationService
+from core.notification_store import NotificationStore
 from core.quarantine_service import QuarantineService
 from core.realtime_factory import create_realtime_manager
 from core.scan_dispatcher import ScanDispatcher
@@ -55,6 +56,7 @@ class Runtime:
     update_service: Any
     update_dispatcher: Any
     notification_service: Any
+    notification_store: Any
     log_reader_service: Any
     diagnostics_service: Any
     scheduler_service: Any
@@ -68,6 +70,11 @@ class Runtime:
         if self.realtime_manager.is_running:
             self.realtime_manager.stop()
         self.scheduler_service.shutdown()
+        try:
+            # 集約の途中（最初の検知から60秒以内）の検知通知を、DB を閉じる前に保存する
+            self.notification_service.flush_pending()
+        except Exception as exc:  # noqa: BLE001 - 通知を保存できなくても終了は続ける
+            logger.warning(f"集約の途中の検知通知を保存できませんでした (detail: {exc})")
         self.db_service.close()
 
 
@@ -102,9 +109,14 @@ def build(paths: ServicePaths) -> Runtime:
     logger.info(f"リアルタイム監視方式: {realtime_manager.mode_name}")
     update_service = UpdateService(db_service, clamav_service, freshclam_path=config.update.freshclam_path)
     update_dispatcher = UpdateDispatcher(update_service)
-    # サービスはデスクトップに通知を出せない（Windows はセッション 0）。メールの通知は従来どおり送る。
-    # 画面に知らせる仕組み（通知の保存）は段階 12-3c
-    notification_service = NotificationService(config_service)
+    # サービスはデスクトップに通知を出せない（Windows はセッション 0）ため、未読として保存し、トレイGUI・WebUI が
+    # 読んで表示する（段階 12-3c）。メールの通知は従来どおり送る
+    notification_store = NotificationStore(db_service)
+    try:
+        notification_store.purge(config.logging.retention_days)
+    except Exception as exc:  # noqa: BLE001 - 古い通知を消せなくても起動は続ける
+        logger.warning(f"既読の古い通知を削除できませんでした (detail: {exc})")
+    notification_service = NotificationService(config_service, desktop_sink=notification_store.add)
     log_reader_service = LogReaderService(paths.log_dir / "app.log")
     diagnostics_service = DiagnosticsService(config_service, clamav_service, realtime_manager,
                                              app_dir=paths.data_dir)
@@ -145,7 +157,8 @@ def build(paths: ServicePaths) -> Runtime:
         scan_dispatcher=scan_dispatcher, scan_history_service=scan_history_service,
         watch_target_service=watch_target_service, realtime_manager=realtime_manager,
         update_service=update_service, update_dispatcher=update_dispatcher,
-        notification_service=notification_service, log_reader_service=log_reader_service,
+        notification_service=notification_service, notification_store=notification_store,
+        log_reader_service=log_reader_service,
         diagnostics_service=diagnostics_service, scheduler_service=scheduler_service, clamd_starter=clamd_starter,
         run_update=run_update, keep=[scan_history_recorder, run_scan, resume_watcher],
     )

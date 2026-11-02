@@ -28,7 +28,7 @@ def _flush_detections(service: NotificationService) -> None:
     後のテストの途中で発火して結果を乱していた。確定はロックの中で行われるため、
     タイマーが先に動いていても、その処理が終わってから戻る
     """
-    service._aggregator._flush()
+    service._aggregator.flush()
 
 def test_mail_body_template_reflects_detection_count(tmp_path):
     # NT-U03

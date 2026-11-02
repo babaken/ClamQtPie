@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request
 from api.auth import ApiTokens, check_request
 from api.context import ApiContext
 from api.errors import install_error_handlers
-from api.routes import info, jobs, read, write
+from api.routes import info, jobs, notifications, read, write
 from core.version import APP_NAME, APP_VERSION
 
 API_PREFIX = "/api/v1"
@@ -47,4 +47,6 @@ def create_app(tokens: ApiTokens, context: ApiContext | None = None) -> FastAPI:
             app.include_router(write.router, prefix=API_PREFIX)
             if context.jobs is not None:
                 app.include_router(jobs.router, prefix=API_PREFIX)
+            if context.notification_store is not None:
+                app.include_router(notifications.router, prefix=API_PREFIX)
     return app

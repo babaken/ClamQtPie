@@ -54,6 +54,18 @@ def test_new_window_starts_after_previous_flush():
     assert len(batches[1]) == 1
 
 
+def test_flush_delivers_the_pending_batch_without_waiting():
+    # サービスの終了のとき、まとめている途中の検知を消さない
+    batches = []
+    aggregator = DetectionAggregator(window_sec=10.0, max_batch_size=50, on_batch_ready=batches.append)
+
+    aggregator.add(_event("/tmp/a.txt"))
+    aggregator.flush()
+    aggregator.flush()  # 2回目は何もしない
+
+    assert [len(b) for b in batches] == [1]
+
+
 def test_cancel_prevents_pending_flush():
     batches = []
     aggregator = DetectionAggregator(window_sec=0.2, max_batch_size=50, on_batch_ready=batches.append)

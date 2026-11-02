@@ -139,6 +139,10 @@ def test_service_answers_on_the_api_and_refuses_a_second_instance(tmp_path):
         response = httpx.get(f"http://127.0.0.1:{port}/api/v1/status",
                              headers={"Authorization": f"Bearer {token}"}, timeout=10)
         assert response.status_code == 200
+        # サービスでは通知を保存し、未読を API で読める（段階 12-3c）
+        response = httpx.get(f"http://127.0.0.1:{port}/api/v1/notifications/pending",
+                             headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        assert response.status_code == 200 and response.json() == {"notifications": [], "total": 0}
         # 起動の完了の前に API が待ち受けを始めていること（ログの順番）
         log = (data_dir / "logs" / "app.log").read_text(encoding="utf-8")
         assert log.index("Web API の待ち受けを開始しました") < log.index("サービスを開始しました")

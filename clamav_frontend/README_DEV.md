@@ -1230,3 +1230,18 @@ PR #25 の Linux 実機の確認で直したもの:
 - Linux の定義更新: OS の `clamav-freshclam.service` が動いていれば、root で動くサービスでも、無人実行（自動・スケジュール）は行わない（`skipped`。PR #23 の確認で、OS のサービスと重ねて更新していた）。利用者の操作による更新は、従来どおり freshclam を直接実行する（ログは `--log=/dev/null`）。設計書の「OS のサービスを再起動してジャーナルから結果を読む」は、従来の方法で問題が出ていないため行わない（設計書と違う点）
 
 確認: 全テスト（Windows 824 件・WSL 842 件）成功。
+
+## 59. 段階 12-3c-2: 通知の保存
+
+サービス化・Web API設計書 6.10節・7.1節。サービスはデスクトップに通知を出せない（Windows はセッション 0、Linux はログインした利用者のセッションがない）ため、未読として保存し、トレイGUI・WebUI が読んで表示する（表示は段階 12-4・12-5）。
+
+- `pending_notification`（Alembic `0006_add_pending_notification`。設計書の案では 0004 だが、先にスキャン履歴・隔離の変更が入ったため 0006）: `id`、`created_at`、`title`、`body`、`open_screen`、`acked_at`
+- `core/notification_store.py`（`NotificationStore`）: 保存・未読の一覧・既読・古い既読の削除。タイトル・本文は制御文字を見える形にし、長さを制限する（200・2000 文字）。`open_screen` は `ALLOWED_SCREENS` のものだけを残す。既読にしたものは `logging.retention_days` を過ぎたら、サービスの起動時に消す（未読は消さない）
+- `NotificationService(desktop_sink=...)`: 渡されていれば、デスクトップに表示する代わりに保存する（サービスだけ。従来のアプリは従来どおり表示する）。保存できなくても、メールの通知や検知後の処理は続ける
+- サービスの終了のとき、集約の途中（最初の検知から 60 秒以内）の検知通知を、DB を閉じる前に保存する（`NotificationService.flush_pending`。Linux 実機の確認での指摘）
+- Web API（user 以上。サービスだけ）:
+  - `GET /notifications/pending`: `{"notifications": [...], "total": n}`。未読を新しい順に最大 500 件と、未読の全体の件数
+  - `POST /notifications/ack`: `{"ids": [...]}`（最大 1000 件）か `{"all": true}` のどちらか一方。`{"acked": [...]}`（実際に既読にした ID）を返す。既読にした件数・ロール・接続元をログに残す（GUI／WebUI の区別は、WebUI の認証が入る段階 12-5 で加える）
+  - イベント: `notification`（`{id, created_at, title, body, open_screen}`）・`notification.acked`（`{ids}`。既読にしたものが無ければ送らない）
+
+確認: 全テスト（Windows 840 件・WSL 858 件）成功。

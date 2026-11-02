@@ -127,3 +127,20 @@ class ScanHistoryError(Base):
     path = Column(Text)
     reason = Column(Text)  # "size_limit" | "permission" | "vanished" | "other"
     detail = Column(Text)
+
+
+class PendingNotification(Base):
+    """デスクトップ通知の保存（サービス化・Web API設計書 7.1節。0006_add_pending_notification）
+
+    サービスはデスクトップに通知を出せないため、未読として保存し、トレイGUI・WebUI が読んで表示する。
+    既読にしたもの（acked_at あり）は logging.retention_days を過ぎたら消す。
+    """
+
+    __tablename__ = "pending_notification"
+
+    id = Column(Integer, primary_key=True)
+    created_at = Column(Text, nullable=False)
+    title = Column(Text, nullable=False)
+    body = Column(Text, nullable=False)
+    open_screen = Column(Text)  # クリックで開く画面（core.activation.ALLOWED_SCREENS のどれか）
+    acked_at = Column(Text, index=True)
