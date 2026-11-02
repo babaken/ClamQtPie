@@ -10,6 +10,7 @@ ClamdClient — clamdソケット通信の低レベルプロトコル層
 from __future__ import annotations
 
 import ipaddress
+import logging
 import platform
 import re
 import socket
@@ -25,6 +26,9 @@ from core.exceptions import (
     ClamdStreamSizeError,
     ClamdTimeoutError,
 )
+from core.text_safety import visible_controls
+
+logger = logging.getLogger("clamav_frontend")
 
 ScanStatus = Literal["OK", "FOUND", "ERROR"]
 
@@ -93,6 +97,10 @@ class ClamdClient:
         # （clamdソケット通信プロトコル設計書4章「ユーザーによる明示キャンセルのみで中断」）
         self._active_socks: dict[int, socket.socket] = {}
         self._active_lock = threading.Lock()
+        #: 接続の前に相手が clamd かを確かめるもの（core.peer_verify.ClamdEndpointVerifier。サービスだけ。段階 12-3d）
+        self.verifier = None
+        #: 最後にログに残した、確かめられなかった理由（同じ理由を繰り返し残さない）
+        self._verify_failure: str | None = None
 
     def abort_thread(self, thread_ident: int) -> bool:
         """指定スレッドが通信中のソケットを閉じ、応答待ちを打ち切る。打ち切った場合True"""
@@ -132,6 +140,16 @@ class ClamdClient:
 
     def _connect(self) -> socket.socket:
         conn_type = self._resolve_connection_type()
+        if self.verifier is not None:
+            from core.peer_verify import VerifyError
+
+            try:
+                self.verifier.check()
+            except VerifyError as exc:
+                self._report_verification(str(exc))
+                # 確かめられない相手には、検査するファイルの名前・中身を送らない
+                raise ClamdConnectionError(detail=f"接続先が clamd であることを確かめられません: {exc}") from exc
+            self._report_verification(None)
         try:
             if conn_type == "unix":
                 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -153,11 +171,31 @@ class ClamdClient:
                 self._active_socks[threading.get_ident()] = sock
             return sock
         except PermissionError as exc:
+            self._invalidate_verification()
             raise ClamdConnectionError(
                 "ClamAVサービスへのアクセス権限がありません", code="E1005", detail=str(exc)
             ) from exc
         except OSError as exc:
+            self._invalidate_verification()
             raise ClamdConnectionError(detail=str(exc)) from exc
+
+    def _report_verification(self, failure: str | None) -> None:
+        """確かめられなかった理由をログに残す。スキャンの失敗・状態の確認の結果には理由が残らないため。
+        同じ理由は1回だけ（状態の確認は定期的に行うため、ログが埋まらないように）"""
+        with self._active_lock:
+            previous, self._verify_failure = self._verify_failure, failure
+        if failure == previous:
+            return
+        if failure is not None:
+            logger.warning(f"接続先が clamd であることを確かめられないため、接続しません (detail: {visible_controls(failure)})",
+                           extra={"error_code": ClamdConnectionError.default_code})
+        else:
+            logger.info("接続先が clamd であることを確かめられました")
+
+    def _invalidate_verification(self) -> None:
+        """つながらなかった（clamd が止まった・入れ替わった可能性がある）ので、次の接続で確かめ直す"""
+        if self.verifier is not None:
+            self.verifier.invalidate()
 
     # -- 送受信 ---------------------------------------------------------
     def _send_command(self, sock: socket.socket, command: str) -> None:

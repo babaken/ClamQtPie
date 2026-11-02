@@ -1261,3 +1261,20 @@ PR #25 の Linux 実機の確認で直したもの:
 - `clamqtpie-ctl status`: Windows は電源プランの「スリープ解除タイマーの許可」（`powercfg /query SCHEME_CURRENT SUB_SLEEP RTCWAKE`。表示の言語によらないよう値だけを読む）、Linux は設定中の起こす予定を表示する。診断画面への表示は段階 12-4
 
 確認: 全テスト（Windows 856 件・WSL 873 件）成功。
+
+## 61. 段階 12-3d-1: clamd の接続先の確認
+
+サービス化・Web API設計書 9章（12章 43）。12-3d は 3 つに分ける（12-3d-1: clamd の接続先の確認、12-3d-2: 内部 API の接続先の確認・`endpoint.json`・回復動作、12-3d-3: 残り（隔離の途中のファイルの片づけ、`scan.quick_targets`、定義の古さ、user の手動スキャンの対象））。
+
+clamd が止まっている間に、同じポート・ソケットで別のプログラムが待ち受けていても、検査するファイルの名前・中身を渡さないよう、サービスは接続の前に相手を確かめる（`core/peer_verify.py`）。
+
+- Windows（TCP）: `GetExtendedTcpTable`（待ち受けだけ、PID つき）で、ループバックのそのポートで待ち受けているプロセスがすべて clamd のサービス（`clamd.service_name`、既定 `clamd`）の PID であること。psutil の `net_connections` は Windows で待ち受けの状態を正しく返さないことがあったため使わない
+- Linux（TCP）: `/proc/net/tcp`・`tcp6` で待ち受けているソケットの所有者が、すべて root か clamd.conf の `User`（既定 `clamav`）であること
+- Linux（UNIX ソケット）: ソケットと親のディレクトリの所有者が root か clamd の利用者で、親のディレクトリにほかの利用者が書き込めないこと
+- 確かめた結果は 5 秒使い回し、接続に失敗したら確かめ直す。確かめられなければ接続せず、clamd に接続できない（E1001、理由つき）として扱う
+- 確かめられなかった理由は WARNING でログに残す（同じ理由は 1 回だけ。確かめられるようになったら INFO）。clamd に接続できずにスキャンを中断するときも、理由をログに残す（サービスではジョブ・履歴に要約しか残らないため。Linux 実機の確認での指摘）
+- `clamd.tcp_host` が別の PC のときは確かめられないため、ログに一度警告して接続する
+- `GET /status` の `clamd.verified`（確かめた: true、確かめられない・別の PC: false、従来のアプリ: null）
+- 従来のアプリ（利用者の権限）は確かめない（サービスだけ）。診断画面への表示は段階 12-4
+
+確認: 全テスト（Windows 868 件・WSL 884 件）成功。この PC の clamd（Windows のサービス、WSL の UNIX ソケット）を実際に確かめられること（1 回あたり約 0.6 ms）。

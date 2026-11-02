@@ -141,6 +141,9 @@ class ScanWorker(QObject):
                 # （続行するとファイル数分のエラーダイアログが表示されてしまう）
                 errors += 1
                 aborted = True
+                # 理由をログに残す（サービスではジョブ・履歴に要約しか残らず、管理者に理由が分からない）
+                logger.error(f"{self._label}を中断します: {exc.message} (detail: {visible_controls(str(exc.detail))})",
+                             extra={"error_code": exc.code})
                 self.error.emit(exc)
                 break
             except AppError as exc:

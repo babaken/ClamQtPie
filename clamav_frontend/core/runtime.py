@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import copy
 import logging
+import platform
 from dataclasses import dataclass, field
 from typing import Any
 
 from core.clamav_service import ClamAVService
+from core.clamd_conf import load_clamd_conf
 from core.clamd_process import ClamdServiceController, ClamdStarter
 from core.config_service import ConfigService
 from core.diagnostics_service import DiagnosticsService
@@ -79,6 +81,14 @@ class Runtime:
         self.db_service.close()
 
 
+def _clamd_user(config) -> str | None:
+    """clamd.conf の User（Linux。読めなければ None で、既定の clamav を使う）"""
+    if platform.system() != "Linux":
+        return None
+    conf = load_clamd_conf(config.realtime.clamonacc_config_file)
+    return conf.get("User") if conf is not None else None
+
+
 def build(paths: ServicePaths) -> Runtime:
     """サービス一式を組み立てて、スケジュールと（設定が有効なら）リアルタイム監視を始める"""
     # SMTP パスワードは keyring ではなく、データの置き場所のファイルに保存する（SYSTEM・root では keyring を使えない）
@@ -92,7 +102,10 @@ def build(paths: ServicePaths) -> Runtime:
 
     clamd_controller = ClamdServiceController(config.clamd)
     # 接続の設定はサービスの再起動後に反映する（通信中に設定が変わらないよう写しを渡す。app.py と同じ）
-    clamav_service = ClamAVService(copy.deepcopy(config.clamd), restart_clamd=clamd_controller.start)
+    # 接続の前に相手が clamd かを確かめる（clamd が止まっている間に、同じポート・ソケットで偽のサーバーを立てられても
+    # ファイルの中身を渡さない。段階 12-3d）
+    clamav_service = ClamAVService(copy.deepcopy(config.clamd), restart_clamd=clamd_controller.start,
+                                   verify_endpoint=True, clamd_user=_clamd_user(config))
     exclude_service = ExcludeService(db_service)
     quarantine_service = QuarantineService(db_service, paths.quarantine_dir)
     scan_dispatcher = ScanDispatcher(clamav_service, exclude_service)

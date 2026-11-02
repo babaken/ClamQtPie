@@ -105,7 +105,7 @@ def test_read_apis_need_a_token(env, path):
 
 def test_status(env):
     body = _get(env, "/status").json()
-    assert body["clamd"] == {"reachable": True, "engine_version": "ClamAV 1.5.4", "database_version": "28170",
+    assert body["clamd"] == {"reachable": True, "verified": None, "engine_version": "ClamAV 1.5.4", "database_version": "28170",
                              "database_date": "Fri Oct 30 08:00:00 2026"}
     assert body["realtime"] == {"running": True, "mode": "watchdog監視"}
     assert body["scan"] == {"running": False}

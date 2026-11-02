@@ -43,14 +43,17 @@ def get_status(request: Request) -> dict:
     ctx = _ctx(request)
     config = ctx.config_service.current
 
-    clamd = {"reachable": False, "engine_version": "", "database_version": "", "database_date": ""}
+    clamd = {"reachable": False, "verified": None, "engine_version": "", "database_version": "", "database_date": ""}
     try:
         if ctx.clamav_service.ping(retry=False):
             engine, db_version, db_date = ctx.clamav_service.get_version()
-            clamd = {"reachable": True, "engine_version": engine, "database_version": db_version,
+            clamd = {"reachable": True, "verified": None, "engine_version": engine, "database_version": db_version,
                      "database_date": db_date}
     except Exception:  # noqa: BLE001 - 応答しない clamd は「停止」として返す（ホーム画面と同じ）
         pass
+    # 接続先が clamd だと確かめられたか（サービスだけ。確かめられなければ接続しないため reachable も false。
+    # 別の PC の clamd は確かめられないため false のまま接続する）
+    clamd["verified"] = getattr(ctx.clamav_service, "endpoint_verified", None)
     # clamd が応答しない間は定義の日付が分からないため、古さも判定しない
     age = definitions_age_days(clamd["database_date"]) if clamd["reachable"] else None
 

@@ -136,7 +136,7 @@ def test_skip_dirs_are_not_enumerated(fake_clamd_server, tmp_path):
     assert str(tmp_path / "proc" / "status") not in scanned
 
 
-def test_clamd_unreachable_aborts_scan_with_single_error(tmp_path):
+def test_clamd_unreachable_aborts_scan_with_single_error(tmp_path, caplog):
     from core.clamav_service import ClamAVService
     from core.config_model import ClamdConfig
 
@@ -152,6 +152,8 @@ def test_clamd_unreachable_aborts_scan_with_single_error(tmp_path):
 
     assert len(errors) == 1  # ファイル数分のエラーダイアログを出さない
     assert summary["cancelled"] is True
+    # 中断の理由をログに残す（サービスではジョブ・履歴に要約しか残らない）
+    assert "を中断します: ClamAVサービス（clamd）に接続できません" in caplog.text
 
 
 # -- 応答待ち・待機中の表示と停止操作による打ち切り（プロトコル設計書4章・5章） ------------------
