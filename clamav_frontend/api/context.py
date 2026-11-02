@@ -51,6 +51,9 @@ class ApiContext:
     on_clamd_stop_requested: Callable[[], None] | None = None
     on_clamd_stop_failed: Callable[[], None] | None = None
 
+    #: サービス（service_main.py）の API か。従来のアプリ（利用者の権限で動く）と扱いを分ける項目に使う
+    service_mode: bool = False
+
     @property
     def can_write(self) -> bool:
         return self.invoker is not None

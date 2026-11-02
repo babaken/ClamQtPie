@@ -8,7 +8,10 @@ QuarantineService — ファイルの隔離・復元・完全削除
 """
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
+import re
 import stat
 import uuid
 from datetime import datetime, timezone
@@ -30,6 +33,11 @@ from core.safe_fs import quarantine_move, restore_move
 from core.text_safety import visible_controls
 
 _READONLY_NO_EXEC = stat.S_IRUSR  # 読み取り専用・実行不可（オーナーのみ読み取り可）
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+#: 隔離の途中で中断したファイルを記録し直すときのウイルス名（元の記録が無いため分からない）
+INTERRUPTED_VIRUS_NAME = "（不明: 隔離の途中で中断）"
+
+logger = logging.getLogger("clamav_frontend")
 
 
 def _now_iso() -> str:
@@ -156,6 +164,74 @@ class QuarantineService:
         except (OSError, quarantine_codec.QuarantineFormatError):
             pass
 
+    # -- 途中で中断したものの片づけ ------------------------------------------
+    def recover_interrupted(self) -> list[str]:
+        """隔離・復元の途中で落ちたときに、隔離フォルダに残ったファイルを片づける（起動時に呼ぶ）。片づけた名前を返す
+
+        - <uuid>.restoring: 復元の途中で元に戻した中身。隔離ファイル（<uuid>）は残っているので消す
+        - <uuid>.moving: 隔離の途中で元の場所から移した中身（まだ記録が無く、元の場所には無い）。元の内容のまま
+          置いておかないよう変換し、元の場所が分からない隔離の記録として残す（誤検知だった場合に、復元先を指定して
+          戻せるように。clamqtpie-ctl quarantine restore --to）
+        リンク・通常のファイル以外・名前の形が違うものには触らない
+        """
+        handled = []
+        try:
+            entries = list(os.scandir(self.quarantine_dir))
+        except OSError as exc:
+            logger.warning(f"隔離フォルダを確かめられませんでした (detail: {exc})")
+            return handled
+        for entry in entries:
+            stem, dot, suffix = entry.name.partition(".")
+            if not dot or suffix not in ("moving", "restoring") or not _UUID_RE.fullmatch(stem):
+                continue
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            path = Path(entry.path)
+            try:
+                if suffix == "restoring":
+                    _remove(path)
+                    logger.warning(f"復元の途中で中断したファイルを消しました: {entry.name}")
+                else:
+                    self._recover_moving(path, stem)
+            except Exception as exc:  # noqa: BLE001 - 1つ片づけられなくても、ほかを続ける
+                logger.error(f"隔離の途中で中断したファイルを片づけられませんでした: {entry.name} (detail: {exc})",
+                             extra={"error_code": "E3001"})
+                continue
+            handled.append(entry.name)
+        return handled
+
+    def _recover_moving(self, moving: Path, file_uuid: str) -> None:
+        dest_path = self.quarantine_dir / file_uuid
+        with self.db_service.session() as session:
+            recorded = session.query(Quarantine).filter(Quarantine.uuid == file_uuid).first() is not None
+        if recorded and dest_path.exists():
+            _remove(moving)  # 変換と記録は済んでいる
+            return
+        digest = hashlib.sha256()
+        size = 0
+        with open(moving, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        if dest_path.exists():
+            os.chmod(dest_path, stat.S_IRUSR | stat.S_IWUSR)  # 途中まで変換したもの。作り直す
+        quarantine_codec.encode_file(moving, dest_path, digest.hexdigest(), size)
+        try:
+            os.chmod(dest_path, _READONLY_NO_EXEC)
+        except OSError:
+            pass
+        if not recorded:
+            with self.db_service.session() as session:
+                session.add(Quarantine(
+                    uuid=file_uuid, original_path="", virus_name=INTERRUPTED_VIRUS_NAME,
+                    sha256=digest.hexdigest(), size=size, detected_at=_now_iso(), restored=0, deleted=0,
+                    encoding=quarantine_codec.ENCODING_XOR_V1,
+                ))
+                session.commit()
+        _remove(moving)
+        log_event(CATEGORY_QUARANTINE, f"隔離の途中で中断したファイルを、元の場所が分からない隔離として記録しました: {file_uuid}",
+                  level=logging.WARNING)
+
     # -- 復元 -----------------------------------------------------
     def restore(
         self, quarantine_id: int, dest_path: str | Path | None = None, overwrite: bool = False
@@ -172,6 +248,9 @@ class QuarantineService:
             if row is None:
                 raise QuarantineNotFoundError()
 
+            if not dest_path and not _original_path(row):
+                # 隔離の途中で中断して記録し直したもの（recover_interrupted）は、元の場所が分からない
+                raise QuarantineRestoreError(detail="元の場所が分かりません。復元先を指定してください")
             target = Path(dest_path) if dest_path else Path(_original_path(row))
             source = self.quarantine_dir / row.uuid
 

@@ -142,6 +142,15 @@ def _parse_value(current, text: str):
             return float(text)
         except ValueError:
             raise CtlError(f"数を指定してください: {text}") from None
+    if isinstance(current, list):
+        # 一覧は JSON の配列で受け取る（例: '["/srv/share", "/home/user/Downloads"]'）
+        try:
+            value = json.loads(text)
+        except ValueError:
+            raise CtlError(f'JSON の配列で指定してください（例: \'["/path"]\'）: {text}') from None
+        if not isinstance(value, list):
+            raise CtlError(f"JSON の配列で指定してください: {text}")
+        return value
     return text
 
 

@@ -14,6 +14,7 @@ from dataclasses import fields
 from api.context import ApiContext
 from core.config_model import GUI_SECTIONS, ConfigModel, validate_and_fix
 from core.config_model import WRITABLE_FIELDS as CONFIG_WRITABLE_FIELDS
+from core.config_model import quick_targets_problem
 from core.config_model import WRITABLE_RANGES
 from core import scan_targets
 from core.exceptions import (
@@ -296,6 +297,9 @@ def _checked_value(name: str, current, value):
     elif isinstance(current, float):
         ok = isinstance(value, (int, float)) and not isinstance(value, bool)
         value = float(value) if ok else value
+    elif isinstance(current, list):
+        ok = quick_targets_problem(value) is None  # 一覧の項目は scan.quick_targets だけ
+        value = list(value) if ok else value
     else:
         ok = isinstance(value, str)
     if not ok:
@@ -411,13 +415,19 @@ def clear_logs(ctx: ApiContext) -> int:
 SCAN_LABELS = {"quick": "クイックスキャン", "full": "フルスキャン", "custom": "カスタムスキャン"}
 
 
-def _scan_targets(scan_type: str, targets: list[str] | None) -> tuple[list[str], tuple[str, ...]]:
+def _scan_targets(ctx: ApiContext, scan_type: str,
+                  targets: list[str] | None) -> tuple[list[str], tuple[str, ...]]:
     if scan_type == "full":
         return scan_targets.full_scan_targets(), scan_targets.full_scan_skip_dirs()
     if scan_type == "quick" and not targets:
-        # 段階 12-2 まではアプリが利用者の権限で動くため、画面と同じ場所（ダウンロード等）を使う。
-        # サービス化（12-3）の後は、利用者が設定で指定した場所（scan.quick_targets）だけにする
-        return scan_targets.quick_scan_targets(), ()
+        if not ctx.service_mode:
+            # 従来のアプリは利用者の権限で動くため、画面と同じ場所（ダウンロード等）を使う
+            return scan_targets.quick_scan_targets(), ()
+        # サービス（SYSTEM・root）は利用者のフォルダが分からないため、利用者が設定で指定した場所だけを使う（6.2節）
+        quick = [t for t in ctx.config_service.current.scan.quick_targets if os.path.exists(t)]
+        if not quick:
+            raise ValueError("クイックスキャンの対象が設定されていません（設定の scan.quick_targets）")
+        return quick, ()
     if not targets:
         raise ValueError("スキャンの対象を指定してください")
     missing = [t for t in targets if not os.path.isabs(t) or not os.path.exists(t)]
@@ -432,7 +442,7 @@ def start_scan(ctx: ApiContext, scan_type: str, targets: list[str] | None, inclu
         raise ValueError("スキャンの種類が正しくありません")
     if ctx.scan_dispatcher.is_running:
         raise ApiConflictError(detail="スキャンを実行中です")
-    paths, skip_dirs = _scan_targets(scan_type, targets)
+    paths, skip_dirs = _scan_targets(ctx, scan_type, targets)
     if not paths:
         raise ValueError("スキャンの対象がありません")
     label = SCAN_LABELS[scan_type]

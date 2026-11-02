@@ -144,6 +144,8 @@ def main() -> int:
     clamav_service = ClamAVService(copy.deepcopy(config.clamd), restart_clamd=clamd_controller.start)
     exclude_service = ExcludeService(db_service)
     quarantine_service = QuarantineService(db_service, _APP_DIR / "quarantine")
+    # 前回、隔離・復元の途中で落ちていれば、隔離フォルダに残ったファイルを片づける
+    quarantine_service.recover_interrupted()
     scan_dispatcher = ScanDispatcher(clamav_service, exclude_service)
     # スキャン履歴（段階12-2c）: 手動（画面・トレイ・Web API）のスキャンを記録し、保持期間を過ぎたものを消す
     scan_history_service = ScanHistoryService(db_service)

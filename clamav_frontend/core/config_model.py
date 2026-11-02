@@ -5,6 +5,7 @@ config.json データモデル
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field, asdict
 
 #: 2: サービスの設定（段階 12-3b）。利用者ごとの GUI の設定（general）を gui.json（core/gui_config.py）に分けた
@@ -47,6 +48,7 @@ WRITABLE_FIELDS = (
     "smtp.port",
     "smtp.to_address",
     "smtp.user",
+    "scan.quick_targets",
     "update.auto_update",
     "update.interval_hours",
     "update.stale_days",
@@ -131,6 +133,37 @@ class LoggingConfig:
     level: str = "INFO"
 
 
+#: scan.quick_targets の数・長さの上限
+MAX_QUICK_TARGETS = 100
+_MAX_PATH = 4096
+
+
+@dataclass
+class ScanConfig:
+    """サービスのクイックスキャンの対象（サービス化・Web API設計書 6.2節。段階 12-3d）
+
+    サービスは SYSTEM・root で動くため、利用者のフォルダ（ダウンロード等）が分からない。Web API で対象を
+    指定しないクイックスキャン（ブラウザ・clamqtpie-ctl）は、ここに利用者が指定した場所だけを使う。
+    空の間は受け付けない。トレイGUI は利用者の権限で対象を求めて送るため、この設定を使わない
+    """
+
+    quick_targets: list[str] = field(default_factory=list)
+
+
+def quick_targets_problem(value) -> str | None:
+    """scan.quick_targets として正しくなければ、その理由"""
+    if not isinstance(value, list) or len(value) > MAX_QUICK_TARGETS:
+        return f"{MAX_QUICK_TARGETS} 件までのパスの一覧で指定してください"
+    for target in value:
+        if not isinstance(target, str) or not target or len(target) > _MAX_PATH:
+            return "パスは空でない文字列で指定してください"
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in target):
+            return "パスに制御文字は使えません"
+        if not os.path.isabs(target):
+            return f"パスは絶対パスで指定してください: {target}"
+    return None
+
+
 @dataclass
 class ScheduleConfig:
     """スケジュールの取りこぼし対策（サービス化・Web API設計書 9章）"""
@@ -157,6 +190,7 @@ class ConfigModel:
     notification: NotificationConfig = field(default_factory=NotificationConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    scan: ScanConfig = field(default_factory=ScanConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
 
@@ -176,6 +210,7 @@ class ConfigModel:
         notification = NotificationConfig(**_filtered(data.get("notification", {}), NotificationConfig))
         update = UpdateConfig(**_filtered(data.get("update", {}), UpdateConfig))
         logging_cfg = LoggingConfig(**_filtered(data.get("logging", {}), LoggingConfig))
+        scan = ScanConfig(**_filtered(data.get("scan", {}), ScanConfig))
         schedule = ScheduleConfig(**_filtered(data.get("schedule", {}), ScheduleConfig))
         api = ApiConfig(**_filtered(data.get("api", {}), ApiConfig))
 
@@ -188,6 +223,7 @@ class ConfigModel:
             notification=notification,
             update=update,
             logging=logging_cfg,
+            scan=scan,
             schedule=schedule,
             api=api,
         )
@@ -268,6 +304,11 @@ def validate_and_fix(model: ConfigModel, warn) -> ConfigModel:
             f"({model.realtime.windows_debounce_sec})。既定値2.0へ補正します。"
         )
         model.realtime.windows_debounce_sec = 2.0
+
+    problem = quick_targets_problem(model.scan.quick_targets)
+    if problem is not None:
+        warn(f"scan.quick_targets が不正な値です（{problem}）。空へ補正します。")
+        model.scan.quick_targets = []
 
     grace = model.schedule.misfire_grace_sec
     if isinstance(grace, bool) or not isinstance(grace, int) or not (60 <= grace <= 86400):

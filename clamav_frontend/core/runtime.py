@@ -108,6 +108,8 @@ def build(paths: ServicePaths) -> Runtime:
                                    verify_endpoint=True, clamd_user=_clamd_user(config))
     exclude_service = ExcludeService(db_service)
     quarantine_service = QuarantineService(db_service, paths.quarantine_dir)
+    # 前回、隔離・復元の途中で落ちていれば、隔離フォルダに残ったファイルを片づける
+    quarantine_service.recover_interrupted()
     scan_dispatcher = ScanDispatcher(clamav_service, exclude_service)
     scan_history_service = ScanHistoryService(db_service)
     scan_history_recorder = ScanHistoryRecorder(scan_history_service, scan_dispatcher)

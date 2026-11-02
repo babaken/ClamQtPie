@@ -27,6 +27,7 @@ from api.events import (
 )
 from api.jobs import JobTracker
 from api.server import LOOPBACK_HOST, ApiServer
+from core.definitions import definitions_age_days
 from core.logger import CATEGORY_SYSTEM, log_event, setup_logger
 from core.runtime import Runtime
 from core.service_endpoint import write_endpoint
@@ -51,6 +52,9 @@ class ServiceApi:
         connect_scheduler(self.events, runtime.scheduler_service)
         connect_notifications(self.events, runtime.notification_store)
         self._clamd_running: bool | None = None
+        #: 定義の経過日数（clamd の VERSION 応答から。分からなければ None）と、古いと知らせたか
+        self._definitions_age: int | None = None
+        self._stale_notified = False
         self._stop = threading.Event()
         self._status = StatusPublisher(self.events, runtime.realtime_manager, runtime.scan_dispatcher,
                                        runtime.update_dispatcher, self.jobs)
@@ -76,6 +80,7 @@ class ServiceApi:
             apply_config=self._apply_config, start_clamd=rt.clamd_starter.start,
             clamd_controller=rt.clamd_controller,
             on_clamd_stop_requested=lambda: None, on_clamd_stop_failed=lambda: None,
+            service_mode=True,
         )
         tokens = ApiTokens(rt.paths.api_dir)
         server = ApiServer(create_app(tokens, context), config.api.port, tokens=tokens)
@@ -113,14 +118,36 @@ class ServiceApi:
 
     def _watch_clamd(self) -> None:
         while not self._stop.is_set():
-            try:
-                self._clamd_running = bool(self.runtime.clamav_service.ping(retry=False))
-            except Exception:  # noqa: BLE001 - 応答しない clamd は「停止」
-                self._clamd_running = False
+            self.check_clamd()
             self._stop.wait(_CLAMD_CHECK_INTERVAL_SEC)
+
+    def check_clamd(self) -> None:
+        """clamd の応答と定義の古さを確かめる（60 秒ごと、別のスレッドで）。定義が古くなった時点で1回知らせる"""
+        rt = self.runtime
+        try:
+            self._clamd_running = bool(rt.clamav_service.ping(retry=False))
+            if self._clamd_running:
+                self._definitions_age = definitions_age_days(rt.clamav_service.get_version()[2])
+        except Exception:  # noqa: BLE001 - 応答しない clamd は「停止」
+            self._clamd_running = False
+        if not self._clamd_running:
+            return  # 応答しない間は定義の日付が分からないため、古さの判定を変えない
+        stale = self._definitions_stale()
+        if stale and not self._stale_notified:
+            try:
+                rt.notification_service.notify_definitions_stale(self._definitions_age, mail=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"定義が古いことを知らせられませんでした (detail: {exc})")
+        self._stale_notified = stale
+
+    def _definitions_stale(self) -> bool:
+        age = self._definitions_age
+        return age is not None and age > self.runtime.config_service.current.update.stale_days
 
     def _publish_status(self) -> None:
         rt = self.runtime
+        reachable = self._clamd_running
         self._status.on_status(SimpleNamespace(
-            clamd_running=self._clamd_running, definitions_age_days=None, definitions_stale=False,
+            clamd_running=reachable, definitions_age_days=self._definitions_age if reachable else None,
+            definitions_stale=bool(reachable) and self._definitions_stale(),
             realtime_running=rt.realtime_manager.is_running))

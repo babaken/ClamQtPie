@@ -148,14 +148,27 @@ class NotificationService:
             return
         self._send_desktop_notification("定義データベースの更新に失敗しました", detail)
 
-    def notify_definitions_stale(self, age_days: int) -> None:
-        """定義データベースが古くなった（update.stale_daysを超えた）ことを知らせる。定義更新の失敗と同じ設定に従う"""
+    def notify_definitions_stale(self, age_days: int, mail: bool = False) -> None:
+        """定義データベースが古くなった（update.stale_daysを超えた）ことを知らせる。定義更新の失敗と同じ設定に従う
+        mail: メールでも知らせる（サービス。サービス化・Web API設計書 6.1節。メールの通知が有効な場合）"""
         if not self.config.notification.on_update_fail:
             return
-        self._send_desktop_notification(
-            "ウイルス定義が古くなっています",
-            f"定義データベースが {age_days} 日更新されていません。定義更新を実行してください",
-        )
+        title = "ウイルス定義が古くなっています"
+        body = f"定義データベースが {age_days} 日更新されていません。定義更新を実行してください"
+        self._send_desktop_notification(title, body)
+        if mail and self.config.notification.on_detect_mail:
+            self._send_plain_mail(f"[{APP_NAME}] {title}", f"{body}\n\n本メールは{APP_NAME}から自動送信されています。\n")
+
+    def _send_plain_mail(self, subject: str, body: str) -> None:
+        """検知以外の知らせのメール。失敗してもリトライせずログに残すだけ（5.3節）"""
+        smtp = self.config.smtp
+        if not (smtp.host and smtp.from_address and smtp.to_address):
+            return
+        try:
+            password = self._config_service.get_smtp_password()
+            self._smtp_send(smtp, password, subject, body)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"メール通知の送信に失敗しました (detail: {exc})", extra={"error_code": "E7001"})
 
     def notify_job_failure(self, job_name: str, detail: str) -> None:
         if not self.config.notification.on_job_fail:
