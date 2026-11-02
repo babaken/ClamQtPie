@@ -53,6 +53,9 @@ class ApiContext:
 
     #: サービス（service_main.py）の API か。従来のアプリ（利用者の権限で動く）と扱いを分ける項目に使う
     service_mode: bool = False
+    #: 接続元の利用者のプロファイル・ホームを求める（(接続元のアドレス, ポート), (待ち受けのアドレス, ポート)）。
+    #: サービスで user のトークンのスキャンの場所を限るのに使う（core/peer_identity.py。段階 12-3d）
+    requester_home: Callable[[tuple, tuple], str | None] | None = None
 
     @property
     def can_write(self) -> bool:

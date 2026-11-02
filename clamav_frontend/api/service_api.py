@@ -29,6 +29,7 @@ from api.jobs import JobTracker
 from api.server import LOOPBACK_HOST, ApiServer
 from core.definitions import definitions_age_days
 from core.logger import CATEGORY_SYSTEM, log_event, setup_logger
+from core.peer_identity import requester_home
 from core.runtime import Runtime
 from core.service_endpoint import write_endpoint
 
@@ -80,7 +81,7 @@ class ServiceApi:
             apply_config=self._apply_config, start_clamd=rt.clamd_starter.start,
             clamd_controller=rt.clamd_controller,
             on_clamd_stop_requested=lambda: None, on_clamd_stop_failed=lambda: None,
-            service_mode=True,
+            service_mode=True, requester_home=requester_home,
         )
         tokens = ApiTokens(rt.paths.api_dir)
         server = ApiServer(create_app(tokens, context), config.api.port, tokens=tokens)

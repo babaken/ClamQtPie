@@ -130,14 +130,14 @@ _ERROR_INSUFFICIENT_BUFFER = 122
 _ROW_SIZE = {socket.AF_INET: 24, socket.AF_INET6: 56}
 
 
-def _tcp_table(family: int) -> bytes:
+def _tcp_table(family: int, table_class: int = _TCP_TABLE_OWNER_PID_LISTENER) -> bytes:
     import ctypes
 
     get_table = ctypes.windll.iphlpapi.GetExtendedTcpTable
     size = ctypes.c_ulong(0)
     for _ in range(5):  # 表の大きさを問い合わせている間に増えることがあるため、何回か試す
         buffer = ctypes.create_string_buffer(size.value or 1)
-        result = get_table(buffer, ctypes.byref(size), False, family, _TCP_TABLE_OWNER_PID_LISTENER, 0)
+        result = get_table(buffer, ctypes.byref(size), False, family, table_class, 0)
         if result == 0:
             return buffer.raw
         if result != _ERROR_INSUFFICIENT_BUFFER:

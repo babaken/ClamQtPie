@@ -12,13 +12,15 @@ import asyncio
 import json
 
 from fastapi import APIRouter, Depends, Header, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from api import actions
-from api.auth import require_user
+from api.auth import ROLE_ADMIN, require_user
 from api.bridge import END
-from core.exceptions import ApiConflictError
+from core.exceptions import ApiConflictError, ApiForbiddenError
+from core.peer_identity import is_inside
 
 router = APIRouter(dependencies=[Depends(require_user)])
 
@@ -50,10 +52,32 @@ async def _on_main(request: Request, fn, *args):
 
 
 # -- 6.2 スキャン -----------------------------------------------------------------------
+def check_user_scan(request: Request, body: ScanBody) -> None:
+    """サービスで、user のトークンのスキャンを、頼んだ利用者のプロファイル・ホームの中に限る（12章 R-9）。
+    サービスは全員のファイルを読めるため、ほかの利用者のフォルダのファイル名・検知の有無を知られないように。
+    設定 scan.quick_targets（管理者が決めた場所）のクイックスキャンはそのまま。フルスキャン・ほかの場所は admin"""
+    if body.type == "full":
+        raise ApiForbiddenError(detail="フルスキャンには管理者の権限が要ります")
+    if not body.targets:
+        return  # 管理者が決めた場所（scan.quick_targets）か、対象が無い（400）
+    ctx = _ctx(request)
+    client, server = request.client, request.scope.get("server")
+    home = None
+    if ctx.requester_home is not None and client is not None and server:
+        home = ctx.requester_home((client.host, client.port), (server[0], server[1]))
+    if not home:
+        raise ApiForbiddenError(detail="スキャンを頼んだ利用者を確かめられないため、場所を指定したスキャンには管理者の権限が要ります")
+    outside = [t for t in body.targets if not is_inside(t, home)]
+    if outside:
+        raise ApiForbiddenError(detail="利用者のフォルダの外をスキャンするには管理者の権限が要ります")
+
+
 @router.post("/scans", status_code=202)
-async def start_scan(request: Request, body: ScanBody) -> dict:
+async def start_scan(request: Request, body: ScanBody, role: str = Depends(require_user)) -> dict:
     if body.targets is not None and any(len(t) > _MAX_PATH for t in body.targets):
         raise ValueError("パスが長すぎます")
+    if _ctx(request).service_mode and role != ROLE_ADMIN:
+        await run_in_threadpool(check_user_scan, request, body)
     job = await _on_main(request, actions.start_scan, body.type, body.targets, body.include_subfolders,
                          body.apply_exclude)
     return {"job": job}
