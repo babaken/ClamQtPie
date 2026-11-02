@@ -1323,3 +1323,19 @@ clamd が止まっている間に、同じポート・ソケットで別のプ�
 - トレイGUI（段階 12-4）: クイックスキャン（その利用者のフォルダ）は user のトークンのまま、フルスキャン・ほかの場所は昇格して admin のトークンで頼む
 
 確認: 全テスト（Windows 912 件・WSL 929 件）成功。実際の接続から、テストを動かす利用者のプロファイル・ホームを割り出せること（Windows・WSL）。
+
+## 65. 段階 12-4a: トレイGUI の API クライアントの土台
+
+サービス化・Web API設計書 3.1節・3.2節・5章・10章。12-4 は 5 つに分ける（12-4a: API クライアントの土台、12-4b: 画面のつなぎ替え（user の操作）、12-4c: 昇格ヘルパーと admin の操作、12-4d: 配布物・インストーラ、12-4e: 従来のアプリの削除）。決めたこと: 従来のアプリ（ポータブル）は最終的にソースも含めて削除する、`POST /quarantine` を作る、通信は QtNetwork、Windows のインストーラは Inno Setup（利用者の判断）。
+
+- `api_client/client.py`（`ApiClient`）:
+  - 接続先は `api/endpoint.json` のポート（無ければ既定の 8765）。トークンは `api/user.token`。読めなければ E8110（`ServicePermissionError`、新設。「この PC の ClamQtPie を使う権限がありません」）、無ければ E8105（サービスが動いていない）
+  - トークンを送る前に毎回、待ち受けているのがサービスかを確かめる（`core/service_endpoint.verify_service_listener`）
+  - `QNetworkAccessManager` で送り、結果は `ApiReply.finished(data, error)`。エラーの応答はコードに合う `AppError` の派生にする。つながらない・待ちきれないときは E8105。401（サービスが起動し直してトークンが変わった）はトークンを読み直して 1 回だけやり直す
+  - `check_version()`: `GET /version` の `api_version` が合わなければ E8107
+  - `ApiReply` はクライアントへの参照を持つ（呼び出し側がクライアントを持っていないと、応答を待つ間にガベージコレクションで消えてプロセスが落ちた）
+- `api_client/events.py`（`EventStream`）: `GET /events` を受け取った分ずつ読み、`event(name, data)` を出す。ヘッダーが届いた時点で `connected`。切れたら `disconnected` を 1 回だけ出し、`Last-Event-ID` を付けてつなぎ直す
+- トレイGUI の多重起動防止のミューテックスを `Local\ClamQtPie_Tray`（ログオンのセッションごと）にできるようにした（`SingleInstanceLock(mutex_name=TRAY_MUTEX_NAME)`。使うのは 12-4b）
+- 12-4d への申し送り: `endpoint.json` を `user.token` と同じくグループに読ませる。spec に QtNetwork を加える（TLS のプラグインは入れない）
+
+確認: 全テスト（Windows 926 件・WSL 942 件）成功。本物の API（uvicorn）につないで、要求・エラー・トークンの読み直し・版数の確認・イベントの受信と再接続を確かめた。

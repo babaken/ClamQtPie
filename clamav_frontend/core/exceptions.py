@@ -307,6 +307,13 @@ class ApiReauthRequiredError(ApiError):
     default_message = "この操作の前に、確認コード（またはパスワード）を入力してください"
 
 
+class ServicePermissionError(ApiError):
+    """トレイGUI側で使う（user.token を読めない＝ClamQtPie Users・clamqtpie グループに入っていない）"""
+
+    default_code = "E8110"
+    default_message = "この PC の ClamQtPie を使う権限がありません"
+
+
 class ApiNotFoundError(ApiError):
     """指定した ID の除外・監視対象・スケジュールがない（隔離データは E3003）"""
 
