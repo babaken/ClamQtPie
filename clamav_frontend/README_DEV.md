@@ -1214,3 +1214,19 @@ PR #25 の Linux 実機の確認で直したもの:
 - 管理用コマンドで、Alembic の経過の行が端末に出ていた（`DatabaseService(quiet=True)`）
 
 確認: 全テスト（Windows・WSL）成功。sudo から実行したときの `gui.json` の書き出しは Linux 実機で確かめる。
+
+## 58. 段階 12-3c-1: スケジュールの取りこぼし対策と定義更新の分岐
+
+サービス化・Web API設計書 9章・9.1節。12-3c は 3 つに分ける（12-3c-1: 取りこぼし対策と定義更新、12-3c-2: 通知の保存、12-3c-3: スリープからの復帰（`wake`））。
+
+- `SchedulerService`:
+  - APScheduler に `coalesce`（重なった回は1回にまとめる）と `misfire_grace_time`（設定の `schedule.misfire_grace_sec`、既定 3600 秒、60〜86400）を指定する。従来のアプリも同じ
+  - `catch_up_missed()`: 各ジョブの最終実行日時（`last_run`）と実行周期から、電源オフ・スリープ中に過ぎた回があれば、1 分後に1回だけ実行する（実行周期のジョブは次の回から数え直す）。APScheduler はジョブを覚えていない（メモリだけ）ため、サービスの起動時に呼ぶ。一度も実行していないジョブは対象にしない
+  - `on_resume()`: スリープからの復帰時に、取りこぼしを確かめてから APScheduler の待ち時間を計算し直させる（Linux では待ち時間にスリープ中の時間が数えられず、そのままでは次の回がスリープしていた時間だけ遅れる）
+  - `inhibit_sleep=True`（サービス）なら、ジョブの実行中はスリープを防ぐ（定義の自動更新も）
+  - `on_job_finished`: 最終実行結果を記録したときに呼ぶ。Web API の `schedule.finished` イベント（`api/events.connect_scheduler`）
+- `core/resume_watcher.py`: 30 秒ごとに時計を確かめ、想定より 120 秒以上進んでいれば復帰したとみなす。OS の通知（Windows のサービスの電源イベント、Linux の logind）を受け取るより単純で、両方で同じ仕組みになり、依存も増えない（設計書と違う点）
+- `core/sleep_inhibit.py`: Windows は `SetThreadExecutionState`（ジョブのスレッドで呼ぶ）、Linux は `systemd-inhibit --what=sleep` で `cat` を動かしておき、標準入力を閉じて終わらせる。できなければ何もしない
+- Linux の定義更新: OS の `clamav-freshclam.service` が動いていれば、root で動くサービスでも、無人実行（自動・スケジュール）は行わない（`skipped`。PR #23 の確認で、OS のサービスと重ねて更新していた）。利用者の操作による更新は、従来どおり freshclam を直接実行する（ログは `--log=/dev/null`）。設計書の「OS のサービスを再起動してジャーナルから結果を読む」は、従来の方法で問題が出ていないため行わない（設計書と違う点）
+
+確認: 全テスト（Windows 824 件・WSL 842 件）成功。

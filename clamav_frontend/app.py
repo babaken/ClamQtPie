@@ -227,7 +227,8 @@ def main() -> int:
         notification_service.notify_job_failure(job_name, detail)
 
     scheduler_service = SchedulerService(
-        db_service, _run_scheduled_scan, _run_scheduled_update, on_job_fail=_on_scheduler_job_failed
+        db_service, _run_scheduled_scan, _run_scheduled_update, on_job_fail=_on_scheduler_job_failed,
+        misfire_grace_sec=config.schedule.misfire_grace_sec,
     )
     scheduler_service.start()
     # 初回は前回の定義更新から間隔が過ぎた時点（過ぎていれば起動の少し後）に実行する
@@ -541,7 +542,7 @@ def main() -> int:
         from api.app import create_app as create_api_app
         from api.bridge import EventHub, QtInvoker
         from api.context import ApiContext
-        from api.events import StatusPublisher, connect_realtime, publish_config_changed
+        from api.events import StatusPublisher, connect_realtime, connect_scheduler, publish_config_changed
         from api.jobs import JobTracker
         from api.server import start_api_server
 
@@ -575,6 +576,7 @@ def main() -> int:
         api_jobs = JobTracker(api_events, last_scan_history_id=lambda: scan_history_recorder.last_history_id)
         api_jobs.connect(scan_dispatcher, update_dispatcher)
         connect_realtime(api_events, realtime_manager)
+        connect_scheduler(api_events, scheduler_service)
         status_publisher = StatusPublisher(api_events, realtime_manager, scan_dispatcher, update_dispatcher, api_jobs)
         home_screen.status_refreshed.connect(status_publisher.on_status)
         config_saved_listeners.append(lambda: publish_config_changed(api_events))

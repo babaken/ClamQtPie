@@ -128,7 +128,7 @@ class UpdateService:
             if reason == "not_found":
                 return self._fail(before_version, f"{_FRESHCLAM_NOT_FOUND_MESSAGE} ({self.freshclam_path})")
             if reason == "service":
-                message = f"定義DBの更新はOSの{_FRESHCLAM_SERVICE}サービスが行っているため、アプリからの自動更新は行いません"
+                message = f"定義DBの更新はOSの{_FRESHCLAM_SERVICE}サービスが行っているため、実行しませんでした"
                 log_event(CATEGORY_UPDATE, message)
                 return UpdateHistoryRecord(
                     0, _now_iso(), "skipped", before_version, before_version, detail=message
@@ -213,8 +213,12 @@ class UpdateService:
             # アプリは管理者権限で動くため、管理者だけが書き込める場所にあるfreshclamだけを実行する
             return [self._validate_exec(freshclam, ("freshclam",), self._system)], ""
         service_active = self._freshclam_service_active()
+        if not interactive and service_active:
+            # 無人実行（自動・スケジュール）は、OS のサービスが更新しているなら行わない。root で動くサービスでも
+            # 同じ（行うと、OS のサービスと重ねて更新することになる。段階 12-3c）
+            return None, "service"
         if self._is_linux_user() and not interactive:
-            return None, "service" if service_active else "no_permission"
+            return None, "no_permission"
         # clamav-freshclamサービス（freshclam -d）がログファイルをロックしているため、
         # 同じログファイルでは「Failed to lock the log file」で失敗する（Arch Linux実機で発見）。
         # ログは別ファイルにする（出力はアプリのログ・画面に残る）

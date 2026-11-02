@@ -27,6 +27,7 @@ from core.realtime_factory import create_realtime_manager
 from core.scan_dispatcher import ScanDispatcher
 from core.scan_history_service import ScanHistoryRecorder, ScanHistoryService
 from core.scheduled_scan import run_scheduled_scan
+from core.resume_watcher import ResumeWatcher
 from core.scheduler_service import SchedulerService
 from core.secret_store import FileSecretStore
 from core.service_paths import ServicePaths
@@ -123,10 +124,16 @@ def build(paths: ServicePaths) -> Runtime:
         return record
 
     scheduler_service = SchedulerService(db_service, run_scan, run_update,
-                                         on_job_fail=notification_service.notify_job_failure)
+                                         on_job_fail=notification_service.notify_job_failure,
+                                         misfire_grace_sec=config.schedule.misfire_grace_sec, inhibit_sleep=True)
     scheduler_service.start()
     scheduler_service.set_auto_update(run_update, config.update.auto_update, config.update.interval_hours,
                                       last_run=update_service.last_executed_at())
+    # 電源オフ中に過ぎた回を取り返し、以後はスリープからの復帰のたびに確かめる
+    scheduler_service.catch_up_missed()
+    resume_watcher = ResumeWatcher()
+    resume_watcher.resumed.connect(scheduler_service.on_resume)
+    resume_watcher.start()
     clamd_starter = ClamdStarter(clamav_service)
 
     if config.realtime.default_enabled and realtime_manager.start():
@@ -140,5 +147,5 @@ def build(paths: ServicePaths) -> Runtime:
         update_service=update_service, update_dispatcher=update_dispatcher,
         notification_service=notification_service, log_reader_service=log_reader_service,
         diagnostics_service=diagnostics_service, scheduler_service=scheduler_service, clamd_starter=clamd_starter,
-        run_update=run_update, keep=[scan_history_recorder, run_scan],
+        run_update=run_update, keep=[scan_history_recorder, run_scan, resume_watcher],
     )

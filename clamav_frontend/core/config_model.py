@@ -132,6 +132,14 @@ class LoggingConfig:
 
 
 @dataclass
+class ScheduleConfig:
+    """スケジュールの取りこぼし対策（サービス化・Web API設計書 9章）"""
+
+    #: 予定の時刻を過ぎても実行する猶予（秒。60〜86400）。重なった回は1回にまとめる
+    misfire_grace_sec: int = 3600
+
+
+@dataclass
 class ApiConfig:
     """Web API（サービス化・Web API設計書3.1節の内部API）。段階12-3までは従来のアプリの中で動かすため既定はOFF"""
 
@@ -149,6 +157,7 @@ class ConfigModel:
     notification: NotificationConfig = field(default_factory=NotificationConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
 
     def to_dict(self) -> dict:
@@ -167,6 +176,7 @@ class ConfigModel:
         notification = NotificationConfig(**_filtered(data.get("notification", {}), NotificationConfig))
         update = UpdateConfig(**_filtered(data.get("update", {}), UpdateConfig))
         logging_cfg = LoggingConfig(**_filtered(data.get("logging", {}), LoggingConfig))
+        schedule = ScheduleConfig(**_filtered(data.get("schedule", {}), ScheduleConfig))
         api = ApiConfig(**_filtered(data.get("api", {}), ApiConfig))
 
         model = cls(
@@ -178,6 +188,7 @@ class ConfigModel:
             notification=notification,
             update=update,
             logging=logging_cfg,
+            schedule=schedule,
             api=api,
         )
         return model
@@ -257,6 +268,11 @@ def validate_and_fix(model: ConfigModel, warn) -> ConfigModel:
             f"({model.realtime.windows_debounce_sec})。既定値2.0へ補正します。"
         )
         model.realtime.windows_debounce_sec = 2.0
+
+    grace = model.schedule.misfire_grace_sec
+    if isinstance(grace, bool) or not isinstance(grace, int) or not (60 <= grace <= 86400):
+        warn(f"schedule.misfire_grace_sec が範囲外です ({grace!r})。既定値3600へ補正します。")
+        model.schedule.misfire_grace_sec = 3600
 
     if not isinstance(model.api.enabled, bool):
         warn(f"api.enabled が不正な値です ({model.api.enabled!r})。falseへ自動補正します。")

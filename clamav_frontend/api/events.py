@@ -4,6 +4,7 @@
 - realtime.*: リアルタイム監視のシグナル（検知・検知後の扱い・監視対象の消失・エラー）
 - status: 稼働状態が変わったとき（ホーム画面の定期確認の結果から。変わったときだけ出す）
 - config.changed: 設定を保存したとき（画面・Web API のどちらで保存しても。app.py から呼ぶ）
+- schedule.finished: スケジュールのジョブの最終実行結果を記録したとき（段階 12-3c）
 
 リアルタイム監視のシグナルは監視のスレッドから出るため、EventHub.publish（任意のスレッドから呼べる）に直接つなぐ。
 """
@@ -33,6 +34,12 @@ def connect_realtime(events: EventHub, realtime_manager) -> None:
         lambda error: events.publish("realtime.error", {"code": getattr(error, "code", "E2000"),
                                                         "message": getattr(error, "message", ""),
                                                         "reason": error_reason_of(error)}))
+
+
+def connect_scheduler(events: EventHub, scheduler_service) -> None:
+    """スケジュールのジョブの結果を schedule.finished で知らせる（APScheduler のスレッドから呼ばれる）"""
+    scheduler_service.on_job_finished = lambda job_id, name, result, note: events.publish(
+        "schedule.finished", {"job_id": job_id, "name": visible_controls(name), "result": result, "note": note})
 
 
 def error_reason_of(error) -> str:

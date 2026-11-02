@@ -177,9 +177,20 @@ def test_linux_root_update_avoids_log_lock_when_freshclam_service_runs(linux_ser
     calls["service_active"] = True
     calls["process"] = _FakeProcess(["Database updated"], 0)
 
-    service.update_now(interactive=False)
+    service.update_now(interactive=True)
 
     assert calls["popen"] == [["/usr/bin/freshclam", "--log=/dev/null"]]
+
+
+def test_linux_root_unattended_update_is_left_to_the_os_service(linux_service, monkeypatch):
+    # root で動くサービスでも、OS のサービスが更新しているなら、自動・スケジュールでは重ねて更新しない
+    service, calls = linux_service
+    monkeypatch.setattr("core.update_service.os.geteuid", lambda: 0, raising=False)
+    calls["service_active"] = True
+
+    record = service.update_now(interactive=False)
+
+    assert record.result == "skipped" and calls["popen"] == []
 
 
 def test_linux_pkexec_auth_cancel(linux_service):

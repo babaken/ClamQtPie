@@ -18,7 +18,7 @@ from api.app import create_app
 from api.auth import ApiTokens
 from api.bridge import EventHub, QtInvoker
 from api.context import ApiContext
-from api.events import StatusPublisher, connect_realtime, publish_config_changed
+from api.events import StatusPublisher, connect_realtime, connect_scheduler, publish_config_changed
 from api.jobs import JobTracker
 from api.server import LOOPBACK_HOST, ApiServer
 from core.logger import CATEGORY_SYSTEM, log_event, setup_logger
@@ -41,6 +41,7 @@ class ServiceApi:
         self.jobs = JobTracker(self.events)
         self.jobs.connect(runtime.scan_dispatcher, runtime.update_dispatcher)
         connect_realtime(self.events, runtime.realtime_manager)
+        connect_scheduler(self.events, runtime.scheduler_service)
         self._clamd_running: bool | None = None
         self._stop = threading.Event()
         self._status = StatusPublisher(self.events, runtime.realtime_manager, runtime.scan_dispatcher,
