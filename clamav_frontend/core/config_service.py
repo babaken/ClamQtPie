@@ -19,6 +19,8 @@ from core.exceptions import ConfigError, ConfigWriteError, KeyringUnavailableErr
 from core.version import APP_ID, LEGACY_APP_ID
 
 _KEYRING_SERVICE_NAME = APP_ID
+#: サービスの秘密の保存先での、SMTP パスワードの名前
+_SMTP_SECRET_NAME = "smtp_password"
 #: 製品名の変更前のサービス名（migrate_legacy_smtp_passwordで新しいサービス名へ移す）
 _LEGACY_KEYRING_SERVICE_NAME = LEGACY_APP_ID
 
@@ -28,9 +30,12 @@ logger = logging.getLogger("clamav_frontend")
 class ConfigService:
     """config.jsonの読み書きとSMTPパスワードのkeyring連携を担う"""
 
-    def __init__(self, config_path: Path) -> None:
+    def __init__(self, config_path: Path, secret_store=None) -> None:
+        """secret_store: SMTP パスワードの保存先（core/secret_store.py の FileSecretStore。サービスで使う）。
+        None なら従来どおり keyring（利用者の資格情報ストア）"""
         self.config_path = config_path
         self._model: ConfigModel | None = None
+        self._secret_store = secret_store
 
     # -- 読み込み -----------------------------------------------------
     def load(self) -> ConfigModel:
@@ -117,6 +122,8 @@ class ConfigService:
     # -- SMTPパスワード（keyring連携） ---------------------------------
     def get_smtp_password(self) -> str | None:
         """keyring経由でSMTPパスワードを取得する（config.jsonスキーマ定義書3章）"""
+        if self._secret_store is not None:
+            return self._secret_store.get(_SMTP_SECRET_NAME)
         try:
             import keyring
 
@@ -126,6 +133,9 @@ class ConfigService:
             raise KeyringUnavailableError(detail=str(exc)) from exc
 
     def set_smtp_password(self, password: str) -> None:
+        if self._secret_store is not None:
+            self._secret_store.set(_SMTP_SECRET_NAME, password)
+            return
         try:
             import keyring
 
@@ -135,6 +145,9 @@ class ConfigService:
             raise KeyringUnavailableError(detail=str(exc)) from exc
 
     def delete_smtp_password(self) -> None:
+        if self._secret_store is not None:
+            self._secret_store.delete(_SMTP_SECRET_NAME)
+            return
         try:
             import keyring
 

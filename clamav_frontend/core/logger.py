@@ -95,10 +95,12 @@ def setup_logger(
     level: str = "INFO",
     retention_days: int = 90,
     logger_name: str = "clamav_frontend",
+    console: bool = True,
 ) -> logging.Logger:
     """アプリ共通ロガーを初期化する。
 
     log_dir: ログファイルの出力先ディレクトリ（インストーラ/パッケージング設計書2.1節の logs/ を想定）
+    console: 標準エラー出力にも書くか（管理用コマンドは、自分の表示と混ざらないよう False）
     """
     log_dir.mkdir(parents=True, exist_ok=True)
     # フォルダを0700・既存ログを0600に制限してから書き込む（世界から読める瞬間を減らす）
@@ -124,10 +126,11 @@ def setup_logger(
     logger.addHandler(handler)
 
     # コンソール出力（開発時の確認用。配布物ではconsole=Falseのため実害なし）
-    console = logging.StreamHandler()
-    console.setFormatter(logging.Formatter(_LOG_FORMAT))
-    console.addFilter(_ErrorCodeFilter())
-    logger.addHandler(console)
+    if console:
+        stream = logging.StreamHandler()
+        stream.setFormatter(logging.Formatter(_LOG_FORMAT))
+        stream.addFilter(_ErrorCodeFilter())
+        logger.addHandler(stream)
 
     return logger
 

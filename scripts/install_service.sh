@@ -39,6 +39,8 @@ ExecStart=$PYTHON $APP_DIR/service_main.py --systemd
 WorkingDirectory=$APP_DIR
 Restart=on-failure
 RestartSec=60
+# 置き場所の権限（2）・API のポート（3）の失敗は、起動し直しても直らないため起動し直さない
+RestartPreventExitStatus=2 3
 
 [Install]
 WantedBy=multi-user.target

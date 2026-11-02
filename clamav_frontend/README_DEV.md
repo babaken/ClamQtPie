@@ -1164,3 +1164,26 @@ v0.9.2 の後の修正（§49〜§53 のうち、Web API に関わらないも�
 - `status` イベントの定義の古さは、サービスでは 12-3d で出す（今は `null`）
 
 確認: 全テスト（Windows・WSL）成功。Windows・WSL で `--console` で動かし、API に応答すること、二重起動を防ぐこと、WSL で SIGTERM で止まりトークンファイルが消えることを確認した。Windows サービス・systemd としての登録は、管理者・root の権限が要るため、利用者に scripts のスクリプトで確かめてもらう。
+
+## 56. 段階 12-3b（前半）: 管理用コマンドと秘密の保存先
+
+サービス化・Web API設計書 3.4節・6.8節。12-3b は「コマンドと設定」（この節）と「移行」（`migrate`、設定の分割）に分ける。
+
+- `clamqtpie_ctl.py`（`clamqtpie-ctl`。root・管理者で実行）:
+  - `status`: サービス・内部 API・clamd の状態、置き場所
+  - `config show`、`config set KEY VALUE [--yes] [--restart]`: Web API からは変えられない項目（実行ファイルの場所、clamd の接続先、`api.port` など）を含めて変える。変更の前後の値を表示して確認を求める。値は今の値の型で読み、範囲外は受け付けない。実行ファイル・設定ファイルの場所は、設定するときにも確かめる（絶対パス、管理者・root だけが書き込める場所、想定どおりの名前）。サービスが動いている間は変えない（サービスが設定を保存するときに上書きされるため）。`--restart` でサービスを止めて変え、また開始する。変えた内容はサービスのログに残す
+  - `quarantine restore ID --to PATH [--overwrite]`: 元の場所以外へ復元する（Web API では元の場所にだけ復元できる、6.3節）
+  - `--data-dir DIR`: 開発中の確認用（サービスの `--console --data-dir` と同じ置き場所。root でなくてよい）
+- `core/secret_store.py`（`FileSecretStore`）: サービスの SMTP パスワードの保存先。SYSTEM・root では keyring を使えないため、置き場所の `secrets/` にファイルで保存する（Windows は DPAPI の PC 単位の鍵で暗号化、Linux は 0600）。従来のアプリは keyring のまま（`ConfigService(secret_store=None)`）
+- `core/private_files.py`: 本人・SYSTEM・Administrators／root だけが使えるフォルダ・ファイルの作成（API のトークン・サービスの置き場所・秘密の保存先で共有。`api/auth.py` から移した）
+- `scripts/install_service.sh` の unit に `RestartPreventExitStatus=2 3`（置き場所の権限・API のポートの失敗は、起動し直しても直らないため。PR #23 の確認で指摘）
+
+PR #24 の Linux 実機の確認で直したもの:
+- `--restart` を続けて使うと、3 回目の開始が systemd の起動の回数の上限（`StartLimitBurst=3`、1 日。設計書 9.4 の回復動作）に掛かり、変更は保存されたのにサービスが止まったままになった。ctl は開始する前に `systemctl reset-failed` で数え直す。開始に失敗したときは、変更は保存済みでサービスが止まっていることと、原因を確かめる場所を表示する
+- 実行ファイルの場所（`update.freshclam_path`・`realtime.clamonacc_path`）を、空または既定の名前で「PATH から探す」既定に戻せなかった（空の `clamonacc_path` はそのまま保存されていた）。空なら既定の名前を保存し、既定の名前は設定するときの確認を省く（実行の直前に PATH から探して確かめる）
+- 確認の問いで標準入力が閉じていると例外の表示になった。「いいえ」として扱う
+- サービスのログに残す行が端末にも表示されていた（`setup_logger(console=False)`）。「開始しられませんでした」の誤字
+
+後の段階に回すもの: `web ...`（WebUI の設定）は 12-5、`users add|remove`（トレイGUI を使える利用者のグループ）はグループを作るインストーラとあわせて 12-4、`migrate` と設定の分割（`gui.json`・`schema_version` 2）は 12-3b の後半。
+
+確認: 全テスト（Windows・WSL）成功。

@@ -58,12 +58,17 @@ class ServicePaths:
         return self.data_dir / "api"
 
     @property
+    def secrets_dir(self) -> Path:
+        """SMTP パスワードなどの秘密（core/secret_store.py）"""
+        return self.data_dir / "secrets"
+
+    @property
     def config_dir(self) -> Path:
         return self.config_file.parent
 
     def directories(self) -> list[Path]:
         """作成・確認するフォルダ（親から順に）"""
-        dirs = [self.config_dir, self.data_dir, self.log_dir, self.quarantine_dir, self.api_dir]
+        dirs = [self.config_dir, self.data_dir, self.log_dir, self.quarantine_dir, self.api_dir, self.secrets_dir]
         return list(dict.fromkeys(dirs))
 
     @classmethod
@@ -104,9 +109,9 @@ def _problem(message: str, strict: bool) -> None:
 
 def _restrict(directory: Path) -> None:
     if _IS_WINDOWS:
-        from api.auth import _restrict_windows_acl
+        from core.private_files import restrict_windows_acl
 
-        _restrict_windows_acl(directory)
+        restrict_windows_acl(directory)
     else:
         os.chmod(directory, 0o700)
 

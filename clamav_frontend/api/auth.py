@@ -14,9 +14,7 @@ from __future__ import annotations
 
 import hmac
 import logging
-import os
 import secrets
-import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -25,6 +23,7 @@ from fastapi.responses import JSONResponse
 
 from api.errors import error_body
 from core.exceptions import ApiAuthError, ApiForbiddenError, ApiRequestRejectedError
+from core.private_files import make_private_dir, write_private_file
 from core.text_safety import visible_controls
 
 logger = logging.getLogger("clamav_frontend")
@@ -39,10 +38,6 @@ TOKEN_DIR_NAME = "api_tokens"
 _LOOPBACK_ADDRESSES = ("127.0.0.1", "::1")
 _LOOPBACK_HOSTNAMES = ("127.0.0.1", "localhost")
 _STATE_CHANGING_METHODS = ("POST", "PUT", "PATCH", "DELETE")
-
-# Windows のよく知られた SID（SYSTEM・Administrators）
-_SID_SYSTEM = "S-1-5-18"
-_SID_ADMINISTRATORS = "S-1-5-32-544"
 
 
 class ApiTokens:
@@ -64,9 +59,9 @@ class ApiTokens:
 
     def write_files(self) -> None:
         """トークンファイルを書き出す。前回の起動のファイルは上書きする"""
-        _make_private_dir(self._dir)
+        make_private_dir(self._dir)
         for role, token in self._tokens.items():
-            _write_private_file(self.path_for(role), token)
+            write_private_file(self.path_for(role), token.encode("ascii"))
 
     def remove_files(self) -> None:
         for role in _ROLES:
@@ -85,62 +80,6 @@ class ApiTokens:
             if hmac.compare_digest(token.encode("utf-8"), self._tokens[role].encode("utf-8")):
                 matched = role
         return matched
-
-
-def _make_private_dir(path: Path) -> None:
-    # リンクに置き換えられていたら、リンク先の権限を変えたり、そこへ書き出したりしない
-    if path.is_symlink():
-        raise OSError(f"API のトークンのフォルダがリンクになっています: {path}")
-    path.mkdir(parents=True, exist_ok=True)
-    if sys.platform == "win32":
-        _restrict_windows_acl(path)
-    else:
-        os.chmod(path, 0o700)
-
-
-def _write_private_file(path: Path, content: str) -> None:
-    """本人だけが読めるファイルとして書き出す（中身を書く前に権限を絞り、os.replace で置き換える）"""
-    tmp = path.with_name(path.name + ".tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(tmp, flags, 0o600)
-    try:
-        if sys.platform == "win32":
-            _restrict_windows_acl(tmp)
-        else:
-            os.fchmod(fd, 0o600)
-        os.write(fd, content.encode("ascii"))
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
-
-
-def _restrict_windows_acl(path: Path) -> None:
-    """アクセス権を「本人・SYSTEM・Administrators のフルコントロール」だけにし、親からの継承を切る"""
-    import ntsecuritycon
-    import win32api
-    import win32security
-
-    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32security.TOKEN_QUERY)
-    owner_sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
-    dacl = win32security.ACL()
-    inherit = 0
-    if path.is_dir():
-        inherit = win32security.OBJECT_INHERIT_ACE | win32security.CONTAINER_INHERIT_ACE
-    for sid in (
-        owner_sid,
-        win32security.ConvertStringSidToSid(_SID_SYSTEM),
-        win32security.ConvertStringSidToSid(_SID_ADMINISTRATORS),
-    ):
-        dacl.AddAccessAllowedAceEx(win32security.ACL_REVISION, inherit, ntsecuritycon.FILE_ALL_ACCESS, sid)
-    win32security.SetNamedSecurityInfo(
-        str(path),
-        win32security.SE_FILE_OBJECT,
-        win32security.DACL_SECURITY_INFORMATION | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
-        None,
-        None,
-        dacl,
-        None,
-    )
 
 
 # -- 要求ごとの確認 ---------------------------------------------------------------
