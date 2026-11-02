@@ -14,7 +14,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from core.config_model import ConfigModel, validate_and_fix
+from core.config_model import GUI_SECTIONS, PORTABLE_SCHEMA_VERSION, SCHEMA_VERSION, ConfigModel, validate_and_fix
 from core.exceptions import ConfigError, ConfigWriteError, KeyringUnavailableError
 from core.version import APP_ID, LEGACY_APP_ID
 
@@ -30,12 +30,16 @@ logger = logging.getLogger("clamav_frontend")
 class ConfigService:
     """config.jsonの読み書きとSMTPパスワードのkeyring連携を担う"""
 
-    def __init__(self, config_path: Path, secret_store=None) -> None:
+    def __init__(self, config_path: Path, secret_store=None, gui_settings: bool = True) -> None:
         """secret_store: SMTP パスワードの保存先（core/secret_store.py の FileSecretStore。サービスで使う）。
-        None なら従来どおり keyring（利用者の資格情報ストア）"""
+        None なら従来どおり keyring（利用者の資格情報ストア）
+        gui_settings: 利用者ごとの GUI の設定（general）も保存するか。サービスは False（schema_version 2。
+        general は gui.json に分けたため、読み込んでも使わず、保存もしない）"""
         self.config_path = config_path
         self._model: ConfigModel | None = None
         self._secret_store = secret_store
+        self._gui_settings = gui_settings
+        self._schema_version = PORTABLE_SCHEMA_VERSION if gui_settings else SCHEMA_VERSION
 
     # -- 読み込み -----------------------------------------------------
     def load(self) -> ConfigModel:
@@ -71,7 +75,7 @@ class ConfigService:
 
         model = ConfigModel.from_dict(raw)
 
-        if model.schema_version > ConfigModel().schema_version:
+        if model.schema_version > SCHEMA_VERSION:
             logger.warning(
                 "新しいバージョンで作成された設定ファイルの可能性があります "
                 f"(schema_version={model.schema_version})。上書き保存は行いません。"
@@ -92,8 +96,9 @@ class ConfigService:
 
         参照: config.jsonスキーマ定義書2.3節
         """
+        model.schema_version = self._schema_version
         self._model = model
-        payload = json.dumps(model.to_dict(), ensure_ascii=False, indent=2)
+        payload = json.dumps(self.as_dict(model), ensure_ascii=False, indent=2)
 
         target_dir = self.config_path.parent
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -112,6 +117,14 @@ class ConfigService:
                 raise
         except OSError as exc:
             raise ConfigWriteError(detail=str(exc)) from exc
+
+    def as_dict(self, model: ConfigModel | None = None) -> dict:
+        """保存する内容（サービスでは利用者ごとの GUI の設定を除く）"""
+        data = (model or self.current).to_dict()
+        if not self._gui_settings:
+            for section in GUI_SECTIONS:
+                data.pop(section, None)
+        return data
 
     @property
     def current(self) -> ConfigModel:

@@ -73,7 +73,7 @@ class Runtime:
 def build(paths: ServicePaths) -> Runtime:
     """サービス一式を組み立てて、スケジュールと（設定が有効なら）リアルタイム監視を始める"""
     # SMTP パスワードは keyring ではなく、データの置き場所のファイルに保存する（SYSTEM・root では keyring を使えない）
-    config_service = ConfigService(paths.config_file, secret_store=FileSecretStore(paths.secrets_dir))
+    config_service = ConfigService(paths.config_file, secret_store=FileSecretStore(paths.secrets_dir), gui_settings=False)
     config = config_service.load()
     setup_logger(paths.log_dir, level=config.logging.level, retention_days=config.logging.retention_days)
     logger.info(f"サービスの起動シーケンス開始（{APP_NAME} {APP_VERSION}）")

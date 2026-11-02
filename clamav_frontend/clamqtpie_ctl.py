@@ -9,35 +9,39 @@ GUI のない環境でも、サービスの状態の確認と、Web API から�
     clamqtpie-ctl config show
     clamqtpie-ctl config set KEY VALUE [--yes] [--restart]
     clamqtpie-ctl quarantine restore ID --to PATH [--overwrite]
+    clamqtpie-ctl migrate --from DIR [--yes] [--restart]
 
 - config set は、変更の前後の値を表示して確認を求める（--yes で省略）。サービスが動いている間は変えない
   （サービスが保存するときに上書きされるため）。--restart を付けると、サービスを止めて変え、また開始する
 - 実行ファイル・設定ファイルの場所（update.freshclam_path など）は、設定するときに場所を確かめる
   （絶対パス、管理者・root だけが書き込める場所、想定どおりの名前。実行の直前にも確かめる）
 - 開発中の確認では --data-dir DIR で、サービスの --console --data-dir と同じ置き場所を使える（root でなくてよい）
-- WebUI の設定（web ...）は段階 12-5、トレイGUI を使える利用者の追加（users ...）は段階 12-4、
-  旧版のデータの移行（migrate）は段階 12-3b の後半で作る
+- migrate は、旧版（ポータブル）のフォルダの設定・DB・隔離ファイル・ログを、サービスの置き場所へ移す
+  （旧版のフォルダの中身は信頼しない。core/portable_migration.py）
+- WebUI の設定（web ...）は段階 12-5、トレイGUI を使える利用者の追加（users ...）は段階 12-4 で作る
 """
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import platform
 import subprocess
 import sys
 from dataclasses import fields
+from pathlib import Path
 
 from core.lazy_import_fix import reify_concurrent_futures
 
 reify_concurrent_futures()
 
-from core.config_model import ConfigModel, validate_and_fix  # noqa: E402
+from core.config_model import GUI_SECTIONS, ConfigModel, validate_and_fix  # noqa: E402
 from core.config_service import ConfigService  # noqa: E402
 from core.exceptions import AppError  # noqa: E402
 from core.exec_path import child_env, find_system_tool, validate_executable, validate_trusted_file  # noqa: E402
 from core.secret_store import FileSecretStore  # noqa: E402
-from core.service_paths import ServicePaths  # noqa: E402
+from core.service_paths import ServicePaths, UnsafeDataDirectoryError, prepare_directories  # noqa: E402
 from core.service_status import SYSTEMD_UNIT, WINDOWS_SERVICE_NAME, service_running  # noqa: E402
 from core.version import APP_NAME, APP_VERSION  # noqa: E402
 
@@ -63,7 +67,7 @@ def _is_admin() -> bool:
 
 
 def _config_service(paths: ServicePaths) -> ConfigService:
-    return ConfigService(paths.config_file, secret_store=FileSecretStore(paths.secrets_dir))
+    return ConfigService(paths.config_file, secret_store=FileSecretStore(paths.secrets_dir), gui_settings=False)
 
 
 # -- status --------------------------------------------------------------------------------
@@ -101,8 +105,9 @@ def _api_version(port: int) -> str | None:
 
 # -- config ----------------------------------------------------------------------------------
 def cmd_config_show(paths: ServicePaths, out) -> int:
-    config = _config_service(paths).load()
-    print(json.dumps(config.to_dict(), ensure_ascii=False, indent=2), file=out)
+    service = _config_service(paths)
+    service.load()
+    print(json.dumps(service.as_dict(), ensure_ascii=False, indent=2), file=out)
     return EXIT_OK
 
 
@@ -154,7 +159,7 @@ def cmd_config_set(paths: ServicePaths, key: str, text: str, yes: bool, restart:
     config = service.load()
     section, _, name = key.partition(".")
     target = getattr(config, section, None)
-    if section == "schema_version" or target is None or name not in {f.name for f in fields(target)}:
+    if section in ("schema_version", *GUI_SECTIONS) or target is None or name not in {f.name for f in fields(target)}:
         raise CtlError(f"設定の項目が見つかりません: {key}")
     before = getattr(target, name)
     value = _parse_value(before, text)
@@ -249,7 +254,7 @@ def cmd_quarantine_restore(paths: ServicePaths, quarantine_id: int, dest: str, o
 
     if not os.path.isabs(dest):
         raise CtlError(f"復元先は絶対パスで指定してください: {dest}")
-    db = DatabaseService(paths.db_file)
+    db = DatabaseService(paths.db_file, quiet=True)
     db.connect()
     try:
         service = QuarantineService(db, paths.quarantine_dir)
@@ -257,13 +262,127 @@ def cmd_quarantine_restore(paths: ServicePaths, quarantine_id: int, dest: str, o
         if row.restored or row.deleted:
             raise CtlError("既に復元または削除されています")
         service.restore(quarantine_id, dest_path=dest, overwrite=overwrite)
+        keeps_owner = bool(row.owner_info)
     except AppError as exc:
         raise CtlError(f"{exc.message}（{exc.detail or exc.code}）") from None
     finally:
         db.close()
     _audit(paths, f"clamqtpie-ctl: 隔離ファイルを元の場所以外へ復元しました: id={quarantine_id} → {dest}")
     print(f"復元しました: {dest}", file=out)
+    if not keeps_owner:
+        # 元の所有者・アクセス権の記録が無い（旧版から移した記録など）ため、管理者・root のファイルになる
+        owner = "Administrators" if sys.platform == "win32" else "root"
+        print(f"復元したファイルの所有者は {owner} です。利用者が使う場合は、所有者・アクセス権を変えてください", file=out)
     return EXIT_OK
+
+
+# -- migrate --------------------------------------------------------------------------------
+def cmd_migrate(paths: ServicePaths, source_text: str, yes: bool, restart: bool, strict: bool, out,
+                ask=input, ask_password=getpass.getpass) -> int:
+    state = {"stopped": False}
+    try:
+        return _migrate(paths, source_text, yes, restart, strict, out, ask, ask_password, state)
+    finally:
+        if state["stopped"]:  # 途中で失敗しても、止めたサービスは開始し直す
+            _control_service("start")
+            print("サービスを開始しました", file=out)
+
+
+def _migrate(paths, source_text, yes, restart, strict, out, ask, ask_password, state) -> int:
+    from core import portable_migration as pm
+    from core.gui_config import gui_settings_from
+    from db.database import DatabaseService
+
+    try:
+        source = pm.check_source(Path(source_text), paths.data_dir)
+        running = service_running()
+        if running and not restart:
+            raise CtlError("サービスが動いている間は移行できません。--restart を付けると、サービスを止めて移行し、また開始します")
+        try:
+            prepare_directories(paths, strict=strict)
+        except UnsafeDataDirectoryError as exc:
+            raise CtlError(str(exc)) from None
+        data = pm.read_legacy(source, paths.data_dir)
+        config_service = _config_service(paths)
+        config, diffs, changed = pm.build_config(config_service.load(), data.config)
+        gui = gui_settings_from(data.config.get("general")) if data.config else None
+
+        db = DatabaseService(paths.db_file, quiet=True)
+        db.connect()
+        try:
+            pm.ensure_target_empty(db)
+            _print_plan(source, data, changed, out)
+            if not yes and not _confirm(ask, "移行しますか？ [y/N] "):
+                print("移行しませんでした", file=out)
+                return EXIT_OK
+            if running:
+                _control_service("stop")
+                state["stopped"] = True
+            copied = pm.copy_quarantine_files(source, paths.quarantine_dir, data.quarantine, data.skipped)
+            try:
+                pm.insert_rows(db, data)
+            except Exception as exc:
+                pm.remove_copied(paths.quarantine_dir, copied)
+                raise CtlError(f"DB に書き込めませんでした。移したものを元に戻して中止しました: {exc}") from None
+        finally:
+            db.close()
+    except pm.MigrationError as exc:
+        raise CtlError(str(exc)) from None
+
+    config_service.save(config)
+    notes = list(data.skipped)
+    password = pm.legacy_smtp_password(data.config)
+    if password is None and sys.platform != "win32" and config.smtp.user and not yes:
+        # Linux は sudo では利用者の Secret Service を読めないため、入力してもらう（空なら後で設定画面から）
+        password = ask_password("SMTP のパスワード（空のまま Enter で省略。後で設定画面から入力できます）: ") or None
+    if password:
+        config_service.set_smtp_password(password)
+        print("SMTP のパスワードを移しました", file=out)
+    notes += pm.copy_logs(source, paths.log_dir)
+    if gui is not None:
+        try:
+            print(f"GUI の設定を書き出しました: {pm.write_gui_settings(gui)}", file=out)
+        except pm.MigrationError as exc:
+            notes.append(f"GUI の設定: {exc}")
+    notes += pm.remove_legacy_quarantine(source, copied)
+    try:
+        pm.write_marker(source, paths.data_dir)
+    except OSError as exc:
+        notes.append(f"移行済みの印（{pm.MARKER_NAME}）を置けませんでした: {exc}")
+    _audit(paths, f"clamqtpie-ctl: 旧版のデータを移しました: {source}（隔離 {len(data.quarantine)} 件、"
+                  f"スケジュール {len(data.schedules)} 件、除外 {len(data.excludes)} 件、監視対象 {len(data.watch_targets)} 件）")
+    print("移行しました", file=out)
+    if notes:
+        print("移さなかったもの・注意:", file=out)
+        for note in notes:
+            print(f"  - {note}", file=out)
+    if diffs:
+        print("次の項目は、安全のため旧版の値を移さず、今の値のままにしました。"
+              "必要なら clamqtpie-ctl config set で設定し直してください:", file=out)
+        for key, value in diffs:
+            print(f"  - {key}（旧版: {value!r}）", file=out)
+    return EXIT_OK
+
+
+def _print_plan(source: Path, data, changed: list[str], out) -> None:
+    active = [r for r in data.quarantine if not (r["restored"] or r["deleted"])]
+    print(f"旧版のフォルダ: {source}", file=out)
+    print(f"設定: {len(changed)} 項目を移します" + (f"（{', '.join(changed)}）" if changed else ""), file=out)
+    print(f"除外: {len(data.excludes)} 件", file=out)
+    for row in data.excludes:
+        print(f"  - [{row['type']}] {row['value']}{'' if row.get('enabled') else '（無効）'}", file=out)
+    print(f"監視対象: {len(data.watch_targets)} 件", file=out)
+    for row in data.watch_targets:
+        print(f"  - {row['path']}{'' if row.get('enabled') else '（無効）'}", file=out)
+    print(f"スケジュール: {len(data.schedules)} 件", file=out)
+    for row in data.schedules:
+        target = f" {row['target']}" if row["target"] else ""
+        print(f"  - {row['name']}: {row['scan_type']} {row['cron']}{target}{'' if row.get('enabled') else '（無効）'}",
+              file=out)
+    print(f"隔離中のファイル: {len(active)} 件", file=out)
+    for row in active:
+        print(f"  - {row['original_path']}（{row['virus_name']}）", file=out)
+    print(f"スキャンの履歴: {len(data.scan_history)} 件、定義の更新の履歴: {len(data.update_history)} 件", file=out)
 
 
 # -- 入口 ------------------------------------------------------------------------------------
@@ -284,10 +403,14 @@ def build_parser() -> argparse.ArgumentParser:
     restore.add_argument("id", type=int)
     restore.add_argument("--to", required=True, dest="dest")
     restore.add_argument("--overwrite", action="store_true", help="同じ名前のファイルがあれば上書きする")
+    migrate = sub.add_parser("migrate", help="旧版（ポータブル）のデータを移す")
+    migrate.add_argument("--from", required=True, dest="source", help="旧版のフォルダ（ClamQtPie.exe・app.py のあるところ）")
+    migrate.add_argument("--yes", action="store_true", help="確認を省く")
+    migrate.add_argument("--restart", action="store_true", help="サービスが動いていれば、止めて移行し、また開始する")
     return parser
 
 
-def main(argv: list[str] | None = None, out=sys.stdout, ask=input) -> int:
+def main(argv: list[str] | None = None, out=sys.stdout, ask=input, ask_password=getpass.getpass) -> int:
     args = build_parser().parse_args(argv)
     if args.data_dir:
         paths = ServicePaths.under(args.data_dir)
@@ -305,6 +428,8 @@ def main(argv: list[str] | None = None, out=sys.stdout, ask=input) -> int:
             return cmd_config_set(paths, args.key, args.value, args.yes, args.restart, out, ask)
         if args.command == "quarantine" and args.action == "restore":
             return cmd_quarantine_restore(paths, args.id, args.dest, args.overwrite, out)
+        if args.command == "migrate":
+            return cmd_migrate(paths, args.source, args.yes, args.restart, not args.data_dir, out, ask, ask_password)
     except CtlError as exc:
         print(f"エラー: {exc}", file=sys.stderr)
         return EXIT_ERROR

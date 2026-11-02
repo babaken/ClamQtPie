@@ -46,8 +46,10 @@ def _configure_sqlite(dbapi_connection, _record) -> None:
 class DatabaseService:
     """app.dbへの接続とAlembicマイグレーション適用を担う"""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, quiet: bool = False) -> None:
+        """quiet: マイグレーションの経過（Alembic の INFO の行）を端末に出さない（管理用コマンド）"""
         self.db_path = db_path
+        self._quiet = quiet
         self._engine = None
         self._session_factory: sessionmaker | None = None
 
@@ -105,6 +107,7 @@ class DatabaseService:
         try:
             with self._engine.connect() as connection:
                 alembic_cfg.attributes["connection"] = connection
+                alembic_cfg.attributes["quiet_logging"] = self._quiet
                 command.upgrade(alembic_cfg, "head")
         except Exception as exc:
             logger.error(

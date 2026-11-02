@@ -7,7 +7,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 
-SCHEMA_VERSION = 1
+#: 2: サービスの設定（段階 12-3b）。利用者ごとの GUI の設定（general）を gui.json（core/gui_config.py）に分けた
+SCHEMA_VERSION = 2
+#: 従来のアプリ（ポータブル）の設定。general を含む。段階 12-4 でトレイGUI が gui.json を使うまで残す
+PORTABLE_SCHEMA_VERSION = 1
+#: サービスの設定に含めない部分（利用者ごとの GUI の設定）
+GUI_SECTIONS = ("general",)
 
 _ALLOWED_RETENTION_DAYS = (30, 60, 90, 180, 365)
 _ALLOWED_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -15,6 +20,39 @@ _ALLOWED_SMTP_ENCRYPTION = ("none", "ssl", "starttls")
 _ALLOWED_CONNECTION_TYPES = ("auto", "unix", "tcp")
 _ALLOWED_REALTIME_ACTIONS = ("quarantine", "notify_only")
 _ALLOWED_LINUX_BACKENDS = ("clamonacc", "watchdog")
+
+
+#: Web API で変えられる項目。設定画面で変えられるもの（と、定義の古さの日数）に限る。それ以外は読み取りだけ。
+#: 次のものは特に、Web API から変えられると権限を越えた操作に使えるため含めない（12章 25）:
+#: - 実行ファイル・設定ファイルの場所（update.freshclam_path、realtime.clamonacc_path・clamonacc_config_file）:
+#:   任意のプログラムを動かせる
+#: - clamd の接続先（clamd.connection_type・tcp_host・tcp_port・unix_socket_path）: 偽の clamd に検査するファイルの中身を
+#:   送らせ、常に「検知なし」と返させられる（ポートだけでも、このPC の一般の利用者が待ち受けたポートに向けられる）
+#: - clamd.service_name: 任意のサービスを起動・停止させられる
+#: - general（自動起動・最小化など）: 利用者ごとの GUI の設定（gui.json）
+#: 変えるときは clamqtpie-ctl config set を使う。旧版のデータの移行（clamqtpie-ctl migrate）でも、移すのはこの項目だけ
+WRITABLE_FIELDS = (
+    "clamd.auto_start",
+    "logging.level",
+    "logging.retention_days",
+    "notification.on_detect_desktop",
+    "notification.on_detect_mail",
+    "notification.on_job_fail",
+    "notification.on_update_fail",
+    "realtime.default_action",
+    "realtime.default_enabled",
+    "smtp.encryption",
+    "smtp.from_address",
+    "smtp.host",
+    "smtp.port",
+    "smtp.to_address",
+    "smtp.user",
+    "update.auto_update",
+    "update.interval_hours",
+    "update.stale_days",
+)
+#: 読み込み時の検証（validate_and_fix）に無い範囲（設定画面の入力欄と同じ）
+WRITABLE_RANGES = {"update.interval_hours": (1, 24)}
 
 
 @dataclass

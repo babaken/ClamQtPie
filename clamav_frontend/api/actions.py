@@ -12,7 +12,9 @@ import os
 from dataclasses import fields
 
 from api.context import ApiContext
-from core.config_model import ConfigModel, validate_and_fix
+from core.config_model import GUI_SECTIONS, ConfigModel, validate_and_fix
+from core.config_model import WRITABLE_FIELDS as CONFIG_WRITABLE_FIELDS
+from core.config_model import WRITABLE_RANGES
 from core import scan_targets
 from core.exceptions import (
     ApiConflictError,
@@ -242,39 +244,11 @@ def check_schedule_runnable(ctx: ApiContext, job_id: int) -> None:
 
 
 # -- 6.8 設定 -------------------------------------------------------------------------
-#: Web API で変えられる項目。設定画面で変えられるもの（と、定義の古さの日数）に限る。それ以外は読み取りだけ。
-#: 次のものは特に、Web API から変えられると権限を越えた操作に使えるため含めない（12章 25）:
-#: - 実行ファイル・設定ファイルの場所（update.freshclam_path、realtime.clamonacc_path・clamonacc_config_file）:
-#:   任意のプログラムを動かせる
-#: - clamd の接続先（clamd.connection_type・tcp_host・tcp_port・unix_socket_path）: 偽の clamd に検査するファイルの中身を
-#:   送らせ、常に「検知なし」と返させられる（ポートだけでも、このPC の一般の利用者が待ち受けたポートに向けられる）
-#: - clamd.service_name: 任意のサービスを起動・停止させられる
-#: - general（自動起動・最小化など）: 画面ごとの設定。段階 12-3 で利用者ごとの GUI の設定に移す
-#: 変えるときは設定ファイルを直接直す（段階 12-3 からは clamqtpie-ctl config set）
-WRITABLE_FIELDS = (
-    "clamd.auto_start",
-    "logging.level",
-    "logging.retention_days",
-    "notification.on_detect_desktop",
-    "notification.on_detect_mail",
-    "notification.on_job_fail",
-    "notification.on_update_fail",
-    "realtime.default_action",
-    "realtime.default_enabled",
-    "smtp.encryption",
-    "smtp.from_address",
-    "smtp.host",
-    "smtp.port",
-    "smtp.to_address",
-    "smtp.user",
-    "update.auto_update",
-    "update.interval_hours",
-    "update.stale_days",
-)
-#: 読み込み時の検証（validate_and_fix）に無い範囲（設定画面の入力欄と同じ）
-_RANGES = {"update.interval_hours": (1, 24)}
-#: GET /config に含めず、PUT /config でも受け付けない部分（API 自身の設定）
-HIDDEN_SECTIONS = ("api",)
+#: Web API で変えられる項目（core/config_model.py）。それ以外はすべて読み取りだけ
+WRITABLE_FIELDS = CONFIG_WRITABLE_FIELDS
+_RANGES = WRITABLE_RANGES
+#: GET /config に含めず、PUT /config でも受け付けない部分（API 自身の設定と、利用者ごとの GUI の設定）
+HIDDEN_SECTIONS = ("api", *GUI_SECTIONS)
 #: 変えたら保存している SMTP のパスワードを消す項目（送信先を差し替えてパスワードを送らせないため）
 SMTP_CREDENTIAL_FIELDS = ("smtp.host", "smtp.port", "smtp.user", "smtp.encryption")
 

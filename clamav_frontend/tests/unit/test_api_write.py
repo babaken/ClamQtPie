@@ -414,7 +414,9 @@ def test_get_config_hides_api_settings_and_password(env):
     assert "api" not in body
     assert body["smtp"]["has_password"] is True
     assert "secret" not in str(body)
-    assert {"update.freshclam_path", "clamd.tcp_port", "general.autostart"} <= set(body["protected"])
+    assert {"update.freshclam_path", "clamd.tcp_port"} <= set(body["protected"])
+    # 利用者ごとの GUI の設定（gui.json）は、サービスの設定に含めない
+    assert "general" not in body and "general.autostart" not in body["protected"]
     assert "realtime.default_action" not in body["protected"]
 
 
@@ -434,7 +436,7 @@ def test_put_config_changes_the_live_settings(env):
 
 @pytest.mark.parametrize("field", ["update.freshclam_path", "realtime.clamonacc_path", "clamd.tcp_host",
                                    "clamd.tcp_port", "clamd.service_name", "clamd.connection_type",
-                                   "clamd.max_concurrent_connections", "general.autostart"])
+                                   "clamd.max_concurrent_connections"])
 def test_protected_settings_cannot_be_changed(env, field):
     # 実行ファイルの場所・clamd の接続先・サービス名・画面で変えられない項目は、Web API からは変えられない
     body = _config_body(env)
@@ -455,6 +457,12 @@ def test_protected_settings_cannot_be_changed(env, field):
 def test_api_settings_are_not_accepted(env):
     body = _config_body(env)
     body["api"] = {"enabled": True, "port": 8765}
+    assert _call(env, "PUT", "/config", body).status_code == 400
+
+
+def test_gui_settings_are_not_accepted(env):
+    body = _config_body(env)
+    body["general"] = {"autostart": False}
     assert _call(env, "PUT", "/config", body).status_code == 400
 
 

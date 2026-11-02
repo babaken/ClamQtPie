@@ -16,7 +16,8 @@ from db.models import Base
 
 config = context.config
 
-if config.config_file_name is not None:
+# quiet_logging: 呼び出し側が端末の表示を自分で行うとき（管理用コマンド）は、Alembic のログの設定を当てはめない
+if config.config_file_name is not None and not config.attributes.get("quiet_logging"):
     # disable_existing_loggers=False: アプリ本体（core.logger）が設定した
     # "clamav_frontend" ロガーがAlembic実行によって無効化されないようにする
     fileConfig(config.config_file_name, disable_existing_loggers=False)

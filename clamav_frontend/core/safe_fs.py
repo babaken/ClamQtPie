@@ -50,6 +50,18 @@ def restore_move(src: str | os.PathLike, target: str | os.PathLike, overwrite: b
         _posix_restore_move(os.path.abspath(src), os.path.abspath(target), overwrite)
 
 
+def open_regular_file(path: str | os.PathLike):
+    """pathをリンクをたどらずに読み取り用に開き、通常のファイルであることを確かめてファイルオブジェクト（rb）を返す
+
+    旧版のフォルダ（一般の利用者が書き換えられる場所）から管理者の権限で読むときに使う（clamqtpie-ctl migrate）。
+    ファイル自体や途中のフォルダがリンクなら UnsafePathError。
+    """
+    path = os.path.abspath(path)
+    if _IS_WINDOWS:
+        return _win_open_regular_file(path)
+    return _posix_open_regular_file(path)
+
+
 # -- Windows ---------------------------------------------------------------
 _DELETE = 0x00010000
 _FILE_READ_ATTRIBUTES = 0x0080
@@ -144,6 +156,29 @@ def _win_quarantine_move(src: str, dest: str) -> tuple[str, int]:
         return hasher.hexdigest(), size
     finally:
         handle.Close()
+
+
+def _win_open_regular_file(path: str):
+    import msvcrt
+
+    import pywintypes
+    import win32con
+    import win32file
+
+    try:
+        handle = win32file.CreateFile(
+            path, win32con.GENERIC_READ, win32con.FILE_SHARE_READ, None, win32con.OPEN_EXISTING,
+            win32file.FILE_FLAG_OPEN_REPARSE_POINT | win32file.FILE_FLAG_SEQUENTIAL_SCAN, None,
+        )
+    except pywintypes.error as exc:
+        raise _win_error(exc, path) from exc
+    try:
+        _win_check_handle(handle, path, want_dir=False)
+    except BaseException:
+        handle.Close()
+        raise
+    fd = msvcrt.open_osfhandle(handle.Detach(), os.O_RDONLY | os.O_BINARY)
+    return os.fdopen(fd, "rb")
 
 
 def _win_open_dir(path: str):
@@ -387,3 +422,24 @@ def _posix_restore_move(src: str, target: str, overwrite: bool) -> None:
             os.close(src_dir_fd)
     finally:
         os.close(parent_fd)
+
+
+def _posix_open_regular_file(path: str):
+    parent_fd = _posix_open_dir(os.path.dirname(path))
+    try:
+        try:
+            fd = os.open(os.path.basename(path), os.O_RDONLY | _O_NOFOLLOW | os.O_NONBLOCK | _O_CLOEXEC, dir_fd=parent_fd)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise UnsafePathError(f"シンボリックリンクのため読みません: {path}") from exc
+            raise
+    finally:
+        os.close(parent_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise UnsafePathError(f"通常のファイルではないため読みません: {path}")
+        os.set_blocking(fd, True)
+    except BaseException:
+        os.close(fd)
+        raise
+    return os.fdopen(fd, "rb")
