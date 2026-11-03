@@ -108,6 +108,7 @@ class TrayApp:
         #: サービスにつながらないときのエラーコード（つながっている間は None）
         self._down_code: str | None = None
         self.elevation = ElevationRunner()
+        self.autostart = AutostartService(_autostart_command())
         self._reconnect = QTimer()
         self._reconnect.timeout.connect(self._retry)
         self._status_timer = QTimer()
@@ -259,7 +260,7 @@ class TrayApp:
         update_screen.bind_services(p.update_service, p.update, p.clamav, config_service=p.config,
                                     on_open_settings=lambda: window.navigate_to("settings"))
         window.get_screen("settings").bind_services(
-            p.config, p.notification, AutostartService(_autostart_command()),
+            p.config, p.notification, self.autostart,
             on_saved=lambda _config: (realtime_screen.sync_action_from_config(),
                                       update_screen.reload_auto_update_label()),
             service_mode=True,
@@ -387,10 +388,29 @@ def service_info(p: ServiceProxies) -> list[tuple[str, str, str]]:
     return [("clamd の接続先", *clamd), ("スリープから起こす設定", wake_timer_policy(), "")]
 
 
-def _autostart_command() -> list[str]:
+def _autostart_command() -> str:
+    """自動起動に登録するコマンド（AutostartService は文字列を受け取る）。Windows は空白を含む場所
+    （Program Files の下）に置くため、引用符で囲む（インストーラが登録する値と同じ）"""
     if getattr(sys, "frozen", False):
-        return [sys.executable]
-    return [sys.executable, str(Path(__file__).resolve())]
+        return f'"{sys.executable}"' if sys.platform == "win32" else sys.executable
+    return f'"{sys.executable}" "{Path(__file__).resolve()}"'
+
+
+def take_over_legacy_registrations(autostart: AutostartService) -> None:
+    """旧版（ポータブルの ClamQtPie・旧名）で登録した自動起動を、このトレイGUI で登録し直す（段階 12-4d）。
+    通知のクリックの clamqtpie: は enable_activation で毎回登録し直す。失敗しても起動は続ける"""
+    from core.legacy_migration import remove_legacy_protocol, remove_legacy_state_dir
+
+    try:
+        if autostart.migrate_legacy() or autostart.refresh_command():
+            logger.info(f"自動起動を、このトレイGUI で登録し直しました: {autostart.exe_path}")
+    except AppError as exc:
+        logger.warning(f"自動起動を登録し直せませんでした ({exc.detail})", extra={"error_code": exc.code})
+    for task in (remove_legacy_protocol, remove_legacy_state_dir):
+        try:
+            task()
+        except OSError as exc:
+            logger.warning(f"旧版の登録を片づけられませんでした (detail: {exc})")
 
 
 def main() -> int:
@@ -409,6 +429,7 @@ def main() -> int:
         app.setWindowIcon(QIcon(str(app_icon)))
 
     tray = TrayApp(app, ServicePaths.default())
+    take_over_legacy_registrations(tray.autostart)
     tray.enable_activation()
     tray.tray_icon.quit_action.triggered.connect(app.quit)
     tray.tray_icon.show()

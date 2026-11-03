@@ -148,6 +148,9 @@ if sys.platform == "win32":
         _svc_name_ = SERVICE_NAME
         _svc_display_name_ = SERVICE_DISPLAY_NAME
         _svc_description_ = "ClamAV を使ったウイルス対策（リアルタイム監視・スキャン・スケジュール・隔離）"
+        if getattr(sys, "frozen", False):
+            # 配布版は自分（ClamQtPieService.exe）を登録する（指定しないと pythonservice.exe を探す）
+            _exe_name_ = sys.executable
 
         def __init__(self, args):
             super().__init__(args)

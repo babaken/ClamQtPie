@@ -141,9 +141,14 @@ def ensure_group(runner=subprocess.run) -> None:
             raise AccessError(f"グループ {LINUX_GROUP} を作れません: {(result.stderr or '').strip()}")
 
 
-def add_user(name: str, runner=subprocess.run) -> None:
+def add_user(name: str, runner=subprocess.run) -> bool:
+    """グループに入れる（入れたら True）。既に入っていれば何もしない（入れ直し・更新のインストーラから呼ばれる。net localgroup は
+    既に入っている利用者の追加をエラーにするため。Windows の実機で発見）"""
     _check_name(name)
     ensure_group(runner)
+    short = name.rsplit("\\", 1)[-1].lower()
+    if any(member.rsplit("\\", 1)[-1].lower() == short for member in list_users(runner)):
+        return False
     if _IS_WINDOWS:
         cmd = [system_tool("net", "Windows"), "localgroup", WINDOWS_GROUP, name, "/add"]
     else:
@@ -151,6 +156,7 @@ def add_user(name: str, runner=subprocess.run) -> None:
     result = _run(cmd, runner)
     if result.returncode != 0:
         raise AccessError(f"{name} をグループに入れられません: {(result.stderr or result.stdout or '').strip()}")
+    return True
 
 
 def remove_user(name: str, runner=subprocess.run) -> None:

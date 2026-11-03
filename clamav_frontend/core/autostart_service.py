@@ -77,6 +77,32 @@ class AutostartService:
             self.enable()
         return found
 
+    def refresh_command(self) -> bool:
+        """自動起動が登録されていて、別の実行ファイル（旧版のポータブルの ClamQtPie.exe など）を指していれば、
+        現在の実行ファイルで登録し直す。登録し直したら True（段階 12-4d。新しいトレイGUI の起動時に呼ぶ）"""
+        current = self._registered_command()
+        if current is None or current == self.exe_path:
+            return False
+        self.enable()
+        return True
+
+    def _registered_command(self) -> str | None:
+        if self._is_windows:
+            import winreg
+
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_QUERY_VALUE) as key:
+                    return str(winreg.QueryValueEx(key, _REGISTRY_VALUE_NAME)[0])
+            except FileNotFoundError:
+                return None
+        path = self._desktop_file_path()
+        if not path.exists():
+            return None
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("Exec="):
+                return line[len("Exec="):]
+        return ""
+
     # -- Windows（レジストリRunキー、6.1節） -----------------------------------
     def _enable_windows(self) -> None:
         import winreg

@@ -407,6 +407,25 @@ def _print_plan(source: Path, data, changed: list[str], out) -> None:
     print(f"スキャンの履歴: {len(data.scan_history)} 件、定義の更新の履歴: {len(data.update_history)} 件", file=out)
 
 
+# -- setup（Windows のインストーラ） -----------------------------------------------------------
+def cmd_setup(paths: ServicePaths, action: str, user: str, purge: bool, out, runner=subprocess.run) -> int:
+    """Windows のインストーラ（packaging/windows/ClamQtPie.iss）から呼ぶ。Linux は install.sh・uninstall.sh"""
+    if sys.platform != "win32":
+        raise CtlError("setup は Windows のインストーラから使います（Linux は install.sh・uninstall.sh）")
+    from core.service_access import AccessError
+    from core.windows_setup import SetupError, setup_install, setup_uninstall
+
+    try:
+        if action == "install":
+            setup_install(paths.data_dir, Path(sys.executable).resolve().parent, user, out, runner)
+            _audit(paths, f"clamqtpie-ctl: 導入しました（{APP_NAME} {APP_VERSION}）")
+        else:
+            setup_uninstall(paths.data_dir, purge, out, runner)
+    except (SetupError, AccessError, OSError) as exc:
+        raise CtlError(str(exc)) from exc
+    return EXIT_OK
+
+
 # -- users --------------------------------------------------------------------------------
 def cmd_users(paths: ServicePaths, action: str, name: str, out, runner=subprocess.run) -> int:
     """トレイGUI を使える利用者（サービス化・Web API設計書 3.2節）。トレイGUI を使えるのは管理者だけにする"""
@@ -417,7 +436,9 @@ def cmd_users(paths: ServicePaths, action: str, name: str, out, runner=subproces
             members = list_users(runner)
             print(f"{group_name()} の利用者: {', '.join(members) if members else '（なし）'}", file=out)
         elif action == "add":
-            add_user(name, runner)
+            if not add_user(name, runner):
+                print(f"{name} はすでに {group_name()} に入っています", file=out)
+                return EXIT_OK
             _audit(paths, f"clamqtpie-ctl: トレイGUI を使える利用者に加えました: {name}")
             print(f"{name} を {group_name()} に入れました。サインアウトしてサインインし直すと、トレイGUI を使えます"
                   "（使えなければ PC を再起動してください）", file=out)
@@ -454,6 +475,12 @@ def build_parser() -> argparse.ArgumentParser:
     users.add_parser("list", help="グループの利用者を表示する")
     users.add_parser("add", help="利用者をグループに入れる").add_argument("name")
     users.add_parser("remove", help="利用者をグループから外す").add_argument("name")
+    setup = sub.add_parser("setup", help="導入・削除（Windows のインストーラから呼ぶ）") \
+        .add_subparsers(dest="action", required=True)
+    setup_install = setup.add_parser("install", help="データの置き場所の確認・グループ・サービスの登録と開始")
+    setup_install.add_argument("--user", default="", help="ClamQtPie Users に入れる利用者（導入した人）")
+    setup.add_parser("uninstall", help="サービスを止めて登録を消す").add_argument(
+        "--purge", action="store_true", help="設定・データ・ログとグループも消す")
     migrate = sub.add_parser("migrate", help="旧版（ポータブル）のデータを移す")
     migrate.add_argument("--from", required=True, dest="source", help="旧版のフォルダ（ClamQtPie.exe・app.py のあるところ）")
     migrate.add_argument("--yes", action="store_true", help="確認を省く")
@@ -479,6 +506,8 @@ def main(argv: list[str] | None = None, out=sys.stdout, ask=input, ask_password=
             return cmd_config_set(paths, args.key, args.value, args.yes, args.restart, out, ask)
         if args.command == "quarantine" and args.action == "restore":
             return cmd_quarantine_restore(paths, args.id, args.dest, args.overwrite, out)
+        if args.command == "setup":
+            return cmd_setup(paths, args.action, getattr(args, "user", ""), getattr(args, "purge", False), out)
         if args.command == "users":
             return cmd_users(paths, args.action, getattr(args, "name", ""), out)
         if args.command == "migrate":

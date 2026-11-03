@@ -111,14 +111,26 @@ def test_unsafe_user_names_are_refused(name):
 
 
 def test_add_user_creates_the_group_first():
-    runner = _Runner([(2, ""), (0, ""), (0, "")])  # グループが無い → 作る → 入れる
-    service_access.add_user("alice", runner)
+    runner = _Runner([(2, ""), (0, ""), (0, "")])  # グループが無い → 作る → メンバーを読む（空） → 入れる
+    assert service_access.add_user("alice", runner) is True
     if sys.platform == "win32":
         assert runner.calls[1][-2:] == ["/add", "/comment:ClamQtPie のトレイGUI を使える利用者"]
-        assert runner.calls[2][-3:] == ["ClamQtPie Users", "alice", "/add"]
+        assert runner.calls[3][-3:] == ["ClamQtPie Users", "alice", "/add"]
     else:
         assert runner.calls[1][-2:] == ["--system", "clamqtpie"]
-        assert runner.calls[2][-3:] == ["-aG", "clamqtpie", "alice"]
+        assert runner.calls[3][-3:] == ["-aG", "clamqtpie", "alice"]
+
+
+def test_add_user_who_is_already_a_member_does_nothing():
+    # 入れ直し・更新のインストーラから呼ばれる（net localgroup は既に入っている利用者の追加をエラーにする）
+    if sys.platform == "win32":
+        members = ("エイリアス名     ClamQtPie Users\n\nメンバー\n\n" + "-" * 79 +
+                   "\nPC01\\Alice\nコマンドは正常に終了しました。\n")
+    else:
+        members = "clamqtpie:x:990:alice\n"
+    runner = _Runner([(0, ""), (0, members)])  # グループはある → メンバーを読む
+    assert service_access.add_user("alice", runner) is False
+    assert len(runner.calls) == 2  # 追加のコマンドは実行しない
 
 
 def test_list_users_reads_the_group():
@@ -170,3 +182,60 @@ def test_spec_names_match_the_code():
     policy = (Path(__file__).resolve().parents[2] / "packaging" / "linux" / "io.github.babaken.clamqtpie.policy") \
         .read_text(encoding="utf-8")
     assert f"/opt/clamqtpie/{HELPER_LINUX_NAME}</annotate>" in policy and "<allow_active>auth_admin<" in policy
+
+
+# -- 旧版の自動起動の登録し直し ------------------------------------------------------------------
+def _linux_autostart(tmp_path, command):
+    from core.autostart_service import AutostartService
+
+    service = AutostartService(command)
+    service._is_windows = False
+    service._autostart_dir = lambda: tmp_path
+    return service
+
+
+def test_autostart_pointing_to_the_old_program_is_registered_again(tmp_path):
+    old = _linux_autostart(tmp_path, "/home/u/ClamQtPie_v0.9.3/ClamQtPie")
+    old.enable()
+    new = _linux_autostart(tmp_path, "/opt/clamqtpie/clamqtpie")
+    assert new.refresh_command() is True
+    assert "Exec=/opt/clamqtpie/clamqtpie" in (tmp_path / "clamqtpie.desktop").read_text(encoding="utf-8")
+    assert new.refresh_command() is False  # 2 回目は何もしない
+
+
+def test_autostart_is_not_turned_on_by_the_take_over(tmp_path):
+    new = _linux_autostart(tmp_path, "/opt/clamqtpie/clamqtpie")
+    assert new.refresh_command() is False and not (tmp_path / "clamqtpie.desktop").exists()
+
+
+def test_tray_takes_over_legacy_registrations(monkeypatch, caplog):
+    import logging
+
+    import tray_main
+
+    class Autostart:
+        exe_path = "/opt/clamqtpie/clamqtpie"
+
+        def migrate_legacy(self):
+            return False
+
+        def refresh_command(self):
+            return True
+
+    monkeypatch.setattr("core.legacy_migration.remove_legacy_protocol", lambda: False)
+    monkeypatch.setattr("core.legacy_migration.remove_legacy_state_dir", lambda: False)
+    with caplog.at_level(logging.INFO, logger="clamav_frontend"):
+        tray_main.take_over_legacy_registrations(Autostart())
+    assert "自動起動を、このトレイGUI で登録し直しました" in caplog.text
+    assert isinstance(tray_main._autostart_command(), str)  # AutostartService は文字列を受け取る
+
+
+def test_ctl_users_add_tells_when_already_a_member(tmp_path, monkeypatch):
+    import clamqtpie_ctl
+    from core.service_paths import ServicePaths
+
+    out = io.StringIO()
+    monkeypatch.setattr(clamqtpie_ctl, "_audit", lambda paths, message: out.write(f"[ログ] {message}\n"))
+    monkeypatch.setattr(service_access, "add_user", lambda name, runner: False)
+    assert clamqtpie_ctl.cmd_users(ServicePaths.under(tmp_path), "add", "alice", out, _Runner()) == 0
+    assert "すでに" in out.getvalue() and "[ログ]" not in out.getvalue()

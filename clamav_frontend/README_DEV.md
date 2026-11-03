@@ -1439,3 +1439,32 @@ Linux 実機の確認（#35）で見つかった点を直した:
 - **見つけた不具合**: 配布版では pywin32 の `pywintypes` が二重に読み込まれ、`except pywintypes.error` で Windows のエラーを捕まえられなかった（グループが無いときにサービスが止まった）。`winerror` の有無で見分ける（`is_windows_error`）。昇格ヘルパーの受け渡しも同じようにした
 
 確認: 全テスト（Windows 1012 件・WSL 1024 件、2 回ずつ）成功。`install.sh`・`uninstall.sh` は構文の確認だけ（Linux の実機での導入は 12-4d-2 の配布物で行う）。
+
+## 71. 段階 12-4d-2: Windows のインストーラ・配布物の作成・旧版の引き継ぎ
+
+サービス化・Web API設計書 11章（12章 32）、12-4 の計画の決めたこと 4（Inno Setup。ACL・グループ・サービスの登録は自前のプログラムで行う）。
+
+- **`build_release.py`**: Windows は PyInstaller の出力から Inno Setup のインストーラ（`ClamQtPie-<版>-setup.exe`）、Linux は tar.gz（`ClamQtPie-<版>-linux64.tar.gz`。`app/`・`share/`・`install.sh`・`uninstall.sh`、すべて root の持ち物、グループ・その他の書き込みなし、実行ファイルは 755）を作り、どちらも `.sha256` を添える。ポータブルの zip は作らない。ISCC は `CLAMQTPIE_ISCC`・`%LOCALAPPDATA%\Programs\Inno Setup 6`・`%ProgramFiles(x86)%\Inno Setup 6` の順に探す。`--no-installer` で PyInstaller の出力まで
+- **インストーラ**（`packaging/windows/ClamQtPie.iss`。管理者で動く）: `%ProgramFiles%\ClamQtPie` に置き、`clamqtpie-ctl setup install --user <導入した利用者>` を呼ぶ。選べる作業: サインインしたときにトレイGUI を起動する（`HKCU\...\Run`、引用符で囲む）、`clamqtpie-ctl` を PATH に追加する
+  - 更新: 先にサービスを止めて止まるまで待ち、Restart Manager でトレイGUI を閉じて差し替える。終わったらトレイGUI を元の利用者の権限で起動する（`runasoriginaluser`）
+  - 旧版（ポータブル）の検出: 自動起動の値が導入先以外の `ClamQtPie.exe` を指していれば、導入の後に移行を勧める（「はい」で `clamqtpie-ctl migrate --from <旧版のフォルダ> --yes --restart`。導入した日のうちに行うよう案内する。§57）
+  - 削除: データ（隔離したファイルを含む）を消すかを尋ね（既定は残す）、`clamqtpie-ctl setup uninstall [--purge]` を呼ぶ。PATH から外す
+- **`clamqtpie-ctl setup install|uninstall`**（`core/windows_setup.py`。Windows だけ）: データの置き場所（`%ProgramData%\ClamQtPie`）を一般の利用者が作っていた・書き換えられる・リンクなら `ClamQtPie.untrusted-<日時>` に退避して作り直す（12章 32）。ClamQtPie Users グループを作り、導入した利用者を入れる。サービスを止めてから登録（遅延自動起動。既にあれば更新）し、回復動作（§62）を付けて開始する。削除はサービスを止めて登録を消し、`--purge` ならデータとグループも消す
+- **配布版のサービスの登録**: pywin32 は配布版でも `pythonservice.exe` を登録しようとするため、サービスのクラスに `_exe_name_`（自分の実行ファイル）を付けた
+- **旧版の自動起動の引き継ぎ**: トレイGUI の起動時に、旧版（ポータブルの ClamQtPie・旧名）の自動起動を、このトレイGUI で登録し直す（`AutostartService.refresh_command`・`migrate_legacy`。登録されていなければ登録しない）。通知のクリックの `clamqtpie:` は、トレイGUI が起動のたびに登録し直す
+- **見つけた不具合**: トレイGUI が自動起動のコマンドを文字列でなく一覧で渡していたため、設定画面で「OS起動時自動起動」を保存すると失敗していた（12-4b-1 から）。配布版の自動起動のパスを引用符で囲む（`Program Files` の空白）
+
+Windows の実機（開発用の PC）でインストーラを動かして確かめ、見つかった点を直した:
+- 更新で、動いているトレイGUI を Restart Manager が閉じられず（ほかのセッションの昇格していないプロセスのため。Permission Denied + Session Mismatch）、`ClamQtPie.exe` を上書きできずに止まった。インストーラが自分でトレイGUI・昇格ヘルパーを終わらせ、`CloseApplications=no` にした。静かな更新でもトレイGUI を起動し直す
+- サービスが止まったかの確かめ方を、`sc query` の出力をファイルに書いて読む形にした（止まらなければ導入をやめる）。STOPPED になった後もプロセスが少しの間ファイルを使っていて、削除で使用中のファイルが残ったため、プロセスが終わるまで待つ（10 秒で終わらなければ強制的に終わらせる。インストーラと `setup uninstall` の両方）
+- 2 回目の導入で `setup install` が失敗した（既にグループに入っている利用者を `net localgroup /add` するとエラーになる）。入っていれば何もしない。インストーラは失敗のときに ctl の出力（理由）を表示する
+- 削除で「データも消すか」の確認が、Inno Setup の削除の確認より先に出ていた。後に出す。前の削除で残ったフォルダも消す（`[UninstallDelete]`）
+- 確かめた: 導入（サービスの登録・遅延自動起動・回復動作・グループ・PATH・自動起動）、サインインし直した後に一般の利用者のまま `user.token` を読めて `admin.token` を読めないこと、トレイGUI が昇格せずにサービスの開始を待ってつながること、昇格ヘルパー（UAC → 確認画面 → 実行、UAC の取り消し、確認画面の取り消し）、通知のトーストを既読にすると通知センターから消えること、更新でデータが残ること、削除（データを残す・消す）
+
+Linux の実機（EndeavourOS・KDE Plasma 6 の Wayland・systemd 262）で tar.gz を `install.sh` で導入し、12-4b〜12-4d の全項目が期待どおりであることを確かめた。気になった点を直した:
+- 昇格の確認画面: 開いたときに本文の全体が選択された状態だった。カーソルを先頭に置き、フォーカスを「キャンセル」に置く。root で動くため利用者の画面のテーマにならなかったので、トレイGUI と同じ暗色のテーマで表示する（12-4c-1）
+- 保護された設定の入力欄が、ほかの欄と同じ見た目で変えられないことが分からなかった。無効の入力欄の背景・文字の色を変える（12-4c-2）
+- Plasma 6 では、サインアウトしても利用者の `systemd --user` が止まらず、アプリに新しいグループが付かないことがある（再起動で効いた）。`install.sh`・`clamqtpie-ctl users add` の案内に「使えなければ PC を再起動」を足した。すでにグループに入っている利用者には「入れました」と出さない（12-4d-1・12-4d-2）
+- 確認画面の数字の幅が広く見える点は、root の利用者のフォントの設定によるもので、直していない。`systemctl list-timers` の次の実行の表示は systemd の表示の問題（`NextElapseUSecRealtime` は正しい）
+
+確認: 全テスト（Windows 1025 件・WSL 1037 件、2 回ずつ）成功。Windows で `build_release.py` を実行し、インストーラ（約 68 MB）ができることを確かめた（インストーラの実行は、サービス・グループ・PATH を変えるため、利用者の確認を得てから行う）。WSL で tar.gz を作り、中のサービスが起動・終了できることを確かめた。
