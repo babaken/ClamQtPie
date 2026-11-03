@@ -112,7 +112,7 @@ def test_status(env):
     assert body["update"]["running"] is False and body["update"]["auto_update"] is True
     assert body["schedule"] == {"next_run": "2026-11-01T03:00:00+09:00", "next_job_name": "毎晩フルスキャン"}
     assert body["quarantine"] == {"count": 1}  # 復元済みは数えない
-    assert body["web"] == {"enabled": False}
+    assert body["web"] == {"enabled": False, "off_at": None}
     assert isinstance(body["definitions"]["age_days"], int)
 
 
@@ -187,7 +187,8 @@ def test_csv_export_neutralizes_formulas(env):
     assert "attachment" in response.headers["content-disposition"]
     text = response.content.decode("utf-8-sig")
     rows = list(csv.reader(io.StringIO(text)))
-    assert rows[0] == ["日時", "レベル", "カテゴリ", "メッセージ"]
-    messages = [row[3] for row in rows[1:]]
+    assert rows[0] == ["日時", "レベル", "カテゴリ", "コード", "メッセージ"]
+    assert [row[3] for row in rows[1:]] == ["E8004", "", ""]
+    messages = [row[4] for row in rows[1:]]
     assert all(not m.startswith(("=", "+", "-", "@")) for m in messages)
     assert "'=HYPERLINK(\"http://x\")" in messages  # 先頭に ' を付けて文字として扱わせる

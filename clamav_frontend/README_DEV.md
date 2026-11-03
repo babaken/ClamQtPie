@@ -1495,3 +1495,28 @@ Linux の実機（EndeavourOS・KDE Plasma 6 の Wayland・systemd 262）で tar
 - **`clamqtpie-ctl web`**: `status`・`enable [--for D | --until T]`・`timer (D | --until T | clear)`・`disable`・`set-login [--username] [--generate | --password-stdin]`・`hash-password`。サービスが動いていれば admin のトークンで `PUT /web`・`PUT /web/credentials` を送り（`elevate_main.AdminApi`。接続先の確認つき）、止まっていれば同じ検査（`web_changes`・`credential_changes`）で設定ファイルを直接変える。パスワードは引数で受け取らない。`config show` はハッシュを「（設定済み）」と表示し、`config set` では WebUI の項目を変えさせない（web のコマンドを案内する）
 - ログイン・ログアウト・失敗・ロック・再確認・ON/OFF をログに残す（接続元付き）。通知の既読のログに経路（WebUI／トレイGUI・管理用コマンド）を加えた（6.10節）
 - 二段階認証のコード（`code`）はログイン・再確認の本文で受け取れるが、12-5d まで使わない。全体のロック（LAN だけが対象）は 12-5e
+
+## 74. 段階 12-5b: WebUI の画面
+
+サービス化・Web API設計書 7.3節・11章。clamav-webui（利用者の別リポジトリ）の仕組みを流用し、配色はトレイGUI（`gui/theme.py`）にそろえた（12-5 の計画の決めたこと 3）。
+
+- **ファイル**: `web/index.html`（1 枚の HTML。ログインと 10 画面を JavaScript で切り替える）、`web/app.js`、`web/style.css`。ビルドの工程は無い。配布物には spec の `_DATAS` で `web/` を入れる
+- **配る部分**（`api/web_static.py`。WebUI の待ち受けにだけ付ける）: `/` と `/web` は `/web/` へ転送、`/web/`・`/web/login` は `index.html`、`/web/app.js`・`/web/style.css` だけを配る（パスから任意のファイルを読まない）。WebUI の応答にはすべて `nosniff`・`X-Frame-Options: DENY`・`Referrer-Policy: same-origin`・`Cache-Control: no-store`、HTML には CSP（`script-src 'self'; style-src 'self'` など。clamav-webui より厳しく、インラインのスタイルも使わない）
+- **流用した仕組み**: fetch の包み（`api()`。エラーの JSON を `ApiError` にする）、`data-action` → `ACTIONS`（フォームは `FORMS`）、表示は `textContent` だけ（`el()` で要素を作る）。clamav-webui のダブルサブミットの CSRF（`csrf_token` Cookie）は使わず、ログイン応答の CSRF トークンをメモリに持つ。画面を読み直したときは `GET /auth/session`（Cookie のセッションが有効なら、そのセッションの CSRF トークンを返す。新設）
+- **画面**: ホーム（状態のカード、クイックスキャン・定義更新・リアルタイム保護・clamd の起動停止）、スキャン（種類・場所、進み具合は SSE、見つかったものの「隔離」、履歴と詳細）、隔離（復元・削除）、除外、リアルタイム保護（開始・停止、検知したときの動作、監視するフォルダ）、スケジュール（追加・編集・有効無効・今すぐ実行・削除、「スリープ中でも起こして実行する」）、定義更新（ログは SSE）、ログ（絞り込み・CSV・消去）、設定（変えられる項目だけ。保護された項目は一覧とコマンドの案内）、診断
+- **admin の操作**: E8108 を受けたら、操作の内容を並べた確認のダイアログ（`<dialog>`）でパスワードを求め、`POST /auth/reauth` の後に 1 回だけやり直す（トレイGUI の UAC と確認画面に相当）。WebUI はトレイGUI と違い、変更をためずにその場で送る（確認から 5 分間は確認を省くため、続けての操作で何度も聞かない）
+- **通知**: 画面上部の「通知」に未読の件数。一覧から 1 件ずつ・すべて既読にできる。`notification`・`notification.acked` で一覧と件数をすぐ直す。新しい通知はページの右下にも出す。ブラウザの OS 通知は HTTPS とあわせて 12-5e
+- **イベント**: `EventSource`（Cookie で認証）。切れて閉じた（ログインの期限切れ・WebUI の停止）ときは、3 秒後にセッションを確かめ、有効ならつなぎ直し、無効ならログインの画面に戻す
+- `GET /status` の `web` に、WebUI の ON/OFF と OFF にする時刻を入れた（画面上部の「この WebUI は 18:30 に OFF になります」）
+- **テスト**（`tests/unit/test_webui_pages.py`）: 応答のヘッダ、配るファイルの限定、内部 API では配らないこと、`innerHTML` などを使わないこと、インラインのスクリプト・ハンドラ・スタイルが無いこと、`data-action`・フォーム・画面とその処理の対応、`app.js` が呼ぶ API のパスが実在すること、扱うイベントをサービスが出していること、`node --check`（node があるとき）
+
+### 74.1 実機の確認（Windows・Linux）を受けて直したこと
+
+- **画面から始めたスキャンの検知も通知にする**: 通知を作っていたのはリアルタイム監視とスケジュールのスキャンだけで、トレイGUI・WebUI・API から始めたスキャンの検知では作らなかった。画面を閉じていても気づけるよう、`core/runtime.py` の `connect_scan_notifications` で `ScanDispatcher.file_scanned` の検知を `NotificationService.notify_detection`（`quarantined=False`。画面からのスキャンは自動では隔離しない）に渡す
+- **WebUI の「隔離」に再確認を求める**: `POST /quarantine` は user の操作で、サービスでは頼んだ利用者のフォルダの中だけに限っていたが、WebUI のセッションは admin として扱うため、どこのファイルでも再確認なしで隔離できた。WebUI の待ち受けでは隔離ファイルの削除・復元と同じく、再確認から 5 分以内に限る（トレイGUI・内部 API の扱いは変えない）
+- **セッションの Cookie の名前**を `session` から `clamqtpie_session` にした。Cookie はポートで分かれないため、このPC で動くほかのアプリ（127.0.0.1 の別のポート）が同じ名前の Cookie を使うと、ログインが上書きされて切れる
+- **WebUI が OFF になった・サービスが止まったとき**: 画面が気づかず、操作するとブラウザの英語のエラーだけが出ていた。`fetch` の失敗を「サービスにつながりません。WebUI が OFF になったか、サービスが止まった可能性があります」にしてログインの画面に戻す。`EventSource` はつなぎ直しを続けて閉じないため、エラーのたびに（重ねずに）3 秒後にセッションを確かめる
+- **変更の一覧はいつも見せる**: 設定の保存は、再確認から 5 分以内だと確認のダイアログが出ず、変更の一覧も見ずに保存されていた。`GET /auth/session` に `reauthenticated` を加え、5 分以内なら `confirm` で一覧を見せる（トレイGUI は毎回、一覧を見せる）
+- **ログの CSV に「コード」の列**（E8101 など）を加えた（トレイGUI の CSV 出力も同じ）
+- **画面**: スキャン履歴の結果を日本語に（完了・中断・失敗）、再確認のダイアログのパスワードの欄に見出し、変更の一覧の見出しの行に「・」を付けない、中立の知らせは灰色の線（赤はエラー・検知、緑は成功だけ）、長い画面をスクロールしてもメニューは見えたまま、幅が狭いときの上部の折り返し、パスの入力欄を広く、除外の入力欄の例を OS によらない書き方に、診断で [注意] があれば上に件数を書き、「伏せ字のレポートをコピー」を加えた
+- **`clamqtpie-ctl web`**: `enable` のエラー（パスワードが未設定）に `web set-login` を案内、`status` は OFF のとき URL を出さない、`config show` はパスワードの文字数（`web_password_length`）も伏せる、`--password-stdin` は端末で手入力するときは入力した文字を出さない（`getpass`）

@@ -160,13 +160,14 @@ class LogReaderService:
 
 def _write_csv(f, entries: list[LogEntry]) -> None:
     writer = csv.writer(f)
-    writer.writerow(["日時", "レベル", "カテゴリ", "メッセージ"])
+    writer.writerow(["日時", "レベル", "カテゴリ", "コード", "メッセージ"])
     for e in entries:
         writer.writerow(
             [
                 e.datetime.strftime("%Y-%m-%d %H:%M:%S"),
                 _csv_safe(e.level),
                 _csv_safe(e.category),
+                _csv_safe(e.error_code),
                 _csv_safe(e.message),
             ]
         )

@@ -15,7 +15,7 @@ from fastapi import Depends
 from fastapi.testclient import TestClient
 
 from api.app import API_PREFIX, create_app
-from api.auth import ROLE_ADMIN, ApiTokens, require_admin
+from api.auth import ROLE_ADMIN, SESSION_COOKIE, ApiTokens, require_admin
 from api.bridge import EventHub
 from api.context import ApiContext
 from api.web_control import WebController
@@ -264,11 +264,11 @@ def test_repeated_failures_lock_the_client(env):
 
 def test_login_replaces_the_old_session(env):
     _logged_in(env)
-    old = env.browser.cookies.get("session")
+    old = env.browser.cookies.get(SESSION_COOKIE)
     _login(env)
-    new = env.browser.cookies.get("session")
+    new = env.browser.cookies.get(SESSION_COOKIE)
     assert new and new != old
-    stale = TestClient(env.web_app, base_url=WEB, client=("127.0.0.1", 50003), cookies={"session": old})
+    stale = TestClient(env.web_app, base_url=WEB, client=("127.0.0.1", 50003), cookies={SESSION_COOKIE: old})
     assert stale.get(f"{API_PREFIX}/web").status_code == 401
 
 
@@ -295,7 +295,7 @@ def test_turning_the_webui_off_ends_all_sessions(env):
 # -- 待ち受けごとの認証 -------------------------------------------------------------------------------------
 def test_each_listener_accepts_only_its_own_credentials(env):
     _logged_in(env)
-    cookie = {"session": env.browser.cookies.get("session")}
+    cookie = {SESSION_COOKIE: env.browser.cookies.get(SESSION_COOKIE)}
     internal_with_cookie = TestClient(env.internal.app, base_url=INTERNAL, client=("127.0.0.1", 50004), cookies=cookie)
     assert internal_with_cookie.get(f"{API_PREFIX}/web").status_code == 401  # 内部 API は Cookie を受け付けない
     bearer_on_web = TestClient(env.web_app, base_url=WEB, client=("127.0.0.1", 50005))
@@ -461,13 +461,15 @@ def test_ctl_web_commands_change_the_settings_while_the_service_is_stopped(tmp_p
                                   ask_password=lambda prompt: (_ for _ in ()).throw(AssertionError("聞かない")))
         return code, out.getvalue()
 
+    code, out = run("status")
+    assert code == 0 and "URL:" not in out  # OFF のときはつながらない URL を出さない
     code, _ = run("enable")
     assert code == clamqtpie_ctl.EXIT_ERROR  # パスワードが未設定
     monkeypatch.setattr("sys.stdin", io.StringIO(PASSWORD + "\n"))
     code, out = run("set-login", "--password-stdin")
     assert code == 0 and PASSWORD not in out
     code, out = run("enable", "--for", "8h")
-    assert code == 0 and "WebUI: ON" in out and "OFF にする時刻: なし" not in out
+    assert code == 0 and "WebUI: ON" in out and "OFF にする時刻: なし" not in out and "URL: http://127.0.0.1:" in out
     code, out = run("timer", "clear")
     assert code == 0 and "OFF にする時刻: なし" in out
     code, out = run("disable")
@@ -488,10 +490,31 @@ def test_ctl_config_hides_the_hash_and_refuses_web_fields(tmp_path, monkeypatch)
     clamqtpie_ctl.main(["--data-dir", data, "web", "set-login", "--password-stdin"], out=io.StringIO())
     out = io.StringIO()
     clamqtpie_ctl.main(["--data-dir", data, "config", "show"], out=out)
-    assert json.loads(out.getvalue())["api"]["web_password_hash"] == "（設定済み）"
+    shown = json.loads(out.getvalue())["api"]
+    assert shown["web_password_hash"] == "（設定済み）"
+    assert shown["web_password_length"] == "（伏せています）"  # 文字数も推測の手がかりになる
     code = clamqtpie_ctl.main(["--data-dir", data, "config", "set", "api.web_password_hash", "x", "--yes"],
                               out=io.StringIO())
     assert code == clamqtpie_ctl.EXIT_ERROR
+
+
+def test_enabling_without_a_password_tells_how_to_set_it(env):
+    response = env.internal.put(f"{API_PREFIX}/web", headers=env.admin, json={"enabled": True})
+    assert response.status_code == 400 and "web set-login" in response.json()["error"]["message"]
+
+
+def test_password_stdin_does_not_echo_on_a_terminal(tmp_path, monkeypatch):
+    # 端末で手入力するときは、--password-stdin でも入力した文字を画面に出さない
+    import clamqtpie_ctl
+
+    monkeypatch.setattr(clamqtpie_ctl, "service_running", lambda *a, **k: False)
+    terminal = io.StringIO("")
+    terminal.isatty = lambda: True
+    monkeypatch.setattr("sys.stdin", terminal)
+    asked = []
+    code = clamqtpie_ctl.main(["--data-dir", str(tmp_path / "svc"), "web", "set-login", "--password-stdin"],
+                              out=io.StringIO(), ask_password=lambda prompt: asked.append(prompt) or PASSWORD)
+    assert code == 0 and len(asked) == 1
 
 
 def test_password_checks_run_at_most_two_at_a_time(monkeypatch):

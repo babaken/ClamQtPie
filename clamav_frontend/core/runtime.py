@@ -89,6 +89,19 @@ def _clamd_user(config) -> str | None:
     return conf.get("User") if conf is not None else None
 
 
+def connect_scan_notifications(scan_dispatcher, notification_service) -> None:
+    """画面（トレイGUI・WebUI・API）から始めたスキャンの検知も、通知として保存する（段階 12-5b）。
+
+    スキャンの画面を閉じていても、トレイGUI や後で開いた WebUI で気づけるようにする。画面からのスキャンは
+    自動では隔離しない（隔離は画面の操作）ため、quarantined=False で渡す
+    """
+    def on_file(path, status: str, detail: str, _detected_at: str) -> None:
+        if status == "FOUND":
+            notification_service.notify_detection(path, detail or "unknown", quarantined=False)
+
+    scan_dispatcher.file_scanned.connect(on_file)
+
+
 def build(paths: ServicePaths) -> Runtime:
     """サービス一式を組み立てて、スケジュールと（設定が有効なら）リアルタイム監視を始める"""
     # SMTP パスワードは keyring ではなく、データの置き場所のファイルに保存する（SYSTEM・root では keyring を使えない）
@@ -140,6 +153,7 @@ def build(paths: ServicePaths) -> Runtime:
     realtime_manager.detection_handled.connect(
         lambda path, virus_name, quarantined: notification_service.notify_detection(
             path, virus_name, quarantined=quarantined))
+    connect_scan_notifications(scan_dispatcher, notification_service)
 
     def run_scan(target: str, job_name: str):
         return run_scheduled_scan(target, job_name, clamav_service, exclude_service, quarantine_service,

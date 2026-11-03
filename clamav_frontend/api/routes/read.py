@@ -75,8 +75,16 @@ def get_status(request: Request) -> dict:
         },
         "schedule": {"next_run": next_run or None, "next_job_name": next_job_name or None},
         "quarantine": {"count": sum(1 for q in ctx.quarantine_service.list_all() if not q.restored and not q.deleted)},
-        "web": {"enabled": False},  # WebUI は段階 12-5
+        "web": _web_status(ctx),
     }
+
+
+def _web_status(ctx) -> dict:
+    web = getattr(ctx, "web", None)
+    if web is None:
+        return {"enabled": False, "off_at": None}
+    status = web.status()
+    return {"enabled": status["enabled"], "off_at": status["off_at"]}
 
 
 # -- 6.3〜6.7 一覧 ---------------------------------------------------------------------

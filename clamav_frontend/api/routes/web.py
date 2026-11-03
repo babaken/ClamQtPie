@@ -138,6 +138,17 @@ async def login(request: Request, body: LoginBody) -> JSONResponse:
     return response
 
 
+@auth_router.get("/auth/session")
+def current_session(request: Request, session=Depends(require_web_session)) -> dict:
+    """画面を読み直したとき（CSRF トークンは画面のメモリにしか持たないため）。Cookie のセッションが有効なら、
+    そのセッションの CSRF トークンを返す。別のサイトからは読めない（CORS を許可しない。Cookie は SameSite=Strict）。
+    reauthenticated は再確認から 5 分以内か（画面が、パスワードを聞かない場合にも変更の一覧を見せるため）"""
+    api = _ctx(request).config_service.current.api
+    return {"csrf_token": session.csrf_token, "username": api.web_username, "off_at": api.web_off_at or None,
+            "session_timeout_min": api.session_timeout_min,
+            "reauthenticated": _web(request).sessions.is_reauthenticated(session)}
+
+
 @auth_router.delete("/auth/session")
 def logout(request: Request, session=Depends(require_web_session)) -> Response:
     _web(request).sessions.destroy(session.id)

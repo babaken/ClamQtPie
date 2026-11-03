@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from api import actions
-from api.auth import ROLE_ADMIN, require_user
+from api.auth import ROLE_ADMIN, is_web_request, require_admin, require_user
 from api.bridge import END
 from core.exceptions import ApiConflictError, ApiForbiddenError
 from core.peer_identity import is_inside
@@ -75,9 +75,13 @@ def check_user_scan(request: Request, body: ScanBody) -> None:
 @router.post("/quarantine", status_code=201)
 async def quarantine_file(request: Request, body: QuarantineBody, role: str = Depends(require_user)) -> dict:
     """検知したファイルを手で隔離する（スキャン画面の「隔離」）。サービスで user のトークンなら、
-    頼んだ利用者のフォルダの中のファイルだけ（12章 R-9 と同じ判断。ほかの利用者のファイルを動かさせない）"""
+    頼んだ利用者のフォルダの中のファイルだけ（12章 R-9 と同じ判断。ほかの利用者のファイルを動かさせない）。
+    WebUI のセッションは admin として扱い、どこのファイルでも動かせるため、隔離ファイルの削除・復元と同じく
+    再確認から 5 分以内に限る（段階 12-5b）"""
     ctx = _ctx(request)
-    if ctx.service_mode and role != ROLE_ADMIN:
+    if is_web_request(request):
+        require_admin(request)
+    elif ctx.service_mode and role != ROLE_ADMIN:
         await run_in_threadpool(_check_inside_requester, request, [body.path],
                                 "利用者のフォルダの外のファイルを隔離するには管理者の権限が要ります")
     return await _on_main(request, actions.quarantine_file, body.path, body.virus_name)

@@ -6,7 +6,8 @@ FastAPI のアプリケーションを組み立てる（サービス化・Web AP
 自動で作られる説明のページ（/docs・/redoc・/openapi.json）は、
 待ち受けに出す必要がなく、使える API の一覧を外に見せることになるため作らない。
 WebUI の待ち受け（段階 12-5a）は、同じルーターで listener="web" のアプリを作る（api/auth.py が認証を切り替える）。
-ログイン（/auth/*）は WebUI の待ち受けにだけ付ける。
+ログイン（/auth/*）と画面のファイル（/web/*。api/web_static.py）は WebUI の待ち受けにだけ付ける。
+WebUI の応答にはすべて nosniff などのヘッダを付ける。
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from api.auth import LISTENER_INTERNAL, LISTENER_WEB, ApiTokens, check_request
 from api.context import ApiContext
 from api.errors import install_error_handlers
 from api.routes import info, jobs, notifications, read, write
+from api import web_static
 from api.routes import web as web_routes
 from core.version import APP_NAME, APP_VERSION
 
@@ -44,9 +46,13 @@ def create_app(tokens: ApiTokens, context: ApiContext | None = None, listener: s
     @app.middleware("http")
     async def _check_every_request(request: Request, call_next):
         rejected = check_request(request)
-        if rejected is not None:
-            return rejected
-        return await call_next(request)
+        if rejected is None:
+            response = await call_next(request)
+        else:
+            response = rejected
+        if listener == LISTENER_WEB:
+            web_static.add_security_headers(response)
+        return response
 
     app.include_router(info.router, prefix=API_PREFIX)
     if context is not None:
@@ -61,4 +67,5 @@ def create_app(tokens: ApiTokens, context: ApiContext | None = None, listener: s
                 app.include_router(web_routes.web_router, prefix=API_PREFIX)
                 if listener == LISTENER_WEB:
                     app.include_router(web_routes.auth_router, prefix=API_PREFIX)
+                    app.include_router(web_static.router)
     return app

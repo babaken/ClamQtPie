@@ -33,7 +33,8 @@ def web_changes(api, body: dict) -> dict:
     enabled = body.get("enabled")
     enabled = api.web_enabled if enabled is None else enabled
     if enabled and not api.web_password_hash:
-        raise ConfigValidationError("先に WebUI のログイン（ユーザー名・パスワード）を設定してください", detail="password")
+        raise ConfigValidationError("先に WebUI のログイン（ユーザー名・パスワード）を設定してください"
+                                    "（トレイGUI か clamqtpie-ctl web set-login）", detail="password")
     changes: dict = {"web_enabled": bool(enabled)}
     if "off_at" in body and "off_after_min" in body:
         raise ConfigValidationError("off_at と off_after_min はどちらか一方だけを指定してください", detail="off_at")

@@ -136,9 +136,12 @@ def cmd_config_show(paths: ServicePaths, out) -> int:
     service = _config_service(paths)
     service.load()
     data = service.as_dict()
-    # WebUI のパスワードのハッシュは表示しない（3.4節）
-    if data.get("api", {}).get("web_password_hash"):
-        data["api"]["web_password_hash"] = "（設定済み）"
+    # WebUI のパスワードのハッシュは表示しない（3.4節）。パスワードの文字数も推測の手がかりになるため出さない
+    api_section = data.get("api", {})
+    if api_section.get("web_password_hash"):
+        api_section["web_password_hash"] = "（設定済み）"
+    if api_section.get("web_password_length"):
+        api_section["web_password_length"] = "（伏せています）"
     print(json.dumps(data, ensure_ascii=False, indent=2), file=out)
     return EXIT_OK
 
@@ -540,8 +543,9 @@ def _print_web_status(status: dict, out) -> None:
     print(f"WebUI: {state}", file=out)
     off_at = status.get("off_at")
     print(f"OFF にする時刻: {local_time_text(off_at) if off_at else 'なし（OFF にするまで）'}", file=out)
-    for url in status.get("urls", []):
-        print(f"URL: {url}", file=out)
+    if status.get("enabled"):  # OFF のときはつながらない URL を出さない
+        for url in status.get("urls", []):
+            print(f"URL: {url}", file=out)
     print(f"ユーザー名: {status.get('username')}", file=out)
     print(f"パスワード: {'設定済み' if status.get('password_set') else '未設定（web set-login で設定してください）'}",
           file=out)
@@ -570,7 +574,9 @@ def _read_new_password(generate: bool, from_stdin: bool, out, ask_password, read
 def cmd_web(paths: ServicePaths, args, out, ask_password=getpass.getpass, read_line=None) -> int:
     from core.duration_text import parse_duration_minutes, parse_until
 
-    read_line = read_line or sys.stdin.readline
+    if read_line is None:
+        # --password-stdin でも、端末で手入力するときは、入力した文字を画面に出さない
+        read_line = (lambda: ask_password("新しいパスワード: ")) if sys.stdin.isatty() else sys.stdin.readline
     action = args.web_action
     try:
         if action == "status":

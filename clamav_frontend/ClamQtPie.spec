@@ -38,6 +38,8 @@ _DATAS = [
     (str(_ROOT / "alembic.ini"), "."),
     (str(_ROOT / "icons"), "icons"),
     (str(_ROOT / "manual"), "manual"),
+    # WebUI の画面（段階 12-5b。サービスが WebUI の待ち受けで配る）
+    (str(_ROOT / "web"), "web"),
 ]
 
 _HIDDEN = [

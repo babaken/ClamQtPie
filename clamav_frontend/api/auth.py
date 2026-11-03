@@ -49,8 +49,9 @@ _STATE_CHANGING_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 #: 待ち受けの種類（app.state.listener）
 LISTENER_INTERNAL = "internal"
 LISTENER_WEB = "web"
-#: WebUI のセッションの Cookie と、CSRF トークンを送るヘッダ
-SESSION_COOKIE = "session"
+#: WebUI のセッションの Cookie と、CSRF トークンを送るヘッダ。Cookie はポートで分かれないため、このPC で動く
+#: ほかのアプリ（127.0.0.1 の別のポート）の Cookie と名前が重ならないよう、アプリの名前を付ける
+SESSION_COOKIE = "clamqtpie_session"
 CSRF_HEADER = "x-csrf-token"
 
 

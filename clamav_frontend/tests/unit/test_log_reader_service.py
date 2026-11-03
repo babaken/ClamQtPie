@@ -83,8 +83,8 @@ def test_export_csv_writes_utf8_bom(tmp_path):
     raw = output_path.read_bytes()
     assert raw.startswith(b"\xef\xbb\xbf")  # UTF-8 BOM
     content = raw.decode("utf-8-sig")
-    assert "日時,レベル,カテゴリ,メッセージ" in content
-    assert "E1001" not in content  # メッセージ本文にはエラーコードが含まれないため
+    assert "日時,レベル,カテゴリ,コード,メッセージ" in content
+    assert ",E1001," in content  # エラーコードは画面と同じく別の列に出す
     assert "ClamAVサービスに接続できません" in content
 
 def test_read_entries_includes_rotated_files_in_date_order(tmp_path):
@@ -133,4 +133,4 @@ def test_export_csv_neutralizes_formula_like_values(tmp_path):
 
     with open(output_path, encoding="utf-8-sig", newline="") as f:
         rows = list(csv.reader(f))[1:]
-    assert [row[3] for row in rows] == ["'=HYPERLINK(\"x\")", "'+1", "'-1", "'@SUM(A1)", "'\tTAB", "通常のメッセージ"]
+    assert [row[4] for row in rows] == ["'=HYPERLINK(\"x\")", "'+1", "'-1", "'@SUM(A1)", "'\tTAB", "通常のメッセージ"]
