@@ -283,6 +283,22 @@ class NotificationProxy:
         self._api.call("POST", "/notifications/test-mail")
 
 
+class ScanHistoryProxy:
+    """スキャン履歴（GET /scans/history。スキャン画面の履歴の一覧。段階 12-4b）"""
+
+    def __init__(self, api: SyncCaller) -> None:
+        self._api = api
+
+    def list_recent(self, limit: int = 200) -> list[SimpleNamespace]:
+        """新しい順に limit 件"""
+        page = self._api.call("GET", "/scans/history", params={"limit": limit})
+        return [SimpleNamespace(**item) for item in (page.get("items", []) if isinstance(page, dict) else [])]
+
+    def get(self, history_id: int) -> dict:
+        """1 件の詳細（detections・error_files を含む）"""
+        return self._api.call("GET", f"/scans/history/{history_id}")
+
+
 # -- イベントから作るシグナル --------------------------------------------------------------------
 class RealtimeProxy(QObject):
     """RealtimeManager の代わり。状態は GET /status・status イベント、検知などは realtime.* イベント"""
@@ -471,6 +487,7 @@ class ServiceProxies:
         self.clamav = ClamAVProxy(self.status)
         self.log_reader = LogReaderProxy(api)
         self.notification = NotificationProxy(api)
+        self.scan_history = ScanHistoryProxy(api)
         self.realtime = RealtimeProxy(api, self.status, self.config, events)
         self.scan = ScanDispatcherProxy(api, events)
         self.update = UpdateDispatcherProxy(api, events)

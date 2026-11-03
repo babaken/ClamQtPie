@@ -137,6 +137,8 @@ def parse_rtcwake(output: str) -> tuple[int, int] | None:
 
 def wake_timer_policy(system: str | None = None, run=subprocess.run) -> str:
     """スリープから起こせるかの説明（1 行）"""
+    from core.clamd_process import console_text_kwargs  # 日本語の Windows の powercfg は OEM コードページで出力する
+
     system = system or platform.system()
     if system == "Windows":
         powercfg = find_system_tool("powercfg", system)
@@ -144,7 +146,7 @@ def wake_timer_policy(system: str | None = None, run=subprocess.run) -> str:
             return "確認できません（powercfg が見つかりません）"
         try:
             result = run([powercfg, "/query", "SCHEME_CURRENT", "SUB_SLEEP", "RTCWAKE"], capture_output=True,
-                         text=True, timeout=10, env=child_env(None, system))
+                         timeout=10, env=child_env(None, system), **console_text_kwargs(system))
         except (OSError, subprocess.SubprocessError) as exc:
             return f"確認できません ({exc})"
         values = parse_rtcwake(result.stdout or "")

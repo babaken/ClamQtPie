@@ -7,6 +7,8 @@
   サービスにつながらないときは E8105 を表示し、トレイをエラーの状態にして、つながるまで試し続ける
 - 多重起動防止はログオンのセッションごと（Local\\ のミューテックス。12章 42）
 - admin の操作は、段階 12-4c で昇格ヘルパーを通すようになるまで 403（E8102）のエラーになる
+- 通知: サービスが保存した未読の通知をデスクトップに出し、トーストのクリックで開いた画面の通知・トレイの
+  「未読の通知」の一覧で既読にする（gui/tray_notifications.py。設計書 7.2節）
 
 従来のアプリ（app.py、1 プロセス）は段階 12-4e で削除する。
 """
@@ -27,7 +29,7 @@ from api_client.client import ApiClient  # noqa: E402
 from api_client.events import EventStream  # noqa: E402
 from api_client.proxies import ServiceProxies  # noqa: E402
 from api_client.sync import SyncCaller  # noqa: E402
-from core.activation import user_state_dir  # noqa: E402
+from core.activation import ActivationWatcher, helper_command, register_protocol, user_state_dir  # noqa: E402
 from core.autostart_service import AutostartService  # noqa: E402
 from core.exceptions import AppError, ServicePermissionError  # noqa: E402
 from core.logger import setup_logger  # noqa: E402
@@ -36,17 +38,21 @@ from core.single_instance import TRAY_MUTEX_NAME, SingleInstanceLock  # noqa: E4
 from core.version import APP_NAME  # noqa: E402
 from gui.error_dialog import set_default_detail_handler, show_confirm_dialog  # noqa: E402
 from gui.main_window import MainWindow  # noqa: E402
+from gui.notification_dialog import NotificationListDialog  # noqa: E402
 from gui.theme import apply_theme  # noqa: E402
 from gui.tray import TrayIcon, TrayIconState  # noqa: E402
+from gui.tray_notifications import DesktopToaster, TrayNotifier  # noqa: E402
 
 import logging  # noqa: E402
 
 logger = logging.getLogger("clamav_frontend")
 
 if getattr(sys, "frozen", False):
-    _RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    _APP_DIR = Path(sys.executable).resolve().parent
+    _RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", _APP_DIR))
 else:
-    _RESOURCE_DIR = Path(__file__).resolve().parent
+    _APP_DIR = Path(__file__).resolve().parent
+    _RESOURCE_DIR = _APP_DIR
 
 #: サービスにつながらないときに、つなぎ直す間隔
 _RECONNECT_MS = 5_000
@@ -94,10 +100,13 @@ class TrayApp:
         self.tray_icon = TrayIcon(_RESOURCE_DIR / "icons")
         self.window: MainWindow | None = None
         self.proxies: ServiceProxies | None = None
+        self.notifier: TrayNotifier | None = None
+        self._notification_dialog: NotificationListDialog | None = None
+        self._activation: ActivationWatcher | None = None
         #: サービスにつながらないときのエラーコード（つながっている間は None）
         self._down_code: str | None = None
         self._reconnect = QTimer()
-        self._reconnect.timeout.connect(self.try_connect)
+        self._reconnect.timeout.connect(self._retry)
         self._status_timer = QTimer()
 
     def shutdown(self) -> None:
@@ -106,6 +115,8 @@ class TrayApp:
         self._status_timer.stop()
         if self.proxies is not None:
             self.proxies.events.stop()
+        if self.notifier is not None:
+            self.notifier.shutdown()
         if self.window is not None:
             self.window.hide()
             self.window.deleteLater()
@@ -134,11 +145,22 @@ class TrayApp:
         if self.window is None:
             events = EventStream(self.client)
             self.proxies = ServiceProxies(api, events)
+            notify_icon = _RESOURCE_DIR / "icons" / "app.png"
+            self.notifier = TrayNotifier(api, events,
+                                         DesktopToaster(str(notify_icon) if notify_icon.exists() else None))
             self._build_window()
             events.disconnected.connect(self._show_unreachable)
             events.connected.connect(self._on_connected)
             events.start()
         return True
+
+    def _retry(self) -> None:
+        """つなぎ直し（タイマー）。起動の後に権限が無くなった（グループから外された・トークンを作り直した）ときは、
+        終わらずにエラーの状態のままつなぎ直す"""
+        try:
+            self.try_connect()
+        except ServicePermissionError as exc:
+            self._show_unreachable(exc)
 
     def _show_unreachable(self, error) -> None:
         code = getattr(error, "code", "E8105")
@@ -146,7 +168,7 @@ class TrayApp:
             logger.warning(f"ClamQtPie サービスにつながりません ({code}: {getattr(error, 'detail', error)})")
         self._down_code = code
         self.tray_icon.set_state(TrayIconState.ERROR, True)
-        self.tray_icon.setToolTip(f"{APP_NAME}: サービスにつながりません（{code}）")
+        self.tray_icon.set_warning(f"サービスにつながりません（{code}）")
         if self.window is not None:
             self.window.get_screen("home").set_service_down(code)
         if self.window is None and not self._reconnect.isActive():
@@ -156,11 +178,45 @@ class TrayApp:
         if self._down_code is not None:
             logger.info("ClamQtPie サービスにつながりました")
         self._down_code = None
-        self.tray_icon.setToolTip(APP_NAME)
+        self.tray_icon.set_warning(None)
         self.tray_icon.set_state(TrayIconState.ERROR, False)
         if self.window is not None:
             self.window.get_screen("home").set_service_down(None)
             self.window.get_screen("home").refresh_status()
+        if self.notifier is not None:
+            self.notifier.sync_pending()  # 止まっていた間・つながる前の通知
+
+    def enable_activation(self) -> None:
+        """トーストのクリックで画面を開く（Windows。core/activation.py。開いた画面の通知は既読にする）"""
+        self._activation = ActivationWatcher(user_state_dir())
+        register_protocol(helper_command(_APP_DIR, frozen=getattr(sys, "frozen", False),
+                                         python_executable=sys.executable))
+        self._activation.show_requested.connect(self.on_show_requested)
+
+    def on_show_requested(self, key: str) -> None:
+        if self.window is None:
+            return
+        logger.info(f"通知のクリックにより画面を表示します: {key}")
+        self.window.navigate_to(key)
+        self.window.show_from_tray()
+        if self.notifier is not None:
+            self.notifier.ack_screen(key)
+
+    def show_notifications(self) -> None:
+        """トレイの「未読の通知」"""
+        if self.notifier is None:
+            return
+        if self._notification_dialog is None:
+            self._notification_dialog = NotificationListDialog(self.notifier, self.window)
+        self._notification_dialog.reload()
+        self._notification_dialog.show()
+        self._notification_dialog.raise_()
+        self._notification_dialog.activateWindow()
+
+    def _on_pending_changed(self, count: int) -> None:
+        self.tray_icon.notifications_action.setText(f"未読の通知（{count} 件）" if count else "未読の通知")
+        # メニューを開かなくても分かるよう、ツールチップにも出す
+        self.tray_icon.set_note(f"未読の通知 {count} 件（メニューの「未読の通知」）" if count else None)
 
     # -- 画面 -----------------------------------------------------------------------------------
     def _build_window(self) -> None:
@@ -177,6 +233,7 @@ class TrayApp:
         engine_screen = window.get_screen("engine")
 
         scan_screen.bind_services(p.scan, p.quarantine)
+        scan_screen.bind_history(p.scan_history)
         quarantine_screen.bind_services(p.quarantine)
         realtime_screen.bind_services(p.realtime, p.watch_targets, p.excludes)
 
@@ -194,6 +251,7 @@ class TrayApp:
         )
         window.get_screen("log").bind_services(p.log_reader)
         window.get_screen("diagnostics").bind_services(DiagnosticsProxy(p))
+        window.get_screen("diagnostics").bind_service_info(lambda: service_info(p))
 
         def quick_scan() -> None:
             window.navigate_to("scan")
@@ -248,7 +306,7 @@ class TrayApp:
             realtime_screen.sync_toggle_state(status.realtime_running)
 
         home_screen.status_refreshed.connect(on_status)
-        p.scan.finished.connect(lambda _summary: home_screen.refresh_status())
+        p.scan.finished.connect(lambda _summary: (home_screen.refresh_status(), scan_screen.reload_history()))
         p.update.finished.connect(lambda _record: home_screen.refresh_status())
         p.realtime.detected.connect(lambda _path, _virus: (
             self.tray_icon.set_state(TrayIconState.DETECTION_PENDING, True), home_screen.refresh_status()))
@@ -264,6 +322,7 @@ class TrayApp:
                 home_screen.refresh_status(check_clamd=False)
             elif name == "schedule.finished":
                 window.get_screen("schedule").reload()
+                scan_screen.reload_history()
 
         p.events.event.connect(on_event)
 
@@ -276,6 +335,10 @@ class TrayApp:
                 window.get_screen("settings").reload_from_config()
             elif key == "log":
                 window.get_screen("log").on_shown()
+            elif key == "scan":
+                scan_screen.reload_history()
+            elif key == "diagnostics":
+                window.get_screen("diagnostics").refresh_service_info()
 
         window.screen_changed.connect(on_screen_changed)
 
@@ -283,12 +346,30 @@ class TrayApp:
         self.tray_icon.scan_now_action.triggered.connect(quick_scan)
         self.tray_icon.update_now_action.triggered.connect(update_now)
         self.tray_icon.toggle_realtime_action.triggered.connect(toggle_realtime)
+        self.tray_icon.notifications_action.setVisible(True)
+        self.tray_icon.notifications_action.triggered.connect(self.show_notifications)
+        self.notifier.pending_changed.connect(self._on_pending_changed)
 
         self._status_timer.timeout.connect(home_screen.refresh_status)
         self._status_timer.start(_STATUS_INTERVAL_MS)
         home_screen.refresh_status()
         if not p.config.current.general.start_minimized:
             window.show()
+
+
+def service_info(p: ServiceProxies) -> list[tuple[str, str, str]]:
+    """診断画面の「サービスの状態」（別のスレッドで呼ばれる）"""
+    from core.diagnostics_service import LEVEL_NG, LEVEL_OK, LEVEL_WARN
+    from core.wake_timer import wake_timer_policy
+
+    status = p.status.get()["clamd"]
+    if not status.get("reachable"):
+        clamd = ("clamd に接続できません（エンジン サービス画面・ログを確認してください）", LEVEL_NG)
+    elif status.get("verified") is True:
+        clamd = ("clamd であることを確かめてから接続しています", LEVEL_OK)
+    else:
+        clamd = ("clamd であることを確かめられません（別の PC の clamd か、ログに理由があります）", LEVEL_WARN)
+    return [("clamd の接続先", *clamd), ("スリープから起こす設定", wake_timer_policy(), "")]
 
 
 def _autostart_command() -> list[str]:
@@ -313,6 +394,7 @@ def main() -> int:
         app.setWindowIcon(QIcon(str(app_icon)))
 
     tray = TrayApp(app, ServicePaths.default())
+    tray.enable_activation()
     tray.tray_icon.quit_action.triggered.connect(app.quit)
     tray.tray_icon.show()
     try:

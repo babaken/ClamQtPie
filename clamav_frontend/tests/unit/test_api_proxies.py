@@ -19,6 +19,7 @@ from api.app import create_app
 from api.auth import ROLE_ADMIN, ApiTokens
 from api.bridge import EventHub
 from api.context import ApiContext
+from api.events import connect_notifications
 from api.jobs import JobTracker
 from api.server import ApiServer
 from api_client.client import ApiClient
@@ -26,11 +27,13 @@ from api_client.events import EventStream
 from api_client.proxies import ServiceProxies
 from api_client.sync import SyncCaller
 from core.config_service import ConfigService
-from core.exceptions import ApiForbiddenError
+from core.exceptions import ApiForbiddenError, ServicePermissionError
 from core.exclude_service import ExcludeService
 from core.gui_config import read_gui_general
 from core.log_reader_service import LogReaderService
+from core.notification_store import NotificationStore
 from core.quarantine_service import QuarantineService
+from core.scan_history_service import ScanHistoryCollector, ScanHistoryService
 from core.scheduler_service import SchedulerService
 from core.service_endpoint import write_endpoint
 from core.watch_target_service import WatchTargetService
@@ -98,6 +101,8 @@ def service(tmp_path):
     log.parent.mkdir()
     log.write_text(f"{date.today()} 10:00:00,000 [INFO] <スキャン> 手動スキャンを開始しました\n", encoding="utf-8")
     hub = EventHub()
+    store = NotificationStore(db)
+    connect_notifications(hub, store)
     jobs = JobTracker(hub)
     scan = _ScanDispatcher(jobs)
     scheduler = SchedulerService(db, lambda target, name=None: SimpleNamespace(detected=0),
@@ -113,6 +118,7 @@ def service(tmp_path):
         exclude_service=ExcludeService(db), watch_target_service=WatchTargetService(db),
         log_reader_service=LogReaderService(log), invoker=_DirectInvoker(), events=hub, jobs=jobs,
         apply_config=lambda saved: hub.publish("config.changed", {}),
+        scan_history_service=ScanHistoryService(db), notification_store=store,
     )
     api_dir = tmp_path / "api"
     tokens = ApiTokens(api_dir)
@@ -125,7 +131,7 @@ def service(tmp_path):
     shutil.copytree(api_dir, admin_dir)
     (admin_dir / "user.token").write_text(tokens.token_for(ROLE_ADMIN), encoding="ascii")
     yield SimpleNamespace(api_dir=api_dir, admin_dir=admin_dir, hub=hub, scan=scan, context=context, tmp=tmp_path,
-                          scheduler=scheduler)
+                          scheduler=scheduler, store=store)
     server.stop()
     db.close()
 
@@ -225,6 +231,54 @@ def test_calls_from_a_background_thread(qtbot, service):
     assert result["q"] == []
 
 
+def test_scan_history_through_the_proxy(qapp, service):
+    collector = ScanHistoryCollector(source="gui", scan_type="custom", label="カスタムスキャン", targets=[str(service.tmp)])
+    collector.add(str(service.tmp / "x"), "FOUND", "Eicar")
+    history_id = service.context.scan_history_service.record(collector, scanned=3, result="completed")
+    p = _proxies(service)
+    [record] = p.scan_history.list_recent()
+    assert (record.id, record.label, record.detected) == (history_id, "カスタムスキャン", 1)
+    assert p.scan_history.get(history_id)["detections"][0]["virus_name"] == "Eicar"
+
+
+def test_notifications_through_the_service(qtbot, service):
+    from gui.tray_notifications import TrayNotifier
+
+    class Toaster:
+        shown, closed = [], []
+
+        def show(self, title, body, open_screen, tag):
+            future = concurrent.futures.Future()
+            future.set_result(tag)
+            self.shown.append(tag)
+            return future
+
+        def close(self, handle):
+            self.closed.append(handle.result())
+
+        def shutdown(self):
+            pass
+
+    service.store.add("ウイルスを検知しました", "/tmp/a: Eicar", "quarantine")
+    service.store.add("スケジュールジョブが失敗しました", "毎日: 失敗", None)
+    p = _proxies(service)
+    toaster = Toaster()
+    notifier = TrayNotifier(p.api, p.events, toaster)
+    with qtbot.waitSignal(p.events.connected, timeout=10000):
+        p.events.start()
+    notifier.sync_pending()
+    assert toaster.shown == ["s2"] and len(notifier.pending) == 2
+    with qtbot.waitSignal(notifier.pending_changed, timeout=10000):
+        service.store.add("ウイルス定義が古くなっています", "", None)  # 動いている間の通知はイベントで届く
+    assert toaster.shown == ["s2", "n3"]
+    notifier.ack_screen("quarantine")
+    assert sorted(n["id"] for n in notifier.pending) == [2, 3]
+    notifier.ack(None)
+    qtbot.waitUntil(lambda: sorted(toaster.closed) == ["n3", "s2"], timeout=10000)
+    assert service.store.pending()[1] == 0
+    p.events.stop()
+
+
 # -- トレイGUI の起動 ------------------------------------------------------------------------
 def test_tray_builds_all_screens_against_the_service(qtbot, service, monkeypatch):
     import tray_main
@@ -239,6 +293,14 @@ def test_tray_builds_all_screens_against_the_service(qtbot, service, monkeypatch
     tray.window.get_screen("quarantine").reload()
     tray.window.get_screen("home").refresh_status()
     assert tray.window.get_screen("home").status.clamd_running is True
+    assert not tray.window.get_screen("scan").history_card.isHidden()
+    assert tray.tray_icon.notifications_action.isVisible()
+    tray.notifier.pending_changed.emit(2)
+    assert tray.tray_icon.notifications_action.text() == "未読の通知（2 件）"
+    assert "未読の通知 2 件" in tray.tray_icon.toolTip()  # メニューを開かなくても分かる
+    tray.show_notifications()
+    assert tray._notification_dialog.summary_label.text() == "未読の通知はありません。"
+    tray._notification_dialog.close()
     tray.shutdown()  # 後のテストで、止めたサービスに画面が問い合わせないように
 
 
@@ -248,6 +310,14 @@ def test_tray_waits_for_the_service(qtbot, tmp_path):
     tray = tray_main.TrayApp(qtbot_app(qtbot), SimpleNamespace(api_dir=tmp_path))
     assert tray.try_connect() is False  # サービスが動いていない（トークンが無い）
     assert tray.window is None and tray._reconnect.isActive()
+    def no_permission():
+        raise ServicePermissionError(detail="user.token")  # トークンを読めない
+
+    tray.client.prepare = no_permission
+    with pytest.raises(ServicePermissionError):
+        tray.try_connect()  # 起動のときは案内して終わる
+    tray._retry()  # つなぎ直しでは終わらず、エラーの状態のまま続ける
+    assert tray._reconnect.isActive()
     tray.shutdown()
 
 

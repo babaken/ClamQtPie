@@ -63,12 +63,16 @@ class TrayIcon(QSystemTrayIcon):
         self.update_now_action = QAction("定義更新", self._menu)
         self.toggle_realtime_action = QAction("リアルタイム監視 ON/OFF", self._menu)
         self.toggle_realtime_action.setCheckable(True)
+        # 未読の通知の一覧（トレイGUI だけ。サービスが保存した通知。段階 12-4b）
+        self.notifications_action = QAction("未読の通知", self._menu)
+        self.notifications_action.setVisible(False)
         self.quit_action = QAction("終了", self._menu)
 
         self._menu.addAction(self.open_action)
         self._menu.addAction(self.scan_now_action)
         self._menu.addAction(self.update_now_action)
         self._menu.addAction(self.toggle_realtime_action)
+        self._menu.addAction(self.notifications_action)
         self._menu.addSeparator()
         self._menu.addAction(self.quit_action)
         self.setContextMenu(self._menu)
@@ -106,4 +110,14 @@ class TrayIcon(QSystemTrayIcon):
 
     def set_warning(self, text: str | None) -> None:
         """ツールチップに注意を出す（Noneで消す）。定義が古いなど、アイコンの状態にはしない注意に使う"""
-        self.setToolTip(f"{APP_NAME}\n{text}" if text else APP_NAME)
+        self._warning = text
+        self._update_tooltip()
+
+    def set_note(self, text: str | None) -> None:
+        """ツールチップの最後に添える案内（Noneで消す）。トレイGUI の未読の通知の件数"""
+        self._note = text
+        self._update_tooltip()
+
+    def _update_tooltip(self) -> None:
+        lines = [APP_NAME] + [t for t in (getattr(self, "_warning", None), getattr(self, "_note", None)) if t]
+        self.setToolTip("\n".join(lines))

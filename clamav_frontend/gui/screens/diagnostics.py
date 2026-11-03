@@ -7,6 +7,8 @@
   設定ファイル・clamonaccのパス・アプリのフォルダ・clamdのホスト名とグローバルIPを伏せ字にする
   （問い合わせ等に貼り付ける場合はこちらを使う）
 - 診断はclamdへの接続・sc / systemctlの実行を含むため、BackgroundTaskでバックグラウンド実行する
+- トレイGUI（段階 12-4b）: 「サービスの状態」に、clamd の接続先を確かめられたか（§61）と、
+  スリープから起こす設定（§60）を出す（bind_service_info。画面を開いたときに refresh_service_info で読み直す）
 """
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit
 
 from core.background_task import BackgroundTask
-from core.diagnostics_service import LEVEL_NG, LEVEL_WARN, mask_report
+from core.diagnostics_service import LEVEL_NG, LEVEL_OK, LEVEL_WARN, mask_report
 from gui.screens.base import BaseScreen, wrap_layout
 from gui.theme import COLOR_NG, COLOR_OK, COLOR_WARN, set_variant
 from gui.plain_text import plain
@@ -47,6 +49,17 @@ class DiagnosticsScreen(BaseScreen):
         self.summary_label.setWordWrap(True)
         self.add_layout_widget(self.summary_label)
 
+        # トレイGUI だけ（bind_service_info で表示する）
+        self.service_card = self.begin_card("サービスの状態")
+        self.service_label = plain(QLabel(""))
+        self.service_label.setObjectName("cardText")
+        self.service_label.setWordWrap(True)
+        self.add_layout_widget(self.service_label)
+        self.service_card.setVisible(False)
+        self._service_info = None
+        self._info_task = BackgroundTask()
+        self._info_task.finished.connect(self._on_service_info)
+
         self.begin_card("診断レポートの詳細")
         self.report_area = QTextEdit()
         self.report_area.setReadOnly(True)
@@ -65,6 +78,22 @@ class DiagnosticsScreen(BaseScreen):
     def bind_services(self, diagnostics_service) -> None:
         self._diagnostics_service = diagnostics_service
         self._update_buttons()
+
+    def bind_service_info(self, provider) -> None:
+        """provider: [(項目, 内容, 判定（LEVEL_OK・LEVEL_WARN・LEVEL_NG・""）), ...] を返す関数（別のスレッドで呼ぶ）"""
+        self._service_info = provider
+        self.service_card.setVisible(True)  # 確認は画面を開いたとき（refresh_service_info）
+
+    def refresh_service_info(self) -> None:
+        if self._service_info is not None and self._info_task.run("service_info", self._service_info):
+            self.service_label.setText("確認しています...")
+
+    def _on_service_info(self, _name: str, rows, error) -> None:
+        if error is not None:
+            self.service_label.setText(f"サービスの状態を確認できませんでした: {error}")
+            return
+        marks = {LEVEL_OK: "[OK] ", LEVEL_WARN: "[注意] ", LEVEL_NG: "[NG] "}
+        self.service_label.setText("\n".join(f"{marks.get(level, '')}{label}: {text}" for label, text, level in rows))
 
     @property
     def report_text(self) -> str:

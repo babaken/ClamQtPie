@@ -14,6 +14,8 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -24,6 +26,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QTableWidget,
     QTableWidgetItem,
+    QTextEdit,
     QVBoxLayout,
 )
 
@@ -35,13 +38,17 @@ from core.clamav_service import (
     ERROR_REASON_VANISHED,
     error_reason,
 )
+from core.exceptions import AppError
 from core.logger import CATEGORY_SCAN, log_event
+from core.scan_history_service import MAX_ERRORS
 from core.text_safety import visible_controls
 from gui.error_dialog import show_confirm_dialog, show_error_dialog
 from gui.plain_text import plain, plain_tooltip
 from gui.screens.base import BaseScreen, wrap_layout
 from gui.theme import set_variant
 from gui.time_text import local_time_text
+
+logger = logging.getLogger("clamav_frontend")
 
 _VIEW_UPDATE_INTERVAL_MS = 200
 
@@ -58,6 +65,13 @@ _ERROR_REASON_LABELS = {
     ERROR_REASON_VANISHED: "未検査（削除済み）",
     ERROR_REASON_OTHER: "エラー",
 }
+
+#: スキャン履歴の表示（core/scan_history_service.py の値）
+_HISTORY_TYPES = {"quick": "クイック", "full": "フル", "custom": "カスタム", "schedule": "スケジュール"}
+_HISTORY_SOURCES = {"gui": "画面", "api": "Web API", "schedule": "スケジュール"}
+_HISTORY_RESULTS = {"completed": "完了", "cancelled": "中断", "failed": "失敗"}
+_HISTORY_ACTIONS = {"quarantined": "隔離しました", "notified": "通知のみ"}
+_HISTORY_REASONS = {"size_limit": "サイズの上限", "permission": "権限なし", "vanished": "削除済み", "other": "エラー"}
 
 
 class ScanScreen(BaseScreen):
@@ -139,6 +153,25 @@ class ScanScreen(BaseScreen):
         result_action_layout.addWidget(self.ignore_button)
         self._add_hlayout(result_action_layout)
 
+        # 5. スキャン履歴（トレイGUI だけ。サービスが記録した、画面・スケジュール・Web API のスキャン。段階 12-4b）
+        self.history_card = self.begin_card("スキャン履歴", "画面・スケジュール・Web API から行ったスキャンの記録です。")
+        self.history_table = QTableWidget(0, 7)
+        self.history_table.setHorizontalHeaderLabels(
+            ["開始日時", "種類", "実行元", "結果", "スキャン", "検知", "検査できなかったファイル"])
+        self.history_table.itemDoubleClicked.connect(lambda _item: self._on_history_detail_clicked())
+        self.add_layout_widget(self.history_table)
+        history_buttons = QHBoxLayout()
+        self.history_detail_button = QPushButton("詳細")
+        self.history_reload_button = QPushButton("最新の情報に更新")
+        self.history_detail_button.clicked.connect(self._on_history_detail_clicked)
+        self.history_reload_button.clicked.connect(self.reload_history)
+        history_buttons.addWidget(self.history_detail_button)
+        history_buttons.addWidget(self.history_reload_button)
+        history_buttons.addStretch(1)
+        self._add_hlayout(history_buttons)
+        self.history_card.setVisible(False)
+        self._history_service = None
+
         self._scanned_count = 0
         self._detected_count = 0
         self._error_count = 0
@@ -162,6 +195,60 @@ class ScanScreen(BaseScreen):
         self._scan_dispatcher.finished.connect(self._on_finished)
         self._scan_dispatcher.error.connect(self._on_scan_error)
         self._scan_dispatcher.activity.connect(self._on_activity)
+
+    def bind_history(self, history_service) -> None:
+        """スキャン履歴の一覧を表示する（トレイGUI。api_client.proxies.ScanHistoryProxy）"""
+        self._history_service = history_service
+        self.history_card.setVisible(True)
+        self.reload_history()
+
+    def reload_history(self) -> None:
+        if self._history_service is None:
+            return
+        try:
+            records = self._history_service.list_recent()
+        except AppError as exc:
+            logger.warning(f"スキャン履歴を読めませんでした ({exc.code}: {exc.detail or exc.message})")
+            return
+        self.history_table.setRowCount(0)
+        for record in records:
+            row = self.history_table.rowCount()
+            self.history_table.insertRow(row)
+            values = [
+                local_time_text(record.started_at),
+                record.label or _HISTORY_TYPES.get(record.scan_type, record.scan_type),
+                _HISTORY_SOURCES.get(record.source, record.source),
+                _HISTORY_RESULTS.get(record.result, record.result),
+                str(record.scanned), str(record.detected), str(record.errors),
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setToolTip(plain_tooltip(value))
+                self.history_table.setItem(row, col, item)
+            self.history_table.item(row, 0).setData(_PATH_INDEX_ROLE, record.id)
+
+    def _on_history_detail_clicked(self) -> None:
+        row = self.history_table.currentRow()
+        if self._history_service is None or row < 0:
+            return
+        try:
+            data = self._history_service.get(self.history_table.item(row, 0).data(_PATH_INDEX_ROLE))
+        except AppError as exc:
+            show_error_dialog(self, exc)
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("スキャン履歴の詳細")
+        dialog.resize(720, 480)
+        layout = QVBoxLayout(dialog)
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        text.setPlainText(history_detail_text(data))  # ファイル名は文字のまま表示する
+        layout.addWidget(text)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     # -- UIイベント -----------------------------------------------------
     def _on_browse_clicked(self) -> None:
@@ -381,6 +468,41 @@ class ScanScreen(BaseScreen):
 
     def _add_hlayout(self, layout: QHBoxLayout) -> None:
         self.add_layout_widget(wrap_layout(layout))
+
+
+def history_detail_text(data: dict) -> str:
+    """スキャン履歴の詳細（GET /scans/history/{id}）を、読める文章にする"""
+    kind = data.get("label") or _HISTORY_TYPES.get(data.get("scan_type", ""), data.get("scan_type", ""))
+    result = _HISTORY_RESULTS.get(data.get("result", ""), data.get("result", ""))
+    if data.get("detail"):
+        result += f"（{data['detail']}）"
+    source = _HISTORY_SOURCES.get(data.get("source", ""), data.get("source", ""))
+    lines = [
+        f"種類: {kind}（{source}）",
+        f"開始: {local_time_text(data.get('started_at', ''))}　終了: {local_time_text(data.get('finished_at', ''))}",
+        f"結果: {result}",
+        f"件数: {_counter_text(data.get('detected', 0), data.get('errors', 0), data.get('scanned', 0))}",
+        "",
+        "対象:",
+        *[f"  {target}" for target in data.get("targets", [])],
+    ]
+    detections = data.get("detections", [])
+    if detections:
+        # 扱いはスキャンの時点のもの（後でスキャン画面から隔離したものは「通知のみ」のまま）
+        lines += ["", f"検知したファイル（{len(detections)} 件。扱いはスキャンの時点のもの）:"]
+        for d in detections:
+            action = _HISTORY_ACTIONS.get(d.get("action"), d.get("action") or "")
+            lines.append(f"  {d.get('path', '')}: {d.get('virus_name', '')}（{action}）")
+    error_files = data.get("error_files", [])
+    if error_files:
+        lines += ["", f"検査できなかったファイル（{data.get('errors', len(error_files))} 件）:"]
+        for e in error_files:
+            reason = _HISTORY_REASONS.get(e.get("reason"), e.get("reason") or "")
+            detail = f"（{e['detail']}）" if e.get("detail") else ""
+            lines.append(f"  {e.get('path', '')}: {reason}{detail}")
+        if data.get("errors_truncated"):
+            lines.append(f"  ほかに {data['errors_truncated']} 件（記録は {MAX_ERRORS:,} 件まで）")
+    return "\n".join(lines)
 
 
 def _counter_text(detected: int, errors: int, scanned: int) -> str:
