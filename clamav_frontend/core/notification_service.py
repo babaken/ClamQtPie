@@ -170,6 +170,10 @@ class NotificationService:
         except Exception as exc:  # noqa: BLE001
             logger.error(f"メール通知の送信に失敗しました (detail: {exc})", extra={"error_code": "E7001"})
 
+    def notify_system(self, title: str, body: str) -> None:
+        """サービスの動きの知らせ（WebUI の自動 OFF など。段階 12-5a）。通知の設定に関係なく保存する"""
+        self._send_desktop_notification(title, body)
+
     def notify_job_failure(self, job_name: str, detail: str) -> None:
         if not self.config.notification.on_job_fail:
             return

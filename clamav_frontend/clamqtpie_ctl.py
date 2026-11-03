@@ -10,6 +10,8 @@ GUI のない環境でも、サービスの状態の確認と、Web API から�
     clamqtpie-ctl config set KEY VALUE [--yes] [--restart]
     clamqtpie-ctl quarantine restore ID --to PATH [--overwrite]
     clamqtpie-ctl migrate --from DIR [--yes] [--restart]
+    clamqtpie-ctl web status | enable [--for D | --until T] | timer (D | --until T | clear) | disable
+    clamqtpie-ctl web set-login [--username NAME] [--generate | --password-stdin] | hash-password
 
 - config set は、変更の前後の値を表示して確認を求める（--yes で省略）。サービスが動いている間は変えない
   （サービスが保存するときに上書きされるため）。--restart を付けると、サービスを止めて変え、また開始する
@@ -18,7 +20,9 @@ GUI のない環境でも、サービスの状態の確認と、Web API から�
 - 開発中の確認では --data-dir DIR で、サービスの --console --data-dir と同じ置き場所を使える（root でなくてよい）
 - migrate は、旧版（ポータブル）のフォルダの設定・DB・隔離ファイル・ログを、サービスの置き場所へ移す
   （旧版のフォルダの中身は信頼しない。core/portable_migration.py）
-- WebUI の設定（web ...）は段階 12-5、トレイGUI を使える利用者の追加（users ...）は段階 12-4 で作る
+- web は WebUI の ON/OFF・自動で OFF にする時刻・ログインの設定（3.4節。段階 12-5a）。サービスが動いていれば
+  admin のトークンで PUT /web・PUT /web/credentials を送り（セッションの破棄などをサービスに行わせる）、止まっていれば
+  設定ファイルを直接変える。パスワードはコマンドラインの引数では受け取らない（ps・シェルの履歴から見えるため）
 """
 from __future__ import annotations
 
@@ -53,6 +57,17 @@ EXIT_NOT_ADMIN = 3
 #: 設定するときに場所を確かめる項目（実行ファイルは名前も確かめる）
 _EXECUTABLE_FIELDS = {"update.freshclam_path": ("freshclam",), "realtime.clamonacc_path": ("clamonacc",)}
 _TRUSTED_FILE_FIELDS = ("realtime.clamonacc_config_file",)
+
+
+#: config set では変えさせず、web のコマンドで変える項目（パスワードはハッシュの作り方・長さの記録・セッションの
+#: 破棄を伴い、ON/OFF はパスワードの設定済みを確かめるため）
+_WEB_COMMAND_FIELDS = {
+    "api.web_enabled": "web enable / web disable",
+    "api.web_off_at": "web enable --for / web timer",
+    "api.web_username": "web set-login --username",
+    "api.web_password_hash": "web set-login",
+    "api.web_password_length": "web set-login",
+}
 
 
 class CtlError(Exception):
@@ -120,7 +135,11 @@ def _api_version(port: int) -> str | None:
 def cmd_config_show(paths: ServicePaths, out) -> int:
     service = _config_service(paths)
     service.load()
-    print(json.dumps(service.as_dict(), ensure_ascii=False, indent=2), file=out)
+    data = service.as_dict()
+    # WebUI のパスワードのハッシュは表示しない（3.4節）
+    if data.get("api", {}).get("web_password_hash"):
+        data["api"]["web_password_hash"] = "（設定済み）"
+    print(json.dumps(data, ensure_ascii=False, indent=2), file=out)
     return EXIT_OK
 
 
@@ -183,6 +202,8 @@ def cmd_config_set(paths: ServicePaths, key: str, text: str, yes: bool, restart:
     target = getattr(config, section, None)
     if section in ("schema_version", *GUI_SECTIONS) or target is None or name not in {f.name for f in fields(target)}:
         raise CtlError(f"設定の項目が見つかりません: {key}")
+    if key in _WEB_COMMAND_FIELDS:
+        raise CtlError(f"{key} は clamqtpie-ctl web で変えてください（{_WEB_COMMAND_FIELDS[key]}）")
     before = getattr(target, name)
     value = _parse_value(before, text)
     if isinstance(value, str):
@@ -452,6 +473,170 @@ def cmd_users(paths: ServicePaths, action: str, name: str, out, runner=subproces
     return EXIT_OK
 
 
+# -- web（3.4節。段階 12-5a） ----------------------------------------------------------------
+def _web_api(paths: ServicePaths):
+    """サービスが動いていれば admin のトークンで内部 API を呼ぶもの（接続先がサービスかを確かめてから）。止まっていれば None"""
+    if not service_running():
+        return None
+    from elevate_main import AdminApi
+
+    try:
+        return AdminApi(paths.api_dir)
+    except (AppError, OSError) as exc:
+        detail = f"{exc.message}。{exc.detail or ''}" if isinstance(exc, AppError) else str(exc)
+        raise CtlError(f"サービスに接続できません（{detail}）") from None
+
+
+def _web_call(api, method: str, path: str, body=None):
+    try:
+        return api.call(method, path, body)
+    except AppError as exc:
+        raise CtlError(f"{exc.message}{'（' + exc.detail + '）' if exc.detail else ''}") from None
+    except OSError as exc:
+        raise CtlError(f"サービスに接続できません（{exc}）") from None
+
+
+def _web_offline_save(paths: ServicePaths, changes: dict, message: str, out) -> None:
+    service = _config_service(paths)
+    config = service.load()
+    for name, value in changes.items():
+        setattr(config.api, name, value)
+    service.save(config)
+    _audit(paths, f"clamqtpie-ctl: {message}")
+    print("サービスは止まっています。設定ファイルを変えました（次の開始から使われます）", file=out)
+
+
+def _web_update(paths: ServicePaths, body: dict, out) -> dict:
+    from api.web_control import web_changes, web_state_text
+    from core.exceptions import ConfigValidationError
+
+    api = _web_api(paths)
+    if api is not None:
+        return _web_call(api, "PUT", "/web", body)
+    config = _config_service(paths).load()
+    try:
+        changes = web_changes(config.api, body)
+    except ConfigValidationError as exc:
+        raise CtlError(exc.message) from None
+    for name, value in changes.items():
+        setattr(config.api, name, value)
+    _web_offline_save(paths, changes, f"WebUI を {web_state_text(config.api)} にしました", out)
+    return _web_status_offline(config.api)
+
+
+def _web_status_offline(api_config) -> dict:
+    return {"enabled": api_config.web_enabled, "running": False, "lan": False,
+            "urls": [f"http://127.0.0.1:{api_config.web_port}/web/login"], "username": api_config.web_username,
+            "password_set": bool(api_config.web_password_hash), "totp_set": False, "tls": "off",
+            "off_at": api_config.web_off_at or None, "session_timeout_min": api_config.session_timeout_min}
+
+
+def _print_web_status(status: dict, out) -> None:
+    from core.duration_text import local_time_text
+
+    state = "ON" if status.get("enabled") else "OFF"
+    if status.get("enabled") and not status.get("running"):
+        state += "（いまは待ち受けていません）"
+    print(f"WebUI: {state}", file=out)
+    off_at = status.get("off_at")
+    print(f"OFF にする時刻: {local_time_text(off_at) if off_at else 'なし（OFF にするまで）'}", file=out)
+    for url in status.get("urls", []):
+        print(f"URL: {url}", file=out)
+    print(f"ユーザー名: {status.get('username')}", file=out)
+    print(f"パスワード: {'設定済み' if status.get('password_set') else '未設定（web set-login で設定してください）'}",
+          file=out)
+    print(f"二段階認証: {'設定済み' if status.get('totp_set') else '未設定'}", file=out)
+    print(f"HTTPS: {'無効' if status.get('tls', 'off') == 'off' else status.get('tls')}", file=out)
+    print(f"LAN からの接続: {'許可' if status.get('lan') else '許可しない（このPC のブラウザだけ）'}", file=out)
+
+
+def _read_new_password(generate: bool, from_stdin: bool, out, ask_password, read_line) -> str:
+    from core.web_password import generate_password, password_problem
+
+    if generate:
+        password = generate_password()
+    elif from_stdin:
+        password = read_line().rstrip("\r\n")
+    else:
+        password = ask_password("新しいパスワード: ")
+        if ask_password("もう一度入力してください: ") != password:
+            raise CtlError("パスワードが一致しません")
+    problem = password_problem(password)
+    if problem:
+        raise CtlError(problem)
+    return password
+
+
+def cmd_web(paths: ServicePaths, args, out, ask_password=getpass.getpass, read_line=None) -> int:
+    from core.duration_text import parse_duration_minutes, parse_until
+
+    read_line = read_line or sys.stdin.readline
+    action = args.web_action
+    try:
+        if action == "status":
+            api = _web_api(paths)
+            status = _web_call(api, "GET", "/web") if api is not None else \
+                _web_status_offline(_config_service(paths).load().api)
+            _print_web_status(status, out)
+            return EXIT_OK
+        if action == "enable":
+            body = {"enabled": True}
+            if args.duration:
+                body["off_after_min"] = parse_duration_minutes(args.duration)
+            elif args.until:
+                body["off_at"] = parse_until(args.until)
+            else:
+                body["off_after_min"] = None
+            _print_web_status(_web_update(paths, body, out), out)
+            return EXIT_OK
+        if action == "timer":
+            if not _config_service(paths).load().api.web_enabled:
+                raise CtlError("WebUI は OFF です（先に web enable を実行してください）")
+            if args.until:
+                body = {"off_at": parse_until(args.until)}
+            elif args.duration == "clear":
+                body = {"off_after_min": None}
+            elif args.duration:
+                body = {"off_after_min": parse_duration_minutes(args.duration)}
+            else:
+                raise CtlError("長さ（例: 8h）か --until か clear を指定してください")
+            _print_web_status(_web_update(paths, body, out), out)
+            return EXIT_OK
+        if action == "disable":
+            _print_web_status(_web_update(paths, {"enabled": False}, out), out)
+            return EXIT_OK
+    except ValueError as exc:
+        raise CtlError(str(exc)) from None
+
+    if action == "set-login":
+        from api.web_control import credential_changes
+        from core.exceptions import ConfigValidationError
+
+        username = args.username or _config_service(paths).load().api.web_username
+        password = _read_new_password(args.generate, args.password_stdin, out, ask_password, read_line)
+        api = _web_api(paths)
+        if api is not None:
+            _web_call(api, "PUT", "/web/credentials", {"username": username, "password": password})
+        else:
+            try:
+                changes = credential_changes(username, password)
+            except ConfigValidationError as exc:
+                raise CtlError(exc.message) from None
+            _web_offline_save(paths, changes, f"WebUI のログインを設定しました（ユーザー名: {username}）", out)
+        print(f"WebUI のログインを設定しました（ユーザー名: {username}）", file=out)
+        if args.generate:
+            # 生成したパスワードは端末にだけ 1 回表示する（ログには残さない）
+            print(f"生成したパスワード（この画面にだけ表示します。控えてください）: {password}", file=out)
+        return EXIT_OK
+    if action == "hash-password":
+        from core.web_password import hash_password
+
+        password = _read_new_password(False, args.password_stdin, out, ask_password, read_line)
+        print(hash_password(password), file=out)
+        return EXIT_OK
+    return EXIT_ERROR
+
+
 # -- 入口 ------------------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="clamqtpie-ctl", description=f"{APP_NAME} の管理用コマンド")
@@ -485,6 +670,23 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--from", required=True, dest="source", help="旧版のフォルダ（ClamQtPie.exe・app.py のあるところ）")
     migrate.add_argument("--yes", action="store_true", help="確認を省く")
     migrate.add_argument("--restart", action="store_true", help="サービスが動いていれば、止めて移行し、また開始する")
+    web = sub.add_parser("web", help="WebUI の ON/OFF・ログインの設定").add_subparsers(dest="web_action", required=True)
+    web.add_parser("status", help="WebUI の状態を表示する")
+    enable = web.add_parser("enable", help="WebUI を ON にする")
+    when = enable.add_mutually_exclusive_group()
+    when.add_argument("--for", dest="duration", help="この長さの後に OFF にする（例: 30m、8h、2d、1d12h、1y）")
+    when.add_argument("--until", help="この日時に OFF にする（例: 2026-11-01T18:00。ローカル時刻）")
+    timer = web.add_parser("timer", help="ON のまま、OFF にする時刻を変える・取り消す")
+    timer.add_argument("duration", nargs="?", help="長さ（例: 8h）か clear")
+    timer.add_argument("--until", help="この日時に OFF にする")
+    web.add_parser("disable", help="WebUI を OFF にする")
+    login = web.add_parser("set-login", help="ユーザー名とパスワードを設定する（パスワードは画面に表示しない）")
+    login.add_argument("--username", help="ユーザー名（省略時は今のユーザー名）")
+    source = login.add_mutually_exclusive_group()
+    source.add_argument("--generate", action="store_true", help="パスワードを自動生成し、1 回だけ表示する")
+    source.add_argument("--password-stdin", action="store_true", help="パスワードを標準入力から 1 行読む")
+    hashing = web.add_parser("hash-password", help="パスワードの保存形式のハッシュだけを出力する（設定は変えない）")
+    hashing.add_argument("--password-stdin", action="store_true", help="パスワードを標準入力から 1 行読む")
     return parser
 
 
@@ -512,6 +714,8 @@ def main(argv: list[str] | None = None, out=sys.stdout, ask=input, ask_password=
             return cmd_users(paths, args.action, getattr(args, "name", ""), out)
         if args.command == "migrate":
             return cmd_migrate(paths, args.source, args.yes, args.restart, not args.data_dir, out, ask, ask_password)
+        if args.command == "web":
+            return cmd_web(paths, args, out, ask_password)
     except CtlError as exc:
         print(f"エラー: {exc}", file=sys.stderr)
         return EXIT_ERROR

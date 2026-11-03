@@ -9,6 +9,13 @@ Web API の認証（サービス化・Web API設計書 3.1節・3.2節）
 - 内部 API への要求は、接続元が 127.0.0.1 であること、Host が 127.0.0.1／localhost とこのポートであること、
   状態を変えるメソッドでは Origin・Referer が付いていればこのPC のものであることを確かめる
   （ブラウザに読み込ませたページから、このPC の API を呼ばせる手口を防ぐ）
+- 待ち受けは 2 つ（3.1節。段階 12-5a）。同じルーターを使い、どちらの待ち受けかで受け付ける認証を切り替える
+  - 内部 API（app.state.listener == "internal"）: Bearer トークンだけ（Cookie セッションは 401）
+  - WebUI（"web"）: Cookie セッションだけ（Bearer トークンは 401）。セッションの権限は admin。状態を変える要求は
+    セッションに結び付けた CSRF トークン（X-CSRF-Token）と Origin を確かめる。admin の操作（require_admin）は、
+    再確認（POST /auth/reauth）から 5 分以内のセッションだけ（E8108）。PUT /web・PUT /web/credentials などは
+    Bearer だけ（require_bearer_admin。WebUI からは 403）
+  - WebUI の接続元は、LAN からの接続（段階 12-5e）までループバックだけ
 """
 from __future__ import annotations
 
@@ -22,7 +29,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from api.errors import error_body
-from core.exceptions import ApiAuthError, ApiForbiddenError, ApiRequestRejectedError
+from core.exceptions import ApiAuthError, ApiForbiddenError, ApiReauthRequiredError, ApiRequestRejectedError
 from core.private_files import make_private_dir, write_private_file
 from core.text_safety import visible_controls
 
@@ -38,6 +45,13 @@ TOKEN_DIR_NAME = "api_tokens"
 _LOOPBACK_ADDRESSES = ("127.0.0.1", "::1")
 _LOOPBACK_HOSTNAMES = ("127.0.0.1", "localhost")
 _STATE_CHANGING_METHODS = ("POST", "PUT", "PATCH", "DELETE")
+
+#: 待ち受けの種類（app.state.listener）
+LISTENER_INTERNAL = "internal"
+LISTENER_WEB = "web"
+#: WebUI のセッションの Cookie と、CSRF トークンを送るヘッダ
+SESSION_COOKIE = "session"
+CSRF_HEADER = "x-csrf-token"
 
 
 class ApiTokens:
@@ -91,7 +105,38 @@ def _bearer_token(request: Request) -> str | None:
     return value.strip()
 
 
+def listener_of(request: Request) -> str:
+    return getattr(request.app.state, "listener", LISTENER_INTERNAL)
+
+
+def is_web_request(request: Request) -> bool:
+    return listener_of(request) == LISTENER_WEB
+
+
+def web_session(request: Request):
+    """WebUI の要求のセッション（api.web_sessions.WebSession）。無い・期限切れなら 401。状態を変える要求は
+    CSRF トークンも確かめる（違えば 403）"""
+    cached = getattr(request.state, "web_session", None)
+    if cached is not None:
+        return cached
+    if request.headers.get("authorization"):
+        raise ApiAuthError("WebUI ではトークンでの認証は使えません")
+    session = request.app.state.web.sessions.get(request.cookies.get(SESSION_COOKIE))
+    if session is None:
+        raise ApiAuthError("ログインしてください")
+    if request.method in _STATE_CHANGING_METHODS:
+        sent = request.headers.get(CSRF_HEADER, "")
+        if not hmac.compare_digest(sent.encode("utf-8"), session.csrf_token.encode("utf-8")):
+            _log_rejected(request, "CSRF トークンが一致しません")
+            raise ApiRequestRejectedError()
+    request.state.web_session = session
+    return session
+
+
 def _role(request: Request) -> str:
+    if is_web_request(request):
+        web_session(request)
+        return ROLE_ADMIN  # WebUI のセッションの権限は常に admin（3.3節）
     token = _bearer_token(request)
     role = request.app.state.tokens.role_of(token) if token else None
     if role is None:
@@ -105,10 +150,26 @@ def require_user(request: Request) -> str:
 
 
 def require_admin(request: Request) -> str:
-    """admin のロールを求める（FastAPI の Depends で使う）"""
+    """admin のロールを求める（FastAPI の Depends で使う）。WebUI のセッションは再確認から 5 分以内であること"""
     if _role(request) != ROLE_ADMIN:
         raise ApiForbiddenError()
+    if is_web_request(request) and not request.app.state.web.sessions.is_reauthenticated(web_session(request)):
+        raise ApiReauthRequiredError()
     return ROLE_ADMIN
+
+
+def require_bearer_admin(request: Request) -> str:
+    """admin の Bearer トークンだけを受け付ける（WebUI の ON/OFF・ログインの設定。WebUI からは変えさせない）"""
+    if is_web_request(request):
+        raise ApiForbiddenError("この操作は WebUI からはできません（トレイGUI か clamqtpie-ctl で行ってください）")
+    return require_admin(request)
+
+
+def require_web_session(request: Request):
+    """WebUI のセッションを求める（ログアウト・再確認）"""
+    if not is_web_request(request):
+        raise ApiAuthError()
+    return web_session(request)
 
 
 def _is_local_origin(value: str, port: int) -> bool:
@@ -117,7 +178,9 @@ def _is_local_origin(value: str, port: int) -> bool:
 
 
 def check_request(request: Request) -> JSONResponse | None:
-    """内部 API に来た要求の接続元・Host・Origin を確かめる。拒否するときはその応答を返す"""
+    """要求の接続元・Host・Origin を確かめる。拒否するときはその応答を返す"""
+    if is_web_request(request):
+        return _check_web_request(request)
     client = request.client.host if request.client else ""
     if client not in _LOOPBACK_ADDRESSES:
         return _reject(request, 403, "接続元がこのPC ではありません")
@@ -135,12 +198,37 @@ def check_request(request: Request) -> JSONResponse | None:
     return None
 
 
-def _reject(request: Request, status: int, reason: str) -> JSONResponse:
+def _check_web_request(request: Request) -> JSONResponse | None:
+    """WebUI に来た要求。接続元はループバックだけ（LAN は段階 12-5e）。状態を変える要求は Origin（無ければ
+    Referer）が必ず付いていて、Host と同じであること（ブラウザは fetch の POST などに Origin を付ける）"""
+    client = request.client.host if request.client else ""
+    if client not in _LOOPBACK_ADDRESSES:
+        return _reject(request, 403, "接続元がこのPC ではありません")
+    server_port = request.scope.get("server", (None, None))[1]
+    host = request.headers.get("host", "").lower()
+    if host not in {f"{name}:{server_port}" for name in _LOOPBACK_HOSTNAMES}:
+        return _reject(request, 400, "Host が正しくありません")
+    if request.method in _STATE_CHANGING_METHODS:
+        origin = request.headers.get("origin")
+        if origin is None:
+            referer = request.headers.get("referer")
+            parts = urlsplit(referer) if referer else None
+            origin = f"{parts.scheme}://{parts.netloc}" if parts and parts.scheme else None
+        if origin is None or origin.lower() != f"http://{host}":
+            return _reject(request, 403, "Origin がこの WebUI のものではありません")
+    return None
+
+
+def _log_rejected(request: Request, reason: str) -> None:
     client = request.client.host if request.client else "不明"
     logger.warning(
         f"API の要求を拒否しました: {reason}（接続元: {visible_controls(client)}、"
         f"{request.method} {visible_controls(request.url.path)}）",
         extra={"error_code": ApiRequestRejectedError.default_code},
     )
+
+
+def _reject(request: Request, status: int, reason: str) -> JSONResponse:
+    _log_rejected(request, reason)
     error = ApiRequestRejectedError()
     return JSONResponse(error_body(error.code, error.message), status_code=status)

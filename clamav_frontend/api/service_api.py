@@ -27,6 +27,7 @@ from api.events import (
 )
 from api.jobs import JobTracker
 from api.server import LOOPBACK_HOST, ApiServer
+from api.web_control import WebController
 from core.definitions import definitions_age_days
 from core.logger import CATEGORY_SYSTEM, log_event, setup_logger
 from core.peer_identity import requester_home
@@ -75,6 +76,7 @@ class ServiceApi:
         self._timer.timeout.connect(self._publish_status)
         self._clamd_thread = threading.Thread(target=self._watch_clamd, name="ClamdStatus", daemon=True)
         self.server: ApiServer | None = None
+        self.web: WebController | None = None
 
     def start(self) -> ApiServer:
         """待ち受けを始める。待ち受けられなければ OSError・RuntimeError（呼び出し側でサービスの起動を失敗にする）"""
@@ -96,6 +98,7 @@ class ServiceApi:
             service_mode=True, requester_home=requester_home,
         )
         tokens = ApiTokens(rt.paths.api_dir)
+        context.web = self.web = WebController(context, tokens)
         server = ApiServer(create_app(tokens, context), config.api.port, tokens=tokens)
         try:
             tokens.write_files()
@@ -109,6 +112,9 @@ class ServiceApi:
             raise
         self.server = server
         log_event(CATEGORY_SYSTEM, f"Web API の待ち受けを開始しました（{LOOPBACK_HOST}:{server.port}）")
+        # WebUI（段階 12-5a）: ON なら待ち受ける。失敗してもサービスは止めない（OFF にして通知する。9.4節）
+        self.web.check_timer()  # 止まっている間に OFF にする時刻を過ぎていれば、待ち受けずに OFF にする
+        self.web.apply()
         self._timer.start(_STATUS_INTERVAL_MS)
         self._clamd_thread.start()
         return server
@@ -116,6 +122,8 @@ class ServiceApi:
     def stop(self) -> None:
         self._stop.set()
         self._timer.stop()
+        if self.web is not None:
+            self.web.stop()
         if self.server is not None:
             self.server.stop()
             self.server = None
@@ -159,6 +167,9 @@ class ServiceApi:
         return age is not None and age > self.runtime.config_service.current.update.stale_days
 
     def _publish_status(self) -> None:
+        web = getattr(self, "web", None)
+        if web is not None:
+            web.check_timer()  # 決めた時刻になったら WebUI を OFF にする（2 秒ごと。日時の比べだけ）
         rt = self.runtime
         reachable = self._clamd_running
         self._status.on_status(SimpleNamespace(

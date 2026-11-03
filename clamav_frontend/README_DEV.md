@@ -1481,3 +1481,17 @@ Linux の実機（EndeavourOS・KDE Plasma 6 の Wayland・systemd 262）で tar
 - **テスト**: 画面のテストは、`tests/gui_fakes.py` の `FakeServiceApi`（送られた操作を手元の本物のサービスに適用する）と、トレイGUI と同じ `ConfigProxy` で確かめる形に書き直した。従来のアプリだけの動き（keyring への保存、旧名の keyring の引き継ぎ、その場での反映）のテストは除いた
 - **残したもの**: サービスが使う `core/`・`db/`、旧版のデータの移行（`clamqtpie-ctl migrate`、`core/portable_migration.py`）、`core/legacy_migration.py` の自動起動・URL スキーム・旧名のフォルダの引き継ぎ
 - 利用者向けの README（`README.md`・`README_en.md`）と CLAUDE.md の、従来のアプリを前提にした説明は、12-6（設計書の改訂）でまとめて直す
+
+## 73. 段階 12-5a: WebUI の待ち受けとログイン（ループバックだけ）
+
+サービス化・Web API設計書 3.1節・3.3節・3.4節・6.11節。12-5 の計画（internal の `docs/12-5計画.md`）の 12-5a。画面（`web/`）は 12-5b、トレイのサブメニューは 12-5c、二段階認証は 12-5d、HTTPS と LAN は 12-5e。
+
+- **設定**（`api.*`。すべて保護された項目。`GET/PUT /config` には出さない）: `web_enabled`、`web_port`（8766。内部 API と同じなら直す）、`web_username`（`admin`）、`web_password_hash`（scrypt。空なら未設定で、未設定の間は ON にできない。読み込み時に壊れていれば未設定にして OFF）、`web_password_length`、`web_off_at`（UTC。空なら期限なし）、`session_timeout_min`（30）
+- **パスワード**（`core/web_password.py`）: `hashlib.scrypt`（ソルト 16 バイト、n=2^14, r=8, p=1）。照合は `hmac.compare_digest`。ハッシュが無い・ユーザー名が違うときも同じだけ計算する。保存されたハッシュの作り方は n≦2^16 などに限る（設定ファイルを書き換えて照合を重くさせない）。8 文字以上（LAN 許可中は 12 文字。12-5e で使う）
+- **待ち受け**（`api/web_control.py` の `WebController`）: 内部 API と同じルーターで `listener="web"` のアプリを作り、2 つ目の `ApiServer`（スレッド名 `WebUI`）で `127.0.0.1:<web_port>` に待ち受ける。ON のときだけ待ち受け、OFF でセッションをすべて破棄して止める。待ち受けに失敗したらサービスは止めずに OFF にして通知する（9.4節）。止めるときは WebUI の SSE の購読だけを終わらせる（`EventHub.end_all(tag)`）
+- **認証の切り替え**（`api/auth.py`）: 内部 API は Bearer だけ（Cookie は 401）、WebUI は Cookie セッションだけ（Bearer は 401）。セッションの権限は admin。状態を変える要求は、セッションに結び付けた CSRF トークン（`X-CSRF-Token`、ログイン応答の JSON で渡す。Cookie にはしない）と Origin（無ければ Referer。必須）を確かめる。admin の操作（`require_admin`）は再確認から 5 分以内のセッションだけ（E8108）。`PUT /web`・`PUT /web/credentials` は `require_bearer_admin`（WebUI からは 403 E8102）。接続元はループバックだけ（LAN は 12-5e）
+- **ログイン**（`api/routes/web.py`。`/auth/*` は WebUI の待ち受けにだけ付ける）: `POST /auth/session` で新しいセッション ID の Cookie（`HttpOnly`・`SameSite=Strict`・`Path=/`）を発行し、付いていた古いセッションは破棄する。失敗はユーザー名とパスワードのどちらが違ったかを区別しない。同じ接続元から 5 回続けて失敗したら 5 分間 429（E8106）。`DELETE /auth/session` でログアウト、`POST /auth/reauth`（パスワード）で 5 分間「確認済み」。再確認の失敗も同じ回数に数え、ロックしたらセッションも破棄する。ログインの設定を変えたら全セッションを破棄する
+- **タイマー OFF**: `PUT /web` の `off_after_min`（1〜527040 分、`null` で期限なし）か `off_at`（ISO 8601、366 日以内）。サービスは 2 秒ごとの状態の確認のときに時刻を比べ、過ぎていれば OFF にして通知する（`NotificationService.notify_system`）。止まっている間に時刻を過ぎていれば、起動時に待ち受けずに OFF にする
+- **`clamqtpie-ctl web`**: `status`・`enable [--for D | --until T]`・`timer (D | --until T | clear)`・`disable`・`set-login [--username] [--generate | --password-stdin]`・`hash-password`。サービスが動いていれば admin のトークンで `PUT /web`・`PUT /web/credentials` を送り（`elevate_main.AdminApi`。接続先の確認つき）、止まっていれば同じ検査（`web_changes`・`credential_changes`）で設定ファイルを直接変える。パスワードは引数で受け取らない。`config show` はハッシュを「（設定済み）」と表示し、`config set` では WebUI の項目を変えさせない（web のコマンドを案内する）
+- ログイン・ログアウト・失敗・ロック・再確認・ON/OFF をログに残す（接続元付き）。通知の既読のログに経路（WebUI／トレイGUI・管理用コマンド）を加えた（6.10節）
+- 二段階認証のコード（`code`）はログイン・再確認の本文で受け取れるが、12-5d まで使わない。全体のロック（LAN だけが対象）は 12-5e

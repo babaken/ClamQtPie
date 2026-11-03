@@ -77,9 +77,11 @@ END = object()
 class Subscription:
     """1つの購読。queue からイベントを読み出す。closed になったら（読み出しが追いつかない等）接続を終える"""
 
-    def __init__(self, hub: "EventHub", loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, hub: "EventHub", loop: asyncio.AbstractEventLoop, tag: str = "internal") -> None:
         self._hub = hub
         self.loop = loop
+        #: どの待ち受けの購読か（"internal"・"web"。待ち受けを止めるときに、その待ち受けの購読だけを終わらせる）
+        self.tag = tag
         self.queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_SIZE)
         self.closed = False
 
@@ -132,9 +134,9 @@ class EventHub:
                 self.unsubscribe(subscription)
         return event
 
-    def subscribe(self) -> Subscription:
+    def subscribe(self, tag: str = "internal") -> Subscription:
         """購読者のイベントループの中（async 関数の中）で呼ぶ"""
-        subscription = Subscription(self, asyncio.get_running_loop())
+        subscription = Subscription(self, asyncio.get_running_loop(), tag)
         with self._lock:
             self._subscribers.append(subscription)
         return subscription
@@ -149,12 +151,12 @@ class EventHub:
         with self._lock:
             return [event for event in self._history if event.id > last_id]
 
-    def end_all(self) -> None:
-        """すべての購読の配信を終える（待ち受けを止める前に呼ぶ。つながったままの SSE を自分で終わらせ、
-        uvicorn に打ち切らせない）"""
+    def end_all(self, tag: str | None = None) -> None:
+        """購読の配信を終える（待ち受けを止める前に呼ぶ。つながったままの SSE を自分で終わらせ、
+        uvicorn に打ち切らせない）。tag を指定したら、その待ち受けの購読だけ"""
         with self._lock:
-            subscribers = list(self._subscribers)
-            self._subscribers.clear()
+            subscribers = [s for s in self._subscribers if tag is None or s.tag == tag]
+            self._subscribers = [s for s in self._subscribers if s not in subscribers]
         for subscription in subscribers:
             subscription.end()
 

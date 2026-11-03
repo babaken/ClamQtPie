@@ -14,7 +14,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.actions import audit
-from api.auth import require_user
+from api.auth import is_web_request, require_user
 from core.logger import CATEGORY_SYSTEM
 
 router = APIRouter(dependencies=[Depends(require_user)])
@@ -47,5 +47,6 @@ async def ack_notifications(request: Request, body: AckBody, role: str = Depends
     acked = await run_in_threadpool(_store(request).ack, None if body.all else body.ids)
     client = request.client.host if request.client else "不明"
     scope = "すべて" if body.all else "指定"
-    audit(CATEGORY_SYSTEM, f"通知を既読にしました: {len(acked)}件（{scope}、ロール: {role}、接続元: {client}）")
+    route = "WebUI" if is_web_request(request) else "トレイGUI・管理用コマンド"
+    audit(CATEGORY_SYSTEM, f"通知を既読にしました: {len(acked)}件（{scope}、経路: {route}、ロール: {role}、接続元: {client}）")
     return {"acked": acked}

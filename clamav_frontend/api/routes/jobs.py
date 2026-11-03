@@ -150,7 +150,7 @@ async def events(request: Request, last_event_id: str | None = Header(None, max_
     if hub.subscriber_count >= MAX_SUBSCRIBERS:
         raise ApiConflictError("イベントの購読の数が上限に達しています")
     # 先に購読してから再送分を読む（その間に出たイベントを取りこぼさないように。重なった分は id で除く）
-    subscription = hub.subscribe()
+    subscription = hub.subscribe(getattr(request.app.state, "listener", "internal"))
     last_id = _parse_last_id(last_event_id)
     backlog = hub.events_since(last_id) if last_id is not None else []
 

@@ -6,6 +6,7 @@ config.json データモデル
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field, asdict
 
 #: 2: サービスの設定（段階 12-3b）。利用者ごとの GUI の設定（general）を gui.json（core/gui_config.py）に分けた
@@ -176,6 +177,19 @@ class ApiConfig:
 
     enabled: bool = False
     port: int = 8765  # 待ち受けるのは127.0.0.1だけ（変更不可）
+    # WebUI（3.1節・3.3節。段階 12-5）。api はすべて保護された項目（Web API の PUT /config では変えられない）。
+    # ON/OFF・ログインの設定は PUT /web・PUT /web/credentials（admin の Bearer だけ）か clamqtpie-ctl web で変える
+    web_enabled: bool = False
+    web_port: int = 8766
+    web_username: str = "admin"
+    #: scrypt のハッシュ（core/web_password.py）。空なら未設定（未設定の間は WebUI を ON にできない）
+    web_password_hash: str = ""
+    #: 設定したパスワードの長さ（LAN 許可のときの 12 文字以上の確認用。ハッシュからは分からないため）
+    web_password_length: int = 0
+    #: WebUI を自動で OFF にする日時（UTC の ISO 8601）。空なら期限なし
+    web_off_at: str = ""
+    #: WebUI のセッションの有効期限（最後の操作からの分）
+    session_timeout_min: int = 30
 
 
 @dataclass
@@ -322,4 +336,44 @@ def validate_and_fix(model: ConfigModel, warn) -> ConfigModel:
         warn(f"api.port が範囲外です ({model.api.port!r})。既定値8765へ補正します。")
         model.api.port = 8765
 
+    _validate_web(model.api, warn)
     return model
+
+
+_WEB_USERNAME = re.compile(r"^[A-Za-z0-9_.\-]{1,32}$")
+
+
+def _validate_web(api: ApiConfig, warn) -> None:
+    """WebUI の設定（段階 12-5a）。パスワードが未設定・壊れていれば WebUI を OFF にする"""
+    from core.duration_text import parse_off_at
+    from core.web_password import is_valid_hash
+
+    if not isinstance(api.web_enabled, bool):
+        warn(f"api.web_enabled が不正な値です ({api.web_enabled!r})。falseへ自動補正します。")
+        api.web_enabled = False
+    port = api.web_port
+    if isinstance(port, bool) or not isinstance(port, int) or not (1024 <= port <= 65535) or port == api.port:
+        fallback = 8766 if api.port != 8766 else 8767
+        warn(f"api.web_port が範囲外か、内部 API のポートと同じです ({port!r})。{fallback}へ補正します。")
+        api.web_port = fallback
+    if not isinstance(api.web_username, str) or not _WEB_USERNAME.match(api.web_username):
+        warn(f"api.web_username が不正な値です ({api.web_username!r})。adminへ補正します。")
+        api.web_username = "admin"
+    if not isinstance(api.web_password_hash, str) or (api.web_password_hash and not is_valid_hash(api.web_password_hash)):
+        warn("api.web_password_hash が正しくありません。パスワードを未設定にします。")
+        api.web_password_hash = ""
+    length = api.web_password_length
+    if isinstance(length, bool) or not isinstance(length, int) or not (0 <= length <= 1024):
+        api.web_password_length = 0
+    if not api.web_password_hash:
+        api.web_password_length = 0
+        if api.web_enabled:
+            warn("WebUI のパスワードが未設定のため、WebUI を OFF にします。")
+            api.web_enabled = False
+    if not isinstance(api.web_off_at, str) or (api.web_off_at and parse_off_at(api.web_off_at) is None):
+        warn(f"api.web_off_at が不正な値です ({api.web_off_at!r})。期限なしにします。")
+        api.web_off_at = ""
+    timeout = api.session_timeout_min
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or not (1 <= timeout <= 1440):
+        warn(f"api.session_timeout_min が範囲外です ({timeout!r})。既定値30へ補正します。")
+        api.session_timeout_min = 30

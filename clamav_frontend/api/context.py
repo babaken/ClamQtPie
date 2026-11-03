@@ -56,6 +56,8 @@ class ApiContext:
     #: 接続元の利用者のプロファイル・ホームを求める（(接続元のアドレス, ポート), (待ち受けのアドレス, ポート)）。
     #: サービスで user のトークンのスキャンの場所を限るのに使う（core/peer_identity.py。段階 12-3d）
     requester_home: Callable[[tuple, tuple], str | None] | None = None
+    #: api.web_control.WebController（WebUI の待ち受け・セッション・設定。段階 12-5a。None なら WebUI の API は付けない）
+    web: Any = None
 
     @property
     def can_write(self) -> bool:
