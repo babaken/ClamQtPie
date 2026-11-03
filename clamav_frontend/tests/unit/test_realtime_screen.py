@@ -1,10 +1,15 @@
 """
 gui/screens/realtime.py のサービス層結線に関するテスト
+
+変更は画面の中にためておき、［変更を保存］（save_changes）でまとめてサービスへ送る。tests/gui_fakes.py の
+FakeServiceApi が、送った操作を手元の本物のサービスに適用する。監視中の反映はサービスが行う
 """
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
+from api_client.admin_ops import Operation
 from gui.screens.realtime import RealtimeScreen
+from tests.gui_fakes import FakeServiceApi
 
 
 @dataclass
@@ -28,6 +33,10 @@ def _make_screen(qtbot):
     return screen
 
 
+def _no_batch(operations):
+    raise AssertionError("このテストでは保存しない")
+
+
 def test_bind_services_loads_targets_and_excludes(qtbot):
     screen = _make_screen(qtbot)
     manager = MagicMock()
@@ -37,7 +46,7 @@ def test_bind_services_loads_targets_and_excludes(qtbot):
     exclude_service = MagicMock()
     exclude_service.list_all.return_value = [_FakeExclude(1, "extension", ".log", True)]
 
-    screen.bind_services(manager, watch_target_service, exclude_service)
+    screen.bind_services(manager, watch_target_service, exclude_service, _no_batch)
 
     assert screen.target_table.rowCount() == 1
     assert screen.target_table.item(0, 0).text() == "/tmp/watched"
@@ -55,7 +64,7 @@ def test_toggle_start_failure_shows_warning_and_unchecks(qtbot, monkeypatch):
     watch_target_service.list_enabled_paths.return_value = []
     exclude_service = MagicMock()
     exclude_service.list_all.return_value = []
-    screen.bind_services(manager, watch_target_service, exclude_service)
+    screen.bind_services(manager, watch_target_service, exclude_service, _no_batch)
 
     warned = []
     import gui.screens.realtime as realtime_module
@@ -82,7 +91,7 @@ def test_toggle_start_failure_with_targets_does_not_show_no_target_warning(qtbot
     watch_target_service.list_enabled_paths.return_value = ["/home/user"]
     exclude_service = MagicMock()
     exclude_service.list_all.return_value = []
-    screen.bind_services(manager, watch_target_service, exclude_service)
+    screen.bind_services(manager, watch_target_service, exclude_service, _no_batch)
 
     warned = []
     import gui.screens.realtime as realtime_module
@@ -106,7 +115,7 @@ def test_mode_label_shows_manager_mode_name(qtbot):
     exclude_service = MagicMock()
     exclude_service.list_all.return_value = []
 
-    screen.bind_services(manager, watch_target_service, exclude_service)
+    screen.bind_services(manager, watch_target_service, exclude_service, _no_batch)
 
     assert screen.mode_label.text() == "方式: clamonacc"
 
@@ -119,7 +128,7 @@ def test_toggle_stop_requires_confirmation(qtbot, monkeypatch):
     watch_target_service.list_all.return_value = []
     exclude_service = MagicMock()
     exclude_service.list_all.return_value = []
-    screen.bind_services(manager, watch_target_service, exclude_service)
+    screen.bind_services(manager, watch_target_service, exclude_service, _no_batch)
 
     import gui.screens.realtime as realtime_module
 
@@ -132,7 +141,7 @@ def test_toggle_stop_requires_confirmation(qtbot, monkeypatch):
     assert screen.toggle_button.isChecked() is True  # キャンセルなので元に戻る
 
 
-def test_action_radio_updates_manager_config(qtbot):
+def test_action_radio_is_saved_as_a_config_operation(qtbot):
     screen = _make_screen(qtbot)
     manager = MagicMock()
     manager.config.default_action = "quarantine"
@@ -140,11 +149,15 @@ def test_action_radio_updates_manager_config(qtbot):
     watch_target_service.list_all.return_value = []
     exclude_service = MagicMock()
     exclude_service.list_all.return_value = []
-    screen.bind_services(manager, watch_target_service, exclude_service)
+    sent = []
+    screen.bind_services(manager, watch_target_service, exclude_service, sent.append,
+                         config_operation=lambda action: Operation("PUT", "/config", {"action": action}))
 
     screen.action_notify_only_radio.setChecked(True)
+    assert screen.has_unsaved_changes() and manager.config.default_action == "quarantine"  # 保存まで変えない
 
-    assert manager.config.default_action == "notify_only"
+    assert screen.save_changes() is True
+    assert sent == [[Operation("PUT", "/config", {"action": "notify_only"})]]
 
 
 # -- 除外設定の追加／削除／有効-無効（画面設計書3章） ------------------------------------
@@ -167,7 +180,8 @@ def exclude_env(qtbot, tmp_path):
     manager.is_running = True
     watch_target_service = MagicMock()
     watch_target_service.list_all.return_value = []
-    screen.bind_services(manager, watch_target_service, exclude_service)
+    api = FakeServiceApi(exclude_service=exclude_service)
+    screen.bind_services(manager, watch_target_service, exclude_service, api.batch)
     yield screen, exclude_service, manager
     db_service.close()
 
@@ -177,18 +191,18 @@ def _select_tab(screen, type_key):
     screen.exclude_tabs.setCurrentIndex(keys.index(type_key))
 
 
-def test_add_folder_exclude_via_dialog_and_notify_manager(exclude_env, monkeypatch):
-    screen, exclude_service, manager = exclude_env
+def test_add_folder_exclude_via_dialog_is_saved(exclude_env, monkeypatch):
+    screen, exclude_service, _ = exclude_env
     monkeypatch.setattr(realtime_module.QFileDialog, "getExistingDirectory", lambda *a, **k: "/data/cache")
     _select_tab(screen, "folder")
 
     screen.add_exclude_button.click()
+    assert screen._exclude_tables["folder"].rowCount() == 1 and exclude_service.list_all() == []  # 保存前
 
+    assert screen.save_changes() is True
     assert [(r.type, r.value, bool(r.enabled)) for r in exclude_service.list_all()] == [
         ("folder", "/data/cache", True)
     ]
-    assert screen._exclude_tables["folder"].rowCount() == 1
-    manager.on_excludes_changed.assert_called_once_with("folder")
 
 
 def test_add_extension_normalizes_and_skips_duplicates(exclude_env, monkeypatch):
@@ -198,6 +212,7 @@ def test_add_extension_normalizes_and_skips_duplicates(exclude_env, monkeypatch)
 
     screen.add_exclude_button.click()
     screen.add_exclude_button.click()  # 同じ値は重複登録しない
+    screen.save_changes()
 
     assert [r.value for r in exclude_service.list_all()] == [".log"]
 
@@ -209,8 +224,7 @@ def test_add_cancelled_does_nothing(exclude_env, monkeypatch):
 
     screen.add_exclude_button.click()
 
-    assert exclude_service.list_all() == []
-    manager.on_excludes_changed.assert_not_called()
+    assert exclude_service.list_all() == [] and not screen.has_unsaved_changes()
 
 
 def test_toggle_and_remove_exclude(exclude_env, monkeypatch):
@@ -222,12 +236,13 @@ def test_toggle_and_remove_exclude(exclude_env, monkeypatch):
     table.selectRow(0)
 
     screen.toggle_exclude_button.click()
+    screen.save_changes()
     assert bool(exclude_service.list_all()[0].enabled) is False
     assert table.item(0, 1).text() == "無効"
 
-    monkeypatch.setattr(realtime_module, "show_confirm_dialog", lambda *a, **k: True)
     table.selectRow(0)
-    screen.remove_exclude_button.click()
+    screen.remove_exclude_button.click()  # 保存するまでは取り消せるため、確かめない
+    screen.save_changes()
     assert exclude_service.list_all() == []
 
 
@@ -246,7 +261,8 @@ def target_env(qtbot, tmp_path):
     manager.is_running = False
     exclude_service = MagicMock()
     exclude_service.list_all.return_value = []
-    screen.bind_services(manager, watch_target_service, exclude_service)
+    api = FakeServiceApi(watch_target_service=watch_target_service)
+    screen.bind_services(manager, watch_target_service, exclude_service, api.batch)
     yield screen, watch_target_service, manager
     db_service.close()
 
@@ -261,7 +277,8 @@ def test_toggle_button_disabled_without_enabled_targets(target_env):
     assert screen.toggle_button.isEnabled() is True
 
 
-def test_toggle_target_applies_diff_while_running(target_env):
+def test_toggle_target_is_saved_through_the_service(target_env):
+    # 監視中の反映（監視対象の追加・外し）はサービスが行う。画面は監視の本体を直接変えない
     screen, watch_target_service, manager = target_env
     watch_target_service.add("/data")
     manager.is_running = True
@@ -269,12 +286,23 @@ def test_toggle_target_applies_diff_while_running(target_env):
     screen.target_table.selectRow(0)
 
     screen.toggle_target_button.click()
+    assert watch_target_service.list_enabled_paths() == ["/data"]  # 保存前
+    screen.save_changes()
     assert watch_target_service.list_enabled_paths() == []
-    manager.remove_target.assert_called_once_with("/data")
+    manager.remove_target.assert_not_called()
+
+
+def test_add_and_remove_target_are_saved(target_env, monkeypatch):
+    screen, watch_target_service, _ = target_env
+    monkeypatch.setattr(realtime_module.QFileDialog, "getExistingDirectory", lambda *a, **k: "/data")
+    screen.add_target_button.click()
+    screen.save_changes()
+    assert [r.path for r in watch_target_service.list_all()] == ["/data"]
 
     screen.target_table.selectRow(0)
-    screen.toggle_target_button.click()
-    manager.add_target.assert_called_once_with("/data")
+    screen.remove_target_button.click()
+    screen.save_changes()
+    assert watch_target_service.list_all() == []
 
 
 def test_watch_target_lost_shows_e2001(target_env, monkeypatch):

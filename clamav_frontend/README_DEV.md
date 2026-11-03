@@ -1468,3 +1468,16 @@ Linux の実機（EndeavourOS・KDE Plasma 6 の Wayland・systemd 262）で tar
 - 確認画面の数字の幅が広く見える点は、root の利用者のフォントの設定によるもので、直していない。`systemctl list-timers` の次の実行の表示は systemd の表示の問題（`NextElapseUSecRealtime` は正しい）
 
 確認: 全テスト（Windows 1025 件・WSL 1037 件、2 回ずつ）成功。Windows で `build_release.py` を実行し、インストーラ（約 68 MB）ができることを確かめた（インストーラの実行は、サービス・グループ・PATH を変えるため、利用者の確認を得てから行う）。WSL で tar.gz を作り、中のサービスが起動・終了できることを確かめた。
+
+## 72. 段階 12-4e: 従来のアプリの削除
+
+12-4 の計画の決めたこと 1（2026-11-02）。トレイGUI（§66〜§69）・配布物（§70・§71）がそろったため、従来のアプリ（ポータブル、1 プロセス。GUI が自分でサービスを組み立てる）を削除した。
+
+- **消したもの**: `app.py`（サービスの組み立て・画面への結線・起動の順番）、`scripts/measure_startup_time.py`（`app.py` の起動時間の計測。§30 の計測は従来のアプリのもの）
+- **起動スクリプト**: リポジトリ直下の `scripts/run_ClamQtPie.bat`・`.sh` は、開発環境からトレイGUI（`tray_main.py`）を起動するものにした（管理者・root は要らない。先にサービスを動かしておく）。`install_service.*`・`uninstall_service.*`（開発中のサービスの登録）はそのまま
+- **設定（schema_version 1）**: `ConfigService` は常にサービスの設定（schema_version 2、`general` を保存しない）として読み書きする（`gui_settings` 引数と `PORTABLE_SCHEMA_VERSION` を除いた）。旧版の schema_version 1 の `config.json` は、読み込むと schema_version 2 として保存し直す（`clamqtpie-ctl migrate` で移した後と同じ）
+- **SMTP パスワード**: `ConfigService` は秘密の保存先（`FileSecretStore`）だけを使い、keyring を使わない（保存先が無ければ「なし」として扱い、保存しようとすると E6003 の `KeyringUnavailableError`）。旧名（ClamAVFrontend）の keyring からの引き継ぎ（`migrate_legacy_smtp_password`・`migrate_legacy_names`）は、`clamqtpie-ctl migrate` が旧版のパスワードを読むときに旧名も探すようにした（`portable_migration.legacy_smtp_password`）。自動起動・URL スキーム・旧名のフォルダの引き継ぎは、これまでどおりトレイGUI の起動時に行う（`take_over_legacy_registrations`）
+- **画面の、サービスを直接使う経路**: リアルタイム保護・スケジュールの画面は、変更を常に画面の中にためておき［変更を保存］でまとめて送る（`bind_services` の `batch` を必須にした。その場でサービス・監視の本体を変える処理と、削除の前の確認を除いた。監視中の反映はサービスが行う）。設定画面は常にサービスの設定を `ConfigProxy` で読み書きする（`service_mode` 引数を除いた。「スキャン」タブ・保護された項目の読み取り専用・1 回の昇格での保存は常に有効）
+- **テスト**: 画面のテストは、`tests/gui_fakes.py` の `FakeServiceApi`（送られた操作を手元の本物のサービスに適用する）と、トレイGUI と同じ `ConfigProxy` で確かめる形に書き直した。従来のアプリだけの動き（keyring への保存、旧名の keyring の引き継ぎ、その場での反映）のテストは除いた
+- **残したもの**: サービスが使う `core/`・`db/`、旧版のデータの移行（`clamqtpie-ctl migrate`、`core/portable_migration.py`）、`core/legacy_migration.py` の自動起動・URL スキーム・旧名のフォルダの引き継ぎ
+- 利用者向けの README（`README.md`・`README_en.md`）と CLAUDE.md の、従来のアプリを前提にした説明は、12-6（設計書の改訂）でまとめて直す

@@ -1,11 +1,11 @@
 """
-API から呼ぶサービスの置き場（app.py が作ったものをそのまま渡す。API 側では作らない）
+API から呼ぶサービスの置き場（core/runtime.py が作ったものをそのまま渡す。API 側では作らない）
 
 画面（gui/）と同じサービスを共有する。
 - 読み取りの API は、DB・ログファイルの読み取りと、状態の参照（実行中かどうか）だけを行い、
   FastAPI のスレッドプールから直接呼ぶ（サービス化・Web API設計書 8章）
 - 状態を変える API（段階 12-2）は、invoker でメインスレッドに渡して api/actions.py の処理を呼ぶ。
-  画面に表示している内容は notify_changed で app.py に知らせて読み直させる
+  画面に表示している内容は notify_changed で呼び出し側に知らせて読み直させる
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ class ApiContext:
     #: 変更した対象の名前（"excludes"・"targets"・"quarantine"・"schedules"・"config"・"realtime"・"logs"）を受け取り、
     #: 画面を読み直す（メインスレッドで呼ぶ）
     notify_changed: Callable[[str], None] | None = None
-    #: 保存した設定を各サービスに反映する（app.py の _on_settings_saved と同じ処理）
+    #: 保存した設定を各サービスに反映する（core/runtime.py・api/service_api.py が渡す）
     apply_config: Callable[[Any], None] | None = None
     #: clamd の起動を試みる（バックグラウンド）。試行を始めたら True、既に試行中なら False
     start_clamd: Callable[[], bool] | None = None

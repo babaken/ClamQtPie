@@ -1,12 +1,17 @@
 """
 gui/screens/settings.py のサービス層結線テスト
+
+トレイGUI と同じく、設定は ConfigProxy（api_client.proxies）越しにサービスの設定を読み書きする。ここでは
+tests/gui_fakes.py の FakeServiceApi で、手元の ConfigService につなぐ（GUI の設定は gui.json）。
 """
 from unittest.mock import MagicMock
 
 from core.clamd_client import check_connection
 from core.config_service import ConfigService
 from core.exceptions import ClamdConnectionError
+from core.gui_config import read_gui_general, save_gui_general
 from gui.screens.settings import SettingsScreen
+from tests.gui_fakes import config_proxy
 
 
 def test_settings_screen_loads_config_values(qtbot, tmp_path):
@@ -19,7 +24,8 @@ def test_settings_screen_loads_config_values(qtbot, tmp_path):
     config_service.save(model)
 
     notification_service = MagicMock()
-    screen.bind_services(config_service, notification_service)
+    proxy, api = config_proxy(tmp_path, config_service)
+    screen.bind_services(proxy, notification_service)
 
     assert screen.smtp_host_edit.text() == "smtp.example.com"
     assert screen.smtp_port_spin.value() == 465
@@ -31,7 +37,8 @@ def test_settings_screen_save_persists_changes(qtbot, tmp_path):
     config_service = ConfigService(tmp_path / "config.json")
     config_service.load()
     notification_service = MagicMock()
-    screen.bind_services(config_service, notification_service)
+    proxy, api = config_proxy(tmp_path, config_service)
+    screen.bind_services(proxy, notification_service)
 
     screen.smtp_host_edit.setText("smtp.new-host.example.com")
     screen.on_detect_mail_check.setChecked(False)
@@ -48,7 +55,8 @@ def test_freshclam_path_is_loaded_and_saved(qtbot, tmp_path):
     qtbot.addWidget(screen)
     config_service = ConfigService(tmp_path / "config.json")
     config_service.load()
-    screen.bind_services(config_service, MagicMock())
+    proxy, api = config_proxy(tmp_path, config_service)
+    screen.bind_services(proxy, MagicMock())
     assert screen.freshclam_path_edit.text() == "freshclam"
 
     screen.freshclam_path_edit.setText("  C:\\Program Files\\ClamAV\\freshclam.exe  ")
@@ -61,7 +69,8 @@ def test_empty_freshclam_path_falls_back_to_path_lookup(qtbot, tmp_path):
     qtbot.addWidget(screen)
     config_service = ConfigService(tmp_path / "config.json")
     config_service.load()
-    screen.bind_services(config_service, MagicMock())
+    proxy, api = config_proxy(tmp_path, config_service)
+    screen.bind_services(proxy, MagicMock())
 
     screen.freshclam_path_edit.setText("   ")
     screen.save_button.click()
@@ -79,23 +88,20 @@ def test_freshclam_browse_sets_selected_path(qtbot, tmp_path, monkeypatch):
     assert screen.freshclam_path_edit.text().replace("\\", "/") == "/usr/local/bin/freshclam"
 
 
-def test_settings_screen_save_sets_smtp_password_via_keyring(qtbot, tmp_path, monkeypatch):
+def test_settings_screen_save_sends_smtp_password_with_the_config(qtbot, tmp_path):
     screen = SettingsScreen()
     qtbot.addWidget(screen)
     config_service = ConfigService(tmp_path / "config.json")
     config_service.load()
     notification_service = MagicMock()
-    screen.bind_services(config_service, notification_service)
-
-    captured = {}
-    monkeypatch.setattr(
-        "keyring.set_password", lambda service, account, password: captured.update(pw=password)
-    )
+    proxy, api = config_proxy(tmp_path, config_service)
+    screen.bind_services(proxy, notification_service)
 
     screen.smtp_password_edit.setText("hunter2")
     screen.save_button.click()
 
-    assert captured["pw"] == "hunter2"
+    assert api.smtp_password == "hunter2"
+    assert [op.path for op in api.batches[-1]][-1] == "/config/smtp-password"  # 1 回の昇格にまとめる
     assert screen.smtp_password_edit.text() == ""  # 保存後はクリアされる
 
 
@@ -106,13 +112,14 @@ def test_settings_screen_save_applies_autostart_immediately(qtbot, tmp_path):
     config_service.load()
     autostart_service = MagicMock()
     autostart_service.is_enabled.return_value = True
-    screen.bind_services(config_service, MagicMock(), autostart_service)
+    proxy, api = config_proxy(tmp_path, config_service)
+    screen.bind_services(proxy, MagicMock(), autostart_service)
 
     screen.autostart_check.setChecked(False)
     screen.save_button.click()
 
     autostart_service.disable.assert_called_once()
-    assert config_service.load().general.autostart is False
+    assert read_gui_general(tmp_path / "gui.json").autostart is False
 
     autostart_service.is_enabled.return_value = False
     screen.autostart_check.setChecked(True)
@@ -131,7 +138,8 @@ def test_settings_screen_shows_error_when_autostart_apply_fails(qtbot, tmp_path,
     autostart_service = MagicMock()
     autostart_service.is_enabled.return_value = False
     autostart_service.enable.side_effect = ProcessError("自動起動の設定に失敗しました", code="E8002")
-    screen.bind_services(config_service, MagicMock(), autostart_service)
+    proxy, api = config_proxy(tmp_path, config_service)
+    screen.bind_services(proxy, MagicMock(), autostart_service)
 
     shown = []
     import gui.screens.settings as settings_module
@@ -150,7 +158,8 @@ def test_settings_screen_test_send_calls_notification_service(qtbot, tmp_path, m
     config_service = ConfigService(tmp_path / "config.json")
     config_service.load()
     notification_service = MagicMock()
-    screen.bind_services(config_service, notification_service)
+    proxy, api = config_proxy(tmp_path, config_service)
+    screen.bind_services(proxy, notification_service)
 
     import gui.screens.settings as settings_module
 
@@ -170,7 +179,8 @@ def test_settings_screen_test_send_shows_error_on_failure(qtbot, tmp_path, monke
     from core.exceptions import MailSendError
 
     notification_service.send_test_mail.side_effect = MailSendError(detail="smtp down")
-    screen.bind_services(config_service, notification_service)
+    proxy, api = config_proxy(tmp_path, config_service)
+    screen.bind_services(proxy, notification_service)
 
     shown = []
     import gui.screens.settings as settings_module
@@ -189,7 +199,8 @@ def test_save_calls_on_saved_for_live_apply(qtbot, tmp_path):
     config_service = ConfigService(tmp_path / "config.json")
     config_service.load()
     saved = []
-    screen.bind_services(config_service, MagicMock(), on_saved=saved.append)
+    proxy, api = config_proxy(tmp_path, config_service)
+    screen.bind_services(proxy, MagicMock(), on_saved=saved.append)
 
     screen.log_level_combo.setCurrentText("DEBUG")
     screen.update_interval_spin.setValue(8)
@@ -207,13 +218,15 @@ def test_autostart_failure_reverts_checkbox_and_config(qtbot, tmp_path, monkeypa
     screen = SettingsScreen()
     qtbot.addWidget(screen)
     config_service = ConfigService(tmp_path / "config.json")
-    model = config_service.load()
-    model.general.autostart = False
-    config_service.save(model)
+    config_service.load()
+    general = config_service.current.general
+    general.autostart = False
+    save_gui_general(tmp_path / "gui.json", general)
     autostart_service = MagicMock()
     autostart_service.is_enabled.return_value = False
     autostart_service.enable.side_effect = ProcessError("自動起動の設定に失敗しました", code="E8002")
-    screen.bind_services(config_service, MagicMock(), autostart_service)
+    proxy, api = config_proxy(tmp_path, config_service)
+    screen.bind_services(proxy, MagicMock(), autostart_service)
     import gui.screens.settings as settings_module
 
     monkeypatch.setattr(settings_module, "show_error_dialog", lambda *a, **k: None)
@@ -222,23 +235,25 @@ def test_autostart_failure_reverts_checkbox_and_config(qtbot, tmp_path, monkeypa
     screen.save_button.click()
 
     assert screen.autostart_check.isChecked() is False  # エラーコード一覧E8002: チェックを元に戻す
-    assert config_service.load().general.autostart is False
+    assert read_gui_general(tmp_path / "gui.json").autostart is False
 
 
 def test_tray_hint_setting_resets_shown_flag(qtbot, tmp_path):
     screen = SettingsScreen()
     qtbot.addWidget(screen)
     config_service = ConfigService(tmp_path / "config.json")
-    model = config_service.load()
-    model.general.show_tray_hint_shown = True
-    config_service.save(model)
-    screen.bind_services(config_service, MagicMock())
+    config_service.load()
+    general = config_service.current.general
+    general.show_tray_hint_shown = True
+    save_gui_general(tmp_path / "gui.json", general)
+    proxy, api = config_proxy(tmp_path, config_service)
+    screen.bind_services(proxy, MagicMock())
     assert screen.tray_hint_check.isChecked() is False
 
     screen.tray_hint_check.setChecked(True)
     screen.save_button.click()
 
-    assert config_service.load().general.show_tray_hint_shown is False
+    assert read_gui_general(tmp_path / "gui.json").show_tray_hint_shown is False
 
 
 def _bound_screen(qtbot, tmp_path, **kwargs):
@@ -246,7 +261,9 @@ def _bound_screen(qtbot, tmp_path, **kwargs):
     qtbot.addWidget(screen)
     config_service = ConfigService(tmp_path / "config.json")
     config_service.load()
-    screen.bind_services(config_service, MagicMock(), **kwargs)
+    proxy, _api = config_proxy(tmp_path, config_service)
+    screen.bind_services(proxy, MagicMock(), **kwargs)
+    screen.proxy = proxy
     return screen, config_service
 
 
@@ -332,7 +349,7 @@ def test_connection_test_shows_failure(qtbot, tmp_path):
 
 
 def test_connection_test_with_check_connection_like_app(qtbot, tmp_path, fake_clamd_server):
-    # app.pyと同じくconnection_tester=check_connectionで結線し、偽のclamdへ接続する
+    # connection_tester=check_connection で結線し、偽のclamdへ接続する
     fake_clamd_server.response_map["VERSION"] = "ClamAV 1.5.4/28157/Sun Oct 18 08:00:00 2026"
     screen, _ = _bound_screen(qtbot, tmp_path, connection_tester=check_connection)
     screen.connection_type_combo.setCurrentIndex(screen.connection_type_combo.findData("tcp"))
@@ -346,10 +363,15 @@ def test_connection_test_with_check_connection_like_app(qtbot, tmp_path, fake_cl
 
 def test_reload_on_show_keeps_settings_changed_elsewhere(qtbot, tmp_path):
     # レビュー指摘: 設定画面が起動時の入力値のまま保存し、リアルタイム画面で「通知のみ」にした
-    # 検知時アクションを「自動隔離」に戻していた。app.pyは設定画面を開くたびにreload_from_config()を呼ぶ
+    # 検知時アクションを「自動隔離」に戻していた。設定画面を開くたびに reload_from_config() を呼ぶ
     screen, config_service = _bound_screen(qtbot, tmp_path)
-    config_service.current.realtime.default_action = "notify_only"  # リアルタイム画面での変更（メモリ上）
-    config_service.current.general.show_tray_hint_shown = True  # ×ボタンでの案内の表示済み
+    model = config_service.current
+    model.realtime.default_action = "notify_only"  # リアルタイム画面での保存（サービスの設定）
+    config_service.save(model)
+    general = read_gui_general(tmp_path / "gui.json")
+    general.show_tray_hint_shown = True  # ×ボタンでの案内の表示済み
+    save_gui_general(tmp_path / "gui.json", general)
+    screen.proxy.invalidate()  # config.changed で読み直す
 
     screen.reload_from_config()  # 設定画面を開いた
     screen.log_level_combo.setCurrentText("WARNING")  # 別の項目を変えて保存
@@ -357,5 +379,5 @@ def test_reload_on_show_keeps_settings_changed_elsewhere(qtbot, tmp_path):
 
     saved = config_service.load()
     assert saved.realtime.default_action == "notify_only"
-    assert saved.general.show_tray_hint_shown is True
+    assert read_gui_general(tmp_path / "gui.json").show_tray_hint_shown is True
     assert saved.logging.level == "WARNING"

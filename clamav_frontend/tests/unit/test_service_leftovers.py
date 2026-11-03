@@ -151,7 +151,7 @@ def test_ctl_sets_quick_targets_from_json(tmp_path, monkeypatch, capsys):
 
     code, _ = run("config", "set", "scan.quick_targets", f'["{target.replace(chr(92), chr(92) * 2)}"]', "--yes")
     assert code == 0
-    assert ConfigService(data / "config.json", gui_settings=False).load().scan.quick_targets == [target]
+    assert ConfigService(data / "config.json").load().scan.quick_targets == [target]
     code, _ = run("config", "set", "scan.quick_targets", "/not/json")
     assert code != 0 and "JSON" in capsys.readouterr().err
     code, _ = run("config", "set", "scan.quick_targets", '["relative"]')

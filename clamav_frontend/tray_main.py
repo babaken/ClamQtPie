@@ -11,7 +11,7 @@
 - 通知: サービスが保存した未読の通知をデスクトップに出し、トーストのクリックで開いた画面の通知・トレイの
   「未読の通知」の一覧で既読にする（gui/tray_notifications.py。設計書 7.2節）
 
-従来のアプリ（app.py、1 プロセス）は段階 12-4e で削除する。
+従来のアプリ（app.py、1 プロセス）は段階 12-4e で削除した。
 """
 from __future__ import annotations
 
@@ -256,14 +256,13 @@ class TrayApp:
             window.navigate_to("log")
             window.get_screen("log").filter_by_keyword(keyword)
 
-        window.get_screen("schedule").bind_services(p.scheduler, on_show_log=show_log_for, batch=p.api.batch)
+        window.get_screen("schedule").bind_services(p.scheduler, p.api.batch, on_show_log=show_log_for)
         update_screen.bind_services(p.update_service, p.update, p.clamav, config_service=p.config,
                                     on_open_settings=lambda: window.navigate_to("settings"))
         window.get_screen("settings").bind_services(
             p.config, p.notification, self.autostart,
             on_saved=lambda _config: (realtime_screen.sync_action_from_config(),
                                       update_screen.reload_auto_update_label()),
-            service_mode=True,
         )
         window.get_screen("log").bind_services(p.log_reader)
         window.get_screen("diagnostics").bind_services(DiagnosticsProxy(p))

@@ -571,9 +571,14 @@ def legacy_smtp_password(legacy_config: dict | None) -> str | None:
     try:
         import keyring
 
-        from core.version import APP_ID
+        from core.version import APP_ID, LEGACY_APP_ID
 
-        return keyring.get_password(APP_ID, account)
+        # 製品名を変える前の旧版（ClamAVフロントエンド）は、旧名のサービス名に保存していた
+        for service_name in (APP_ID, LEGACY_APP_ID):
+            password = keyring.get_password(service_name, account)
+            if password is not None:
+                return password
+        return None
     except Exception as exc:  # noqa: BLE001 - keyring が使えない環境では移さない
         logger.warning(f"旧版の SMTP パスワードを読めませんでした (detail: {exc})")
         return None

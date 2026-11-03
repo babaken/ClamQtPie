@@ -57,7 +57,7 @@ class JobTracker:
         self._pending_source: dict[str, str] = {}
         self._last_progress_at = float("-inf")
 
-    # -- 接続（app.py から、メインスレッドで） ----------------------------------------------
+    # -- 接続（サービスの本体から、メインスレッドで） --------------------------------------
     def connect(self, scan_dispatcher, update_dispatcher) -> None:
         scan_dispatcher.started.connect(self.on_scan_started)
         scan_dispatcher.progress.connect(self.on_scan_progress)

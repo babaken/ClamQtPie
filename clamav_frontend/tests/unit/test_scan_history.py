@@ -122,7 +122,7 @@ def test_recorder_records_manual_scans(history, qapp):
 ])
 def test_recorder_results(history, qapp, error, summary, expected):
     dispatcher = _Dispatcher()
-    recorder = ScanHistoryRecorder(history, dispatcher)  # noqa: F841 - 参照を持っておく（app.py と同じ）
+    recorder = ScanHistoryRecorder(history, dispatcher)  # noqa: F841 - 参照を持っておく（core/runtime.py と同じ）
     dispatcher.started.emit("手動スキャン")
     dispatcher.progress.emit(0, 2, "/x")
     if error is not None:

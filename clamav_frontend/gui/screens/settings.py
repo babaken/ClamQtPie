@@ -6,11 +6,12 @@ Phase7: SMTPテスト送信ボタンをNotificationServiceと結線、
         保存/読込をConfigServiceと結線
 コードレビュー後: 「ClamAV エンジン」タブ（8-7。clamdの接続・サービス、clamonaccの場所）を追加。
         接続の設定はアプリの再起動後に反映し、「接続テスト」で保存前の入力値を試せる
-段階 12-4c（トレイGUI。bind_services の service_mode）:
+段階 12-4c（トレイGUI）:
         保護された項目（Web API で変えられない項目。GET /config の protected）は読み取り専用にし、
         clamqtpie-ctl config set を案内する。「スキャン」タブにクイックスキャンの対象（scan.quick_targets）。
         サービスの設定と SMTP のパスワードは 1 回の昇格で保存し、保存できなければ画面の値を元に戻す。
-        保存の結果を表示する（両方）。定義が古いとみなす日数（update.stale_days）を加えた（両方）
+        保存の結果を表示する。定義が古いとみなす日数（update.stale_days）を加えた
+段階 12-4e: 従来のアプリ（ConfigService を直接使う）の経路を除いた
 """
 from __future__ import annotations
 
@@ -97,7 +98,6 @@ class SettingsScreen(BaseScreen):
         self._autostart_service = None
         self._on_saved = None
         self._connection_tester = None
-        self._service_mode = False
         self._connection_task = BackgroundTask()
         self._connection_task.finished.connect(self._on_connection_test_finished)
         self._update_engine_fields()
@@ -110,15 +110,13 @@ class SettingsScreen(BaseScreen):
         autostart_service=None,
         on_saved=None,
         connection_tester=None,
-        service_mode: bool = False,
     ) -> None:
-        """on_saved(config): 保存直後に呼ばれる。ログ設定・自動更新ジョブ等の即時反映をapp.py側で行う
-        （画面設計書8章「即時反映が必要な項目は保存直後に該当サービスへ再読込を通知する」）
+        """config_service: サービスの設定を API で読み書きする（api_client の ConfigProxy。保護された項目は
+            読み取り専用）
+        on_saved(config): 保存直後に呼ばれる。ほかの画面の表示を合わせる（トレイGUI）
         connection_tester(ClamdConfig) -> str: 「接続テスト」の実処理（core.clamd_client.check_connection）。
-            成功時は表示する文字列を返し、失敗時は例外を送出する。バックグラウンドで呼ぶ
-        service_mode: トレイGUI（サービスの設定を API で読み書きする。保護された項目は読み取り専用）"""
-        self._service_mode = service_mode
-        if service_mode and self.tabs.indexOf(self._scan_tab) < 0:
+            成功時は表示する文字列を返し、失敗時は例外を送出する。バックグラウンドで呼ぶ"""
+        if self.tabs.indexOf(self._scan_tab) < 0:
             self.tabs.insertTab(1, self._scan_tab, "スキャン")
         self._config_service = config_service
         self._notification_service = notification_service
@@ -176,7 +174,7 @@ class SettingsScreen(BaseScreen):
 
         self.quick_targets_list.clear()
         self.quick_targets_list.addItems(list(config.scan.quick_targets))
-        self._apply_protected(getattr(self._config_service, "protected", []) if self._service_mode else [])
+        self._apply_protected(getattr(self._config_service, "protected", []))
 
     def _apply_protected(self, protected: list[str]) -> None:
         """保護された項目の入力欄を読み取り専用にし、変え方を案内する"""
@@ -196,9 +194,8 @@ class SettingsScreen(BaseScreen):
     def _on_save_clicked(self) -> None:
         if self._config_service is None:
             return
-        # トレイGUI: 保存できなかったときに元の値に戻せるよう、写しを変える（従来のアプリは同じものを
-        # ほかのサービスも参照しているため、そのまま変える）
-        config = copy.deepcopy(self._config_service.current) if self._service_mode else self._config_service.current
+        # 保存できなかったときに元の値に戻せるよう、写しを変える
+        config = copy.deepcopy(self._config_service.current)
 
         previous_autostart = config.general.autostart
         config.general.autostart = self.autostart_check.isChecked()
@@ -206,8 +203,8 @@ class SettingsScreen(BaseScreen):
         # （チェックONで「未表示」に戻し、次回の×ボタン時に再び案内する）
         config.general.show_tray_hint_shown = not self.tray_hint_check.isChecked()
 
-        # ClamAV エンジン: 接続の設定はアプリの再起動後に反映（app.pyのClamAVServiceは起動時の値の写しを使う）。
-        # サービス名・自動起動は保存直後から使う。空欄は既定値に戻す
+        # ClamAV エンジン: 接続の設定はサービスの再起動後に反映（サービスの ClamAVService は起動時の値の写しを使う）。
+        # 空欄は既定値に戻す
         entered = self._entered_clamd_config(config.clamd)
         config.clamd.connection_type = entered.connection_type
         config.clamd.tcp_host = entered.tcp_host
@@ -246,28 +243,20 @@ class SettingsScreen(BaseScreen):
 
         config.logging.retention_days = int(self.retention_days_combo.currentText())
         config.logging.level = self.log_level_combo.currentText()
-        if self._service_mode:
-            config.scan.quick_targets = [self.quick_targets_list.item(i).text()
-                                         for i in range(self.quick_targets_list.count())]
+        config.scan.quick_targets = [self.quick_targets_list.item(i).text()
+                                     for i in range(self.quick_targets_list.count())]
 
         try:
-            password = self.smtp_password_edit.text()
-            if self._service_mode:
-                # サービスの設定と SMTP のパスワードを、1 回の昇格で保存する
-                self._config_service.save(config, smtp_password=password or None)
-            else:
-                self._config_service.save(config)
-                if password:
-                    self._config_service.set_smtp_password(password)
+            # サービスの設定と SMTP のパスワードを、1 回の昇格で保存する
+            self._config_service.save(config, smtp_password=self.smtp_password_edit.text() or None)
             self.smtp_password_edit.clear()
         except AppError as exc:
-            if self._service_mode:
-                if isinstance(exc, ElevationCancelledError):
-                    self._show_save_status("保存を取り消しました（入力した値はそのままです）。", ok=False)
-                    return
-                self._config_service.invalidate()
-                self.reload_from_config()  # サービスの今の設定に戻す（保存できなかった値を残さない）
-                self._show_save_status("保存できませんでした。画面の値をサービスの今の設定に戻しました。", ok=False)
+            if isinstance(exc, ElevationCancelledError):
+                self._show_save_status("保存を取り消しました（入力した値はそのままです）。", ok=False)
+                return
+            self._config_service.invalidate()
+            self.reload_from_config()  # サービスの今の設定に戻す（保存できなかった値を残さない）
+            self._show_save_status("保存できませんでした。画面の値をサービスの今の設定に戻しました。", ok=False)
             show_error_dialog(self, exc)
             return
         self._show_save_status(f"保存しました（{datetime.now():%H:%M:%S}）。", ok=True)

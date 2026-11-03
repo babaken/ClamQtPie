@@ -15,7 +15,7 @@ import concurrent.futures
 
 
 def reify_concurrent_futures() -> None:
-    """app.py・tests/conftest.py の最初に呼ぶ（何度呼んでもよい）"""
+    """各入口（service_main.py・tray_main.py など）・tests/conftest.py の最初に呼ぶ（何度呼んでもよい）"""
     from concurrent.futures.process import ProcessPoolExecutor
     from concurrent.futures.thread import ThreadPoolExecutor
 

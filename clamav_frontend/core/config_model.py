@@ -10,8 +10,6 @@ from dataclasses import dataclass, field, asdict
 
 #: 2: サービスの設定（段階 12-3b）。利用者ごとの GUI の設定（general）を gui.json（core/gui_config.py）に分けた
 SCHEMA_VERSION = 2
-#: 従来のアプリ（ポータブル）の設定。general を含む。段階 12-4 でトレイGUI が gui.json を使うまで残す
-PORTABLE_SCHEMA_VERSION = 1
 #: サービスの設定に含めない部分（利用者ごとの GUI の設定）
 GUI_SECTIONS = ("general",)
 

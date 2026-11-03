@@ -246,8 +246,19 @@ def test_smtp_password_is_moved_to_the_service_store(legacy, ctl, monkeypatch):
     assert code == 0 and "SMTP のパスワードを移しました" in out
     from core.secret_store import FileSecretStore
 
-    service = ConfigService(data / "config.json", secret_store=FileSecretStore(data / "secrets"), gui_settings=False)
+    service = ConfigService(data / "config.json", secret_store=FileSecretStore(data / "secrets"))
     assert service.get_smtp_password() == "pässwörd"
+
+
+@pytest.mark.parametrize("service_name", ["ClamQtPie", "ClamAVFrontend"])
+def test_legacy_smtp_password_is_read_from_the_old_names(monkeypatch, service_name):
+    # 製品名を変える前の旧版は、旧名のサービス名で keyring に保存していた（従来のアプリが起動時に移していた）
+    import keyring
+
+    monkeypatch.setattr(portable_migration.sys, "platform", "win32")
+    monkeypatch.setattr(keyring, "get_password",
+                        lambda name, account: "pässwörd" if (name, account) == (service_name, "smtp_default") else None)
+    assert portable_migration.legacy_smtp_password({"smtp": {"keyring_account": "smtp_default"}}) == "pässwörd"
 
 
 # -- 設定の分割 ------------------------------------------------------------------------------------
@@ -255,18 +266,9 @@ def test_service_config_drops_gui_settings(tmp_path):
     path = tmp_path / "config.json"
     path.write_text(json.dumps({"schema_version": 1, "general": {"autostart": False}, "clamd": {"tcp_port": 3311}}),
                     encoding="utf-8")
-    ConfigService(path, gui_settings=False).load()
+    ConfigService(path).load()
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["schema_version"] == 2 and "general" not in saved and saved["clamd"]["tcp_port"] == 3311
-
-
-def test_portable_config_keeps_gui_settings(tmp_path):
-    path = tmp_path / "config.json"
-    path.write_text(json.dumps({"schema_version": 1, "general": {"autostart": False}}), encoding="utf-8")
-    model = ConfigService(path).load()
-    saved = json.loads(path.read_text(encoding="utf-8"))
-    assert model.general.autostart is False
-    assert saved["schema_version"] == 1 and saved["general"]["autostart"] is False
 
 
 def test_ctl_does_not_handle_gui_settings(ctl):

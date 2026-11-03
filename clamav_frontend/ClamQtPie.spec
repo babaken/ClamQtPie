@@ -12,7 +12,7 @@ ClamQtPie.spec
   | ClamQtPieElevate.exe / clamqtpie-elevate | elevate_main.py（昇格ヘルパー） | 確認画面 | 求める（Windows は uac_admin、Linux は pkexec） |
   | clamqtpie-ctl.exe / clamqtpie-ctl | clamqtpie_ctl.py（管理用コマンド） | コンソール | 管理者・root で実行する |
   | ClamQtPieActivate.exe（Windows だけ） | notify_activate.py（通知のクリック） | なし | 求めない |
-- 従来のアプリ（app.py、1 プロセス）は作らない（段階 12-4e でソースも削除する）
+- 従来のアプリ（app.py、1 プロセス）は段階 12-4e で削除した
 - UPX不使用（ウイルス対策ソフトの誤検知リスク回避、8章）
 """
 import sys

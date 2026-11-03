@@ -1,7 +1,7 @@
 @echo off
-rem ClamQtPie を開発環境（clamav_frontend\.venv）から起動する。
-rem 管理者で動かすときは、このファイルを右クリックして「管理者として実行」を選ぶ。
-rem 引数はそのまま app.py に渡す。
+rem ClamQtPie のトレイGUI を開発環境（clamav_frontend\.venv）から起動する（管理者の権限は要らない）。
+rem 先にサービスを動かしておく（install_service.bat、または service_main.py --console）。
+rem 引数はそのまま tray_main.py に渡す。
 setlocal
 chcp 65001 >nul
 cd /d "%~dp0..\clamav_frontend" || exit /b 1
@@ -12,6 +12,6 @@ if not exist "%PYTHON%" (
     set "PYTHON=python"
 )
 
-"%PYTHON%" app.py %*
+"%PYTHON%" tray_main.py %*
 if errorlevel 1 pause
 endlocal

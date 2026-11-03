@@ -187,7 +187,7 @@ class ScanScreen(BaseScreen):
 
     # -- サービス層との結線 -----------------------------------------------------
     def bind_services(self, scan_dispatcher, quarantine_service) -> None:
-        """MainWindow/app.py起動シーケンスから呼び出し、サービス層を注入する"""
+        """トレイGUI（tray_main.py）の起動から呼び出し、サービス層を注入する"""
         self._scan_dispatcher = scan_dispatcher
         self._quarantine_service = quarantine_service
         self._scan_dispatcher.progress.connect(self._on_progress)

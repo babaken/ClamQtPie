@@ -155,7 +155,7 @@ class ApiServer:
 def start_api_server(api_config, app_factory, app_dir: Path) -> ApiServer | None:
     """設定（config.api）が有効なら待ち受けを始める。失敗してもアプリは続ける（ログに残す）
 
-    app.py から呼ぶ。app_factory は ApiTokens を受け取って FastAPI のアプリを返す関数（api.app.create_app）。
+    サービスの本体（api/service_api.py）から呼ぶ。app_factory は ApiTokens を受け取って FastAPI のアプリを返す関数（api.app.create_app）。
     トークンファイルは app_dir/api_tokens/ に書き出し、待ち受けを止めたら消す
     """
     if not api_config.enabled:

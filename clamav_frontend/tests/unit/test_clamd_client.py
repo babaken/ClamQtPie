@@ -171,7 +171,7 @@ def test_abort_thread_interrupts_waiting_scan(fake_clamd_server):
 
 
 def test_check_connection_returns_engine_and_db_version(fake_clamd_server):
-    # 設定画面「接続テスト」（app.pyがconnection_testerとして渡す）
+    # 設定画面「接続テスト」（connection_testerとして渡す）
     fake_clamd_server.response_map["VERSION"] = "ClamAV 1.5.4/28157/Sun Oct 18 08:00:00 2026"
     config = ClamdConfig(connection_type="tcp", tcp_host=fake_clamd_server.host, tcp_port=fake_clamd_server.port)
 

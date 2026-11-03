@@ -209,7 +209,7 @@ def _settings(qtbot, proxy):
 
     screen = SettingsScreen()
     qtbot.addWidget(screen)
-    screen.bind_services(proxy, MagicMock(), service_mode=True)
+    screen.bind_services(proxy, MagicMock())
     return screen
 
 

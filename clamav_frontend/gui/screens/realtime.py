@@ -4,7 +4,8 @@
 参照: 画面設計書3章
 Phase5: RealtimeManager / WatchTargetService / ExcludeService との結線を追加
 段階 12-4c（トレイGUI）: 監視対象・除外・検知時アクションの変更を画面の中にためておき、［変更を保存］で
-          1 回の昇格にまとめる（bind_services の batch。gui/pending_edits.py）。従来のアプリはその場で変える
+          1 回の昇格にまとめる（bind_services の batch。gui/pending_edits.py）
+段階 12-4e: 従来のアプリ（その場でサービスを変える）の経路を除いた。監視中の反映はサービスが行う
 """
 from __future__ import annotations
 
@@ -113,11 +114,10 @@ class RealtimeScreen(BaseScreen):
         self.add_layout_widget(self.action_quarantine_radio)
         self.add_layout_widget(self.action_notify_only_radio)
 
-        # 5. 変更の保存（トレイGUI だけ）
+        # 5. 変更の保存
         self.save_card = self.begin_card("変更の保存")
         self.save_bar = SaveBar(self.save_changes, self.discard_changes)
         self._add_hlayout(self.save_bar.layout)
-        self.save_card.setVisible(False)
 
         self._batch = None
         self._config_operation = None
@@ -132,13 +132,12 @@ class RealtimeScreen(BaseScreen):
         self._showing_scan_error = False
 
     # -- サービス層との結線 -----------------------------------------------------
-    def bind_services(self, realtime_manager, watch_target_service, exclude_service, batch=None,
+    def bind_services(self, realtime_manager, watch_target_service, exclude_service, batch,
                       config_operation=None) -> None:
-        """batch(操作の一覧): トレイGUI。変更をためておき、［変更を保存］でまとめて送る（api_client.elevation）。
+        """batch(操作の一覧): ためておいた変更を、［変更を保存］でまとめて送る（api_client.elevation）。
         config_operation(検知時アクション) -> Operation | None: 検知時アクションを保存する操作（PUT /config）"""
         self._batch = batch
         self._config_operation = config_operation
-        self.save_card.setVisible(batch is not None)
         self._realtime_manager = realtime_manager
         self._watch_target_service = watch_target_service
         self._exclude_service = exclude_service
@@ -193,7 +192,7 @@ class RealtimeScreen(BaseScreen):
         )
 
     def sync_toggle_state(self, running: bool) -> None:
-        """ホーム画面・トレイから監視を開始/停止した場合も表示を合わせる（app.pyの定期更新から呼ばれる）"""
+        """ホーム画面・トレイから監視を開始/停止した場合も表示を合わせる（トレイGUI の定期更新から呼ばれる）"""
         if self.toggle_button.isChecked() != running:
             self.toggle_button.setChecked(running)
             self.toggle_button.setText("監視を停止する" if running else "監視を開始する")
@@ -217,26 +216,10 @@ class RealtimeScreen(BaseScreen):
         rows = {idx.row() for idx in self.target_table.selectedIndexes()}
         if not rows:
             return
-        item = self.target_table.item(next(iter(rows)), 0)
-        target_id, path = item.data(_ID_ROLE), item.text()
-        if self._batch is not None:
-            saved = next((r.enabled for r in self._watch_target_service.list_all() if r.id == target_id), True)
-            self._pending_targets.toggle(target_id, saved)
-            self.reload_targets()
-            return
-        record = next((r for r in self._watch_target_service.list_all() if r.id == target_id), None)
-        if record is None:
-            return
-        enable = not record.enabled
-        self._watch_target_service.set_enabled(target_id, enable)
+        target_id = self.target_table.item(next(iter(rows)), 0).data(_ID_ROLE)
+        saved = next((r.enabled for r in self._watch_target_service.list_all() if r.id == target_id), True)
+        self._pending_targets.toggle(target_id, saved)
         self.reload_targets()
-        # 稼働中は差分だけ反映する（watchdog: 該当パスのみ / clamonacc: 再起動）
-        manager = self._realtime_manager
-        if manager is not None and manager.is_running:
-            if enable:
-                manager.add_target(path)
-            else:
-                manager.remove_target(path)
 
     def _on_add_target_clicked(self) -> None:
         if self._watch_target_service is None:
@@ -244,14 +227,8 @@ class RealtimeScreen(BaseScreen):
         path = QFileDialog.getExistingDirectory(self, "監視対象フォルダを選択")
         if not path:
             return
-        if self._batch is not None:
-            self._pending_targets.add({"path": path})
-            self.reload_targets()
-            return
-        self._watch_target_service.add(path)
+        self._pending_targets.add({"path": path})
         self.reload_targets()
-        if self._realtime_manager is not None and self._realtime_manager.is_running:
-            self._realtime_manager.add_target(path)
 
     def _on_remove_target_clicked(self) -> None:
         if self._watch_target_service is None:
@@ -259,18 +236,7 @@ class RealtimeScreen(BaseScreen):
         selected_rows = {idx.row() for idx in self.target_table.selectedIndexes()}
         if not selected_rows:
             return
-        row = next(iter(selected_rows))
-        item = self.target_table.item(row, 0)
-        target_id = item.data(_ID_ROLE)
-        path = item.text()
-        if self._batch is not None:
-            self._pending_targets.remove(target_id)
-            self.reload_targets()
-            return
-
-        self._watch_target_service.remove(target_id)
-        if self._realtime_manager is not None and self._realtime_manager.is_running:
-            self._realtime_manager.remove_target(path)
+        self._pending_targets.remove(self.target_table.item(next(iter(selected_rows)), 0).data(_ID_ROLE))
         self.reload_targets()
 
     # -- 除外設定 -----------------------------------------------------
@@ -328,15 +294,10 @@ class RealtimeScreen(BaseScreen):
         if not value:
             return
         existing = {(r.type, r.value) for r in self._exclude_service.list_all()}
-        if self._batch is not None:
-            existing |= {(item["type"], item["value"]) for item in self._pending_excludes.added}
-            if (type_key, value) not in existing:
-                self._pending_excludes.add({"type": type_key, "value": value})
-            self.reload_excludes()
-            return
+        existing |= {(item["type"], item["value"]) for item in self._pending_excludes.added}
         if (type_key, value) not in existing:  # 同じ値の重複登録はしない
-            self._exclude_service.add(type_key, value)
-        self._after_exclude_changed(type_key)
+            self._pending_excludes.add({"type": type_key, "value": value})
+        self.reload_excludes()
 
     def _on_remove_exclude_clicked(self) -> None:
         if self._exclude_service is None:
@@ -344,14 +305,8 @@ class RealtimeScreen(BaseScreen):
         exclude_id = self._selected_exclude_id()
         if exclude_id is None:
             return
-        if self._batch is not None:
-            self._pending_excludes.remove(exclude_id)  # 保存するまでは取り消せるため、ここでは確かめない
-            self.reload_excludes()
-            return
-        if not show_confirm_dialog(self, "除外設定の削除", "選択した除外設定を削除しますか？"):
-            return
-        self._exclude_service.remove(exclude_id)
-        self._after_exclude_changed(self._current_exclude_type())
+        self._pending_excludes.remove(exclude_id)  # 保存するまでは取り消せるため、ここでは確かめない
+        self.reload_excludes()
 
     def _on_toggle_exclude_clicked(self) -> None:
         if self._exclude_service is None:
@@ -359,24 +314,9 @@ class RealtimeScreen(BaseScreen):
         exclude_id = self._selected_exclude_id()
         if exclude_id is None:
             return
-        if self._batch is not None:
-            saved = next((r.enabled for r in self._exclude_service.list_all() if r.id == exclude_id), True)
-            self._pending_excludes.toggle(exclude_id, saved)
-            self.reload_excludes()
-            return
-        rule = next((r for r in self._exclude_service.list_all() if r.id == exclude_id), None)
-        if rule is None:
-            return
-        self._exclude_service.set_enabled(exclude_id, not rule.enabled)
-        self._after_exclude_changed(rule.type)
-
-    def _after_exclude_changed(self, type_key: str) -> None:
+        saved = next((r.enabled for r in self._exclude_service.list_all() if r.id == exclude_id), True)
+        self._pending_excludes.toggle(exclude_id, saved)
         self.reload_excludes()
-        # 画面設計書3章「除外リスト編集はON/OFFに関わらず可能（保存時に反映）」。
-        # watchdog方式はイベントごとに照合するため即時反映、clamonacc方式はフォルダ除外の反映に再起動が必要
-        manager = self._realtime_manager
-        if manager is not None and manager.is_running and hasattr(manager, "on_excludes_changed"):
-            manager.on_excludes_changed(type_key)
 
     # -- 監視トグル -----------------------------------------------------
     def _on_toggle_clicked(self, checked: bool) -> None:
@@ -404,14 +344,11 @@ class RealtimeScreen(BaseScreen):
         if self._realtime_manager is None or self._syncing_action:
             return
         action = "quarantine" if checked else "notify_only"
-        if self._batch is not None:
-            saved = self._realtime_manager.config.default_action
-            self._pending_action = None if action == saved else action
-            self._show_pending_count()
-            return
-        self._realtime_manager.config.default_action = action
+        saved = self._realtime_manager.config.default_action
+        self._pending_action = None if action == saved else action
+        self._show_pending_count()
 
-    # -- 変更の保存（トレイGUI） ---------------------------------------------------
+    # -- 変更の保存 ----------------------------------------------------------------
     def has_unsaved_changes(self) -> bool:
         return self._pending_count() > 0
 
@@ -419,8 +356,7 @@ class RealtimeScreen(BaseScreen):
         return len(self._pending_targets) + len(self._pending_excludes) + (self._pending_action is not None)
 
     def _show_pending_count(self) -> None:
-        if self._batch is not None:
-            self.save_bar.show_count(self._pending_count())
+        self.save_bar.show_count(self._pending_count())
 
     def pending_operations(self) -> list[Operation]:
         """保存していない変更を、API の操作の一覧にする（削除 → 有効無効 → 追加 → 検知時アクションの順）"""
@@ -441,7 +377,7 @@ class RealtimeScreen(BaseScreen):
     def save_changes(self) -> bool:
         """［変更を保存］: 1 回の昇格でまとめて保存する。保存できた（または変更が無い）とき True"""
         if self._batch is None:
-            return True
+            return True  # まだ結線していない
         ops = self.pending_operations()
         if not ops:
             self.discard_changes()

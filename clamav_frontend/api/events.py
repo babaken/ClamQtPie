@@ -3,7 +3,7 @@
 
 - realtime.*: リアルタイム監視のシグナル（検知・検知後の扱い・監視対象の消失・エラー）
 - status: 稼働状態が変わったとき（ホーム画面の定期確認の結果から。変わったときだけ出す）
-- config.changed: 設定を保存したとき（画面・Web API のどちらで保存しても。app.py から呼ぶ）
+- config.changed: 設定を保存したとき（画面・Web API のどちらで保存しても。サービスの本体から呼ぶ）
 - schedule.finished: スケジュールのジョブの最終実行結果を記録したとき（段階 12-3c）
 - notification・notification.acked: 通知を保存したとき・既読にしたとき（サービスのみ。段階 12-3c）
 

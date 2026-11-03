@@ -7,6 +7,7 @@ Phase 11: スケジュール・種別の人間可読表示、次回実行日時�
           ログ画面への遷移、有効/無効の切替、「今すぐ実行」のバックグラウンド実行（実行中に画面が固まらない）を追加
 段階 12-4c（トレイGUI）: 追加・編集・削除・有効無効の切り替えを画面の中にためておき、［変更を保存］で 1 回の昇格に
           まとめる（bind_services の batch。gui/pending_edits.py）。編集画面に「スリープ中でも起こして実行する」を出す
+段階 12-4e: 従来のアプリ（その場でスケジュールを変える）の経路を除いた
 """
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ from PySide6.QtWidgets import (
 from api_client.admin_ops import Operation
 from core.exceptions import AppError, ElevationCancelledError
 from gui.dialogs.job_edit_dialog import SCAN_TYPE_LABELS, JobEditDialog
-from gui.error_dialog import show_confirm_dialog, show_error_dialog
+from gui.error_dialog import show_error_dialog
 from gui.pending_edits import MARK_UNSAVED, PendingEdits, SaveBar, failure_text
 from gui.screens.base import BaseScreen, wrap_layout
 
@@ -131,11 +132,10 @@ class ScheduleScreen(BaseScreen):
         frame.setLayout(action_layout)
         self.add_layout_widget(frame)
 
-        # 変更の保存（トレイGUI だけ）
+        # 変更の保存
         self.save_card = self.begin_card("変更の保存")
         self.save_bar = SaveBar(self.save_changes, self.discard_changes)
         self.add_layout_widget(wrap_layout(self.save_bar.layout))
-        self.save_card.setVisible(False)
         self._batch = None
         self._pending = PendingEdits()
 
@@ -144,11 +144,10 @@ class ScheduleScreen(BaseScreen):
         self._on_show_log = None
 
     # -- サービス層との結線 -----------------------------------------------------
-    def bind_services(self, scheduler_service, on_show_log=None, batch=None) -> None:
-        """on_show_log: 最終実行結果のダブルクリック時に呼ばれる（ジョブ名でログ画面を絞り込む）
-        batch(操作の一覧): トレイGUI。変更をためておき、［変更を保存］でまとめて送る（api_client.elevation）"""
+    def bind_services(self, scheduler_service, batch, on_show_log=None) -> None:
+        """batch(操作の一覧): ためておいた変更を、［変更を保存］でまとめて送る（api_client.elevation）
+        on_show_log: 最終実行結果のダブルクリック時に呼ばれる（ジョブ名でログ画面を絞り込む）"""
         self._batch = batch
-        self.save_card.setVisible(batch is not None)
         self._scheduler_service = scheduler_service
         self._on_show_log = on_show_log
         self._job_runner = _JobRunner(scheduler_service)
@@ -187,8 +186,7 @@ class ScheduleScreen(BaseScreen):
                 if tooltip:
                     item.setToolTip(tooltip)
                 self.job_table.setItem(row, col, item)
-        if self._batch is not None:
-            self.save_bar.show_count(len(pending))
+        self.save_bar.show_count(len(pending))
 
     def _selected_id(self) -> int | None:
         selected_rows = {idx.row() for idx in self.job_table.selectedIndexes()}
@@ -214,73 +212,27 @@ class ScheduleScreen(BaseScreen):
     def _on_add_job_clicked(self) -> None:
         if self._scheduler_service is None:
             return
-        dialog = JobEditDialog(self, show_wake=self._batch is not None)
+        dialog = JobEditDialog(self, show_wake=True)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        values = dialog.result_values()
-        if self._batch is not None:
-            self._pending.add(values)
-            self.reload()
-            return
-        try:
-            self._scheduler_service.add_job(
-                values["name"], values["scan_type"], values["cron"], target=values["target"]
-            )
-            self.reload()
-        except AppError as exc:
-            show_error_dialog(self, exc)
+        self._pending.add(dialog.result_values())
+        self.reload()
 
     def _on_edit_job_clicked(self) -> None:
-        if self._batch is not None:
+        if self._scheduler_service is not None:
             self._edit_pending()
-            return
-        record = self._selected_record()
-        if record is None or self._scheduler_service is None:
-            return
-        dialog = JobEditDialog(
-            self,
-            initial={
-                "name": record.name,
-                "scan_type": record.scan_type,
-                "target": record.target,
-                "cron": record.cron,
-            },
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        values = dialog.result_values()
-        try:
-            self._scheduler_service.update_job(
-                record.id, values["name"], values["scan_type"], values["cron"], target=values["target"]
-            )
-            self.reload()
-        except AppError as exc:
-            show_error_dialog(self, exc)
 
     def _on_delete_job_clicked(self) -> None:
-        if self._batch is not None:
-            key = self._selected_id()
-            if key is not None:
-                self._pending.remove(key)  # 保存するまでは取り消せるため、ここでは確かめない
-                self.reload()
-            return
-        record = self._selected_record()
-        if record is None or self._scheduler_service is None:
-            return
-        if not show_confirm_dialog(self, "削除の確認", f"ジョブ「{record.name}」を削除しますか？"):
-            return
-        self._scheduler_service.remove_job(record.id)
-        self.reload()
+        key = self._selected_id()
+        if key is not None:
+            self._pending.remove(key)  # 保存するまでは取り消せるため、ここでは確かめない
+            self.reload()
 
     def _on_toggle_job_clicked(self) -> None:
         record = self._selected_record()
         if record is None or self._scheduler_service is None:
             return
-        if self._batch is not None:
-            self._pending.toggle(record.id, record.enabled)
-            self.reload()
-            return
-        self._scheduler_service.set_enabled(record.id, not record.enabled)
+        self._pending.toggle(record.id, record.enabled)
         self.reload()
 
     def _on_run_now_clicked(self) -> None:
@@ -303,7 +255,7 @@ class ScheduleScreen(BaseScreen):
         if error is not None:
             show_error_dialog(self, error)
 
-    # -- 変更の保存（トレイGUI） ---------------------------------------------------
+    # -- 変更の保存 ----------------------------------------------------------------
     def _edit_pending(self) -> None:
         key = self._selected_id()
         if key is None:
@@ -341,7 +293,7 @@ class ScheduleScreen(BaseScreen):
     def save_changes(self) -> bool:
         """［変更を保存］: 1 回の昇格でまとめて保存する。保存できた（または変更が無い）とき True"""
         if self._batch is None:
-            return True
+            return True  # まだ結線していない
         ops = self.pending_operations()
         if not ops:
             return True

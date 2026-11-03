@@ -5,7 +5,7 @@ service_main.py（Windows サービス・systemd・開発中の --console）が�
 画面に関わるもの（ウィンドウ・トレイ・画面のバインド）を除き、内部 API の待ち受けを加えたもの。
 QObject のシグナル・QThread を使うため、呼び出し側で QCoreApplication を作ってから build する。
 
-従来の app.py は、段階 12-4 で画面がこのサービスの API のクライアントになるまで、自分でサービスを組み立てる。
+従来のアプリ（app.py。自分でサービスを組み立てていた）は、段階 12-4e で削除した。
 """
 from __future__ import annotations
 
@@ -92,7 +92,7 @@ def _clamd_user(config) -> str | None:
 def build(paths: ServicePaths) -> Runtime:
     """サービス一式を組み立てて、スケジュールと（設定が有効なら）リアルタイム監視を始める"""
     # SMTP パスワードは keyring ではなく、データの置き場所のファイルに保存する（SYSTEM・root では keyring を使えない）
-    config_service = ConfigService(paths.config_file, secret_store=FileSecretStore(paths.secrets_dir), gui_settings=False)
+    config_service = ConfigService(paths.config_file, secret_store=FileSecretStore(paths.secrets_dir))
     config = config_service.load()
     setup_logger(paths.log_dir, level=config.logging.level, retention_days=config.logging.retention_days)
     logger.info(f"サービスの起動シーケンス開始（{APP_NAME} {APP_VERSION}）")
@@ -101,7 +101,7 @@ def build(paths: ServicePaths) -> Runtime:
     db_service.connect()
 
     clamd_controller = ClamdServiceController(config.clamd)
-    # 接続の設定はサービスの再起動後に反映する（通信中に設定が変わらないよう写しを渡す。app.py と同じ）
+    # 接続の設定はサービスの再起動後に反映する（通信中に設定が変わらないよう写しを渡す）
     # 接続の前に相手が clamd かを確かめる（clamd が止まっている間に、同じポート・ソケットで偽のサーバーを立てられても
     # ファイルの中身を渡さない。段階 12-3d）
     clamav_service = ClamAVService(copy.deepcopy(config.clamd), restart_clamd=clamd_controller.start,

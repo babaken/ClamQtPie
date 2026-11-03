@@ -24,11 +24,16 @@ def test_close_event_hides_window_instead_of_closing(qtbot, tmp_path):
 
 
 def test_close_event_shows_tray_hint_only_once(qtbot, tmp_path):
+    # トレイGUI と同じく ConfigProxy を渡す（×ボタンでの案内の表示済みは gui.json に保存する）
+    from core.gui_config import read_gui_general
+    from tests.gui_fakes import config_proxy
+
     config_service = ConfigService(tmp_path / "config.json")
     config_service.load()
+    proxy, _api = config_proxy(tmp_path, config_service)
     tray_icon = MagicMock()
 
-    window = MainWindow(tray_icon=tray_icon, config_service=config_service)
+    window = MainWindow(tray_icon=tray_icon, config_service=proxy)
     qtbot.addWidget(window)
 
     window.close()
@@ -38,8 +43,7 @@ def test_close_event_shows_tray_hint_only_once(qtbot, tmp_path):
     window.close()
     assert tray_icon.showMessage.call_count == 1  # 2回目は表示されない
 
-    reloaded = config_service.load()
-    assert reloaded.general.show_tray_hint_shown is True
+    assert read_gui_general(tmp_path / "gui.json").show_tray_hint_shown is True
 
 
 def test_show_from_tray_makes_window_visible(qtbot, tmp_path):

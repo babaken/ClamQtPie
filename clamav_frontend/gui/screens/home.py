@@ -199,7 +199,7 @@ class HomeScreen(BaseScreen):
     ) -> None:
         """
         on_quick_scan / on_update_now / on_toggle_realtime / on_navigate:
-            他画面への遷移と実処理起動はMainWindow（app.py）側のコールバックに委譲する
+            他画面への遷移と実処理起動はトレイGUI（tray_main.py）側のコールバックに委譲する
             （画面間の直接依存を避けるため）。
         stale_days: 定義が古いと判断する日数を返す関数（設定 update.stale_days。保存後の値を毎回読む）
         """

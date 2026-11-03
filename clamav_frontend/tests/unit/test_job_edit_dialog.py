@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 from PySide6.QtWidgets import QDialog
 
+from api_client.admin_ops import Operation
 from gui.dialogs.job_edit_dialog import JobEditDialog
 from gui.screens.schedule import ScheduleScreen
 
@@ -147,12 +148,13 @@ def test_wake_is_shown_and_kept_in_the_tray(qtbot):
     assert not dialog.wake_check.isHidden() and dialog.result_values()["wake"] is True
 
 
-def test_schedule_screen_add_job_calls_service(qtbot, monkeypatch):
+def test_schedule_screen_add_job_is_saved_as_an_operation(qtbot, monkeypatch):
     screen = ScheduleScreen()
     qtbot.addWidget(screen)
     service = MagicMock()
     service.list_all.return_value = []
-    screen.bind_services(service)
+    sent = []
+    screen.bind_services(service, sent.append)
 
     fake_dialog = MagicMock()
     fake_dialog.exec.return_value = QDialog.DialogCode.Accepted
@@ -168,18 +170,21 @@ def test_schedule_screen_add_job_calls_service(qtbot, monkeypatch):
     monkeypatch.setattr(schedule_module, "JobEditDialog", lambda *a, **k: fake_dialog)
 
     screen._on_add_job_clicked()
+    assert screen.save_changes() is True
 
-    service.add_job.assert_called_once_with("daily-scan", "scan", "0 3 * * *", target="/home")
+    assert sent == [[Operation("POST", "/schedules", {"name": "daily-scan", "scan_type": "scan", "cron": "0 3 * * *",
+                                                      "target": "/home", "wake": False})]]
 
 
-def test_schedule_screen_edit_job_calls_service(qtbot, monkeypatch):
+def test_schedule_screen_edit_job_is_saved_as_an_operation(qtbot, monkeypatch):
     screen = ScheduleScreen()
     qtbot.addWidget(screen)
     service = MagicMock()
     service.list_all.return_value = [
         _FakeSchedule(1, "daily-scan", True, "0 3 * * *", "/home", "scan", "", "")
     ]
-    screen.bind_services(service)
+    sent = []
+    screen.bind_services(service, sent.append)
     screen.job_table.selectRow(0)
 
     fake_dialog = MagicMock()
@@ -196,8 +201,10 @@ def test_schedule_screen_edit_job_calls_service(qtbot, monkeypatch):
     monkeypatch.setattr(schedule_module, "JobEditDialog", lambda *a, **k: fake_dialog)
 
     screen._on_edit_job_clicked()
+    assert screen.save_changes() is True
 
-    service.update_job.assert_called_once_with(1, "daily-scan-renamed", "scan", "0 4 * * *", target="/home")
+    assert sent == [[Operation("PUT", "/schedules/1", {"name": "daily-scan-renamed", "scan_type": "scan",
+                                                       "cron": "0 4 * * *", "target": "/home", "wake": False})]]
 
 
 def test_schedule_screen_add_job_cancelled_does_not_call_service(qtbot, monkeypatch):
@@ -205,7 +212,7 @@ def test_schedule_screen_add_job_cancelled_does_not_call_service(qtbot, monkeypa
     qtbot.addWidget(screen)
     service = MagicMock()
     service.list_all.return_value = []
-    screen.bind_services(service)
+    screen.bind_services(service, MagicMock())
 
     fake_dialog = MagicMock()
     fake_dialog.exec.return_value = QDialog.DialogCode.Rejected
@@ -216,4 +223,4 @@ def test_schedule_screen_add_job_cancelled_does_not_call_service(qtbot, monkeypa
 
     screen._on_add_job_clicked()
 
-    service.add_job.assert_not_called()
+    assert not screen.has_unsaved_changes()

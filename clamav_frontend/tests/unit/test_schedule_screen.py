@@ -47,7 +47,9 @@ def env(qtbot, tmp_path):
     screen = ScheduleScreen()
     qtbot.addWidget(screen)
     shown = []
-    screen.bind_services(service, on_show_log=shown.append)
+    from tests.gui_fakes import FakeServiceApi
+
+    screen.bind_services(service, FakeServiceApi(scheduler_service=service).batch, on_show_log=shown.append)
     yield screen, service, release, calls, shown, tmp_path
     release.set()
     service.shutdown()
@@ -72,6 +74,7 @@ def test_toggle_enabled_clears_next_run(env):
     screen.job_table.selectRow(0)
 
     screen.toggle_job_button.click()
+    assert screen.save_changes() is True  # ［変更を保存］
 
     assert screen.job_table.item(0, 3).text() == "無効"
     assert screen.job_table.item(0, 4).text() == "-"

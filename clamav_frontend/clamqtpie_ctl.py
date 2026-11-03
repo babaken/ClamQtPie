@@ -68,7 +68,7 @@ def _is_admin() -> bool:
 
 
 def _config_service(paths: ServicePaths) -> ConfigService:
-    return ConfigService(paths.config_file, secret_store=FileSecretStore(paths.secrets_dir), gui_settings=False)
+    return ConfigService(paths.config_file, secret_store=FileSecretStore(paths.secrets_dir))
 
 
 # -- status --------------------------------------------------------------------------------

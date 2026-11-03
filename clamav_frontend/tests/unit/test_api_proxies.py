@@ -95,7 +95,7 @@ class _ScanDispatcher:
 def service(tmp_path):
     db = DatabaseService(tmp_path / "app.db")
     db.connect()
-    config_service = ConfigService(tmp_path / "config.json", gui_settings=False)
+    config_service = ConfigService(tmp_path / "config.json")
     config_service.load()
     log = tmp_path / "logs" / "app.log"
     log.parent.mkdir()
