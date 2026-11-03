@@ -314,6 +314,20 @@ class ServicePermissionError(ApiError):
     default_message = "この PC の ClamQtPie を使う権限がありません"
 
 
+class ElevationCancelledError(ApiError):
+    """トレイGUI側で使う（UAC・pkexec の確認、昇格ヘルパーの確認画面で取り消した。段階 12-4c）"""
+
+    default_code = "E8111"
+    default_message = "管理者の権限での操作を取り消しました"
+
+
+class ElevationError(ApiError):
+    """トレイGUI側で使う（昇格ヘルパーを起動できない・応答が正しくない。段階 12-4c）"""
+
+    default_code = "E8112"
+    default_message = "管理者の権限で操作を実行できませんでした"
+
+
 class ApiNotFoundError(ApiError):
     """指定した ID の除外・監視対象・スケジュールがない（隔離データは E3003）"""
 

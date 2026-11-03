@@ -6,7 +6,8 @@
 - 起動時: user.token を読めない（ClamQtPie Users・clamqtpie グループに入っていない）なら案内して終わる。
   サービスにつながらないときは E8105 を表示し、トレイをエラーの状態にして、つながるまで試し続ける
 - 多重起動防止はログオンのセッションごと（Local\\ のミューテックス。12章 42）
-- admin の操作は、段階 12-4c で昇格ヘルパーを通すようになるまで 403（E8102）のエラーになる
+- admin の操作は、昇格ヘルパー（elevate_main.py）に頼む。UAC・pkexec と、ヘルパーの確認画面で確かめてから実行する
+  （api_client/elevation.py。admin のトークンはこのプロセスに渡さない）
 - 通知: サービスが保存した未読の通知をデスクトップに出し、トーストのクリックで開いた画面の通知・トレイの
   「未読の通知」の一覧で既読にする（gui/tray_notifications.py。設計書 7.2節）
 
@@ -26,6 +27,7 @@ from PySide6.QtGui import QIcon  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon  # noqa: E402
 
 from api_client.client import ApiClient  # noqa: E402
+from api_client.elevation import ElevatedCaller, ElevationRunner  # noqa: E402
 from api_client.events import EventStream  # noqa: E402
 from api_client.proxies import ServiceProxies  # noqa: E402
 from api_client.sync import SyncCaller  # noqa: E402
@@ -105,6 +107,7 @@ class TrayApp:
         self._activation: ActivationWatcher | None = None
         #: サービスにつながらないときのエラーコード（つながっている間は None）
         self._down_code: str | None = None
+        self.elevation = ElevationRunner()
         self._reconnect = QTimer()
         self._reconnect.timeout.connect(self._retry)
         self._status_timer = QTimer()
@@ -117,6 +120,7 @@ class TrayApp:
             self.proxies.events.stop()
         if self.notifier is not None:
             self.notifier.shutdown()
+        self.elevation.shutdown()
         if self.window is not None:
             self.window.hide()
             self.window.deleteLater()
@@ -144,7 +148,7 @@ class TrayApp:
         self._reconnect.stop()
         if self.window is None:
             events = EventStream(self.client)
-            self.proxies = ServiceProxies(api, events)
+            self.proxies = ServiceProxies(ElevatedCaller(api, self.elevation), events)
             notify_icon = _RESOURCE_DIR / "icons" / "app.png"
             self.notifier = TrayNotifier(api, events,
                                          DesktopToaster(str(notify_icon) if notify_icon.exists() else None))

@@ -141,6 +141,18 @@ class QuarantineProxy:
     def delete_permanently(self, quarantine_id: int) -> None:
         self._api.call("DELETE", f"/quarantine/{quarantine_id}")
 
+    def delete_many(self, quarantine_ids: list[int]) -> None:
+        """選んだ隔離ファイルをまとめて削除する（昇格の確認は 1 回。段階 12-4c）"""
+        from api_client.admin_ops import Operation
+
+        operations = [Operation("DELETE", f"/quarantine/{qid}") for qid in quarantine_ids]
+        batch = getattr(self._api, "batch", None)
+        if batch is not None:
+            batch(operations)
+            return
+        for op in operations:
+            self._api.call(op.method, op.path)
+
     def quarantine(self, original_path, virus_name: str):
         return SimpleNamespace(**self._api.call("POST", "/quarantine",
                                                 {"path": str(original_path), "virus_name": virus_name}))

@@ -222,6 +222,15 @@ class QuarantineScreen(BaseScreen):
             f"選択した{len(records)}件のファイルを完全に削除します。元に戻せません。よろしいですか？",
         ):
             return
+        delete_many = getattr(self._quarantine_service, "delete_many", None)
+        if delete_many is not None:
+            # トレイGUI: 管理者の権限の確認を 1 回にまとめる（途中で失敗したら残りは実行しない）
+            try:
+                delete_many([record.id for record in records])
+            except AppError as exc:
+                show_error_dialog(self, exc)
+            self.reload()
+            return
         for record in records:
             try:
                 self._quarantine_service.delete_permanently(record.id)
