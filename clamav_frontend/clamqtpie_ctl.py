@@ -407,6 +407,30 @@ def _print_plan(source: Path, data, changed: list[str], out) -> None:
     print(f"スキャンの履歴: {len(data.scan_history)} 件、定義の更新の履歴: {len(data.update_history)} 件", file=out)
 
 
+# -- users --------------------------------------------------------------------------------
+def cmd_users(paths: ServicePaths, action: str, name: str, out, runner=subprocess.run) -> int:
+    """トレイGUI を使える利用者（サービス化・Web API設計書 3.2節）。トレイGUI を使えるのは管理者だけにする"""
+    from core.service_access import AccessError, add_user, group_name, list_users, remove_user
+
+    try:
+        if action == "list":
+            members = list_users(runner)
+            print(f"{group_name()} の利用者: {', '.join(members) if members else '（なし）'}", file=out)
+        elif action == "add":
+            add_user(name, runner)
+            _audit(paths, f"clamqtpie-ctl: トレイGUI を使える利用者に加えました: {name}")
+            print(f"{name} を {group_name()} に入れました。サインアウトしてサインインし直すと、トレイGUI を使えます"
+                  "（使えなければ PC を再起動してください）", file=out)
+        else:
+            remove_user(name, runner)
+            _audit(paths, f"clamqtpie-ctl: トレイGUI を使える利用者から外しました: {name}")
+            print(f"{name} を {group_name()} から外しました。動いているトレイGUI は、サービスを起動し直すと"
+                  "つながらなくなります", file=out)
+    except AccessError as exc:
+        raise CtlError(str(exc)) from exc
+    return EXIT_OK
+
+
 # -- 入口 ------------------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="clamqtpie-ctl", description=f"{APP_NAME} の管理用コマンド")
@@ -425,6 +449,11 @@ def build_parser() -> argparse.ArgumentParser:
     restore.add_argument("id", type=int)
     restore.add_argument("--to", required=True, dest="dest")
     restore.add_argument("--overwrite", action="store_true", help="同じ名前のファイルがあれば上書きする")
+    users = sub.add_parser("users", help="トレイGUI を使える利用者（ClamQtPie Users・clamqtpie グループ）") \
+        .add_subparsers(dest="action", required=True)
+    users.add_parser("list", help="グループの利用者を表示する")
+    users.add_parser("add", help="利用者をグループに入れる").add_argument("name")
+    users.add_parser("remove", help="利用者をグループから外す").add_argument("name")
     migrate = sub.add_parser("migrate", help="旧版（ポータブル）のデータを移す")
     migrate.add_argument("--from", required=True, dest="source", help="旧版のフォルダ（ClamQtPie.exe・app.py のあるところ）")
     migrate.add_argument("--yes", action="store_true", help="確認を省く")
@@ -450,6 +479,8 @@ def main(argv: list[str] | None = None, out=sys.stdout, ask=input, ask_password=
             return cmd_config_set(paths, args.key, args.value, args.yes, args.restart, out, ask)
         if args.command == "quarantine" and args.action == "restore":
             return cmd_quarantine_restore(paths, args.id, args.dest, args.overwrite, out)
+        if args.command == "users":
+            return cmd_users(paths, args.action, getattr(args, "name", ""), out)
         if args.command == "migrate":
             return cmd_migrate(paths, args.source, args.yes, args.restart, not args.data_dir, out, ask, ask_password)
     except CtlError as exc:

@@ -1425,3 +1425,17 @@ Linux 実機の確認（#35）で見つかった点を直した:
   - 保存の結果（「保存しました（時刻）」など）を、保存のボタンの横に出す（従来のアプリも）
 
 確認: 全テスト（Windows 993 件・WSL 1005 件、2 回ずつ）成功。本物の API に対して、リアルタイム保護の画面の変更が昇格ヘルパー（同じプロセスで代わりに動かす）を通して保存されることを確かめた。
+
+## 70. 段階 12-4d-1: 配布物の分割・トレイGUI を使える利用者・Linux の導入
+
+サービス化・Web API設計書 3.2節・11章（12章 5・33）。12-4d は 2 つに分ける（12-4d-1: PyInstaller の分割・グループの権限・`clamqtpie-ctl users`・サービスの実行ファイルの置き場所の確認・Linux の `install.sh`／`uninstall.sh`、12-4d-2: Windows のインストーラ（Inno Setup）・`build_release.py`・旧版の自動起動の登録し直し）。
+
+- **PyInstaller の分割**（`ClamQtPie.spec`）: 1 つの spec で、サービス（`ClamQtPieService.exe`／`clamqtpie-service`）・トレイGUI（`ClamQtPie.exe`／`clamqtpie`、**UAC を求めない**）・昇格ヘルパー（`ClamQtPieElevate.exe`（`uac_admin=True`）／`clamqtpie-elevate`）・管理用コマンド（`clamqtpie-ctl`、コンソール）・通知のクリック（`ClamQtPieActivate.exe`、Python のまま）を作り、`_internal/` を共有する。従来のアプリ（`app.py`）は作らない。トレイGUI が使う QtNetwork を入れた（TLS のプラグインは入れない）。uvicorn は文字列で読み込むモジュールを `hiddenimports` に入れた
+  - Windows でビルドし、サービス（`--console`）が内部 API の待ち受けまで進むこと、トレイGUI がサービスを待つ状態で動くこと、`clamqtpie-ctl --help` を確かめた（約 128 MB）
+- **トレイGUI を使える利用者**（`core/service_access.py`）: サービスは起動のたびに作り直す `user.token`・`endpoint.json` を、ClamQtPie Users（Windows）・`clamqtpie`（Linux）のグループに読ませる（`admin.token` は読ませない）。Linux は `/var/lib/clamqtpie` を `root:clamqtpie` 0710、`api/` を 0750、2 つのファイルを 0640 にする。Windows はファイルにグループの読み取りを足す。グループが無ければ何もしない（開発中の確認用の導入）。できなくてもサービスは止めない
+- **`clamqtpie-ctl users list|add|remove <利用者>`**: `net localgroup`／`groupadd`・`usermod -aG`・`gpasswd -d`。グループが無ければ作る。利用者名は決まった文字だけを受け付ける。サインインし直すと使えるようになる
+- **サービスの実行ファイルの置き場所の確認**（12章 33）: 配布版のサービスとして動くとき、自分の実行ファイルとそのフォルダを一般の利用者が書き換えられれば起動しない（終了コード 2）
+- **Linux の導入**（`packaging/linux/`）: `install.sh`（`/opt/clamqtpie` に写してから入れ替え、`root:root`・`go-w`。リンクなら中止。`clamqtpie` グループを作り `SUDO_USER` を入れる。unit・polkit のポリシー・デスクトップの項目・`/usr/local/bin/clamqtpie-ctl` を置き、サービスを開始する。更新も同じコマンド）、`uninstall.sh`（データを消すかを尋ねる。`--purge` は尋ねずにデータとグループも消す）、`clamqtpie.service`、`io.github.babaken.clamqtpie.policy`（`auth_admin`、`allow_gui`）、`clamqtpie.desktop`。配布物の形（`app/`・`share/`・`install.sh`・`uninstall.sh`）は 12-4d-2 の `build_release.py` で作る
+- **見つけた不具合**: 配布版では pywin32 の `pywintypes` が二重に読み込まれ、`except pywintypes.error` で Windows のエラーを捕まえられなかった（グループが無いときにサービスが止まった）。`winerror` の有無で見分ける（`is_windows_error`）。昇格ヘルパーの受け渡しも同じようにした
+
+確認: 全テスト（Windows 1012 件・WSL 1024 件、2 回ずつ）成功。`install.sh`・`uninstall.sh` は構文の確認だけ（Linux の実機での導入は 12-4d-2 の配布物で行う）。

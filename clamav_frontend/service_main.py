@@ -58,6 +58,15 @@ def run(paths: ServicePaths, strict: bool, on_ready=None, app_holder: list | Non
         # ロガーの準備の前なので、標準エラー（systemd のジャーナル・Windows のイベントログ）に出す
         print(f"ClamQtPie サービスを起動できません: {exc}", file=sys.stderr)
         return EXIT_UNSAFE_DIRECTORY
+    if strict and getattr(sys, "frozen", False):
+        # 自分の実行ファイルを一般の利用者が差し替えられると、次の起動から SYSTEM・root で動いてしまう（12章 33）
+        from core.service_access import program_location_problem
+
+        problem = program_location_problem(Path(sys.executable))
+        if problem:
+            print(f"ClamQtPie サービスを起動できません: 実行ファイルの置き場所を一般の利用者が書き換えられます（{problem}）",
+                  file=sys.stderr)
+            return EXIT_UNSAFE_DIRECTORY
 
     from api.service_api import ServiceApi
     from core.runtime import build

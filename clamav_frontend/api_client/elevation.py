@@ -69,16 +69,19 @@ def windows_helper(pipe_name: str) -> tuple[str, str]:
 
 
 def launch_windows(pipe_name: str) -> Launched:
-    import pywintypes
     import win32con
     import win32process
     from win32com.shell import shell, shellcon
+
+    from core.service_access import is_windows_error
 
     exe, params = windows_helper(pipe_name)
     try:
         info = shell.ShellExecuteEx(fMask=shellcon.SEE_MASK_NOCLOSEPROCESS, lpVerb="runas", lpFile=exe,
                                     lpParameters=params, nShow=win32con.SW_SHOWNORMAL)
-    except pywintypes.error as exc:
+    except Exception as exc:  # noqa: BLE001 - pywintypes.error（is_windows_error）
+        if not is_windows_error(exc):
+            raise
         if exc.winerror == _ERROR_CANCELLED:
             raise ElevationCancelledError() from exc
         raise ElevationError(detail=f"昇格ヘルパーを起動できません ({exc.strerror})") from exc
@@ -125,6 +128,7 @@ def exchange_windows(payload: bytes, launch=launch_windows) -> bytes:
     import win32file
     import win32pipe
 
+    from core.service_access import is_windows_error
     from elevate_main import frame, read_frame
 
     name = f"clamqtpie-elevate-{secrets.token_hex(16)}"
@@ -168,8 +172,8 @@ def exchange_windows(payload: bytes, launch=launch_windows) -> bytes:
                 win32file.ReadFile(pipe, buffer, ov)
                 wait(ov.hEvent)
                 count = win32file.GetOverlappedResult(pipe, ov, True)
-            except pywintypes.error as exc:
-                if exc.winerror == _ERROR_BROKEN_PIPE:
+            except Exception as exc:  # noqa: BLE001 - pywintypes.error（is_windows_error）
+                if is_windows_error(exc) and exc.winerror == _ERROR_BROKEN_PIPE:
                     return b""
                 raise
             return bytes(buffer[:count])
@@ -178,7 +182,9 @@ def exchange_windows(payload: bytes, launch=launch_windows) -> bytes:
             return read_frame(read)
         except ValueError as exc:
             raise ElevationError(detail=str(exc)) from exc
-    except pywintypes.error as exc:
+    except Exception as exc:  # noqa: BLE001 - pywintypes.error（is_windows_error）
+        if not is_windows_error(exc):
+            raise
         raise ElevationError(detail=f"昇格ヘルパーとの受け渡しに失敗しました ({exc.strerror})") from exc
     finally:
         win32file.CloseHandle(pipe)

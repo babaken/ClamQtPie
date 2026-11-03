@@ -1,0 +1,20 @@
+# ClamQtPie サービス（install.sh が /etc/systemd/system に置く）
+[Unit]
+Description=ClamQtPie service
+After=network.target clamav-daemon.service
+Wants=clamav-daemon.service
+StartLimitIntervalSec=1d
+StartLimitBurst=3
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/opt/clamqtpie/clamqtpie-service --systemd
+WorkingDirectory=/opt/clamqtpie
+Restart=on-failure
+RestartSec=60
+# 置き場所の権限（2）・API のポート（3）の失敗は、起動し直しても直らないため起動し直さない
+RestartPreventExitStatus=2 3
+
+[Install]
+WantedBy=multi-user.target

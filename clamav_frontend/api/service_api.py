@@ -40,6 +40,18 @@ _STATUS_INTERVAL_MS = 2000
 _CLAMD_CHECK_INTERVAL_SEC = 60
 
 
+def _share_with_users(paths) -> None:
+    """user.token・endpoint.json を ClamQtPie Users・clamqtpie のグループに読ませる（トレイGUI がつなぐため。段階 12-4d）。
+    できなくてもサービスは止めない（トレイGUI からつなげないだけ。clamqtpie-ctl・WebUI は使える）"""
+    from core.service_access import AccessError, share_with_users
+
+    try:
+        share_with_users(paths.data_dir, paths.api_dir)
+    except (AccessError, OSError) as exc:
+        logger.warning(f"トークンをトレイGUI の利用者のグループに読ませられませんでした (detail: {exc})",
+                       extra={"error_code": "E8100"})
+
+
 class ServiceApi:
     """内部 API とイベントの発生元。メインスレッド（QCoreApplication のスレッド）で作る"""
 
@@ -90,6 +102,7 @@ class ServiceApi:
             server.start()
             # 待ち受けたポートを知らせる（トレイGUI・clamqtpie-ctl が読む。止まっている間も残す。9.4節）
             write_endpoint(rt.paths.api_dir, server.port)
+            _share_with_users(rt.paths)
         except (OSError, RuntimeError):
             tokens.remove_files()
             server.stop()
