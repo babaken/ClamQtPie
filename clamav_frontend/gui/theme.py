@@ -80,6 +80,9 @@ QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QTimeEdit, QListWidge
     selection-background-color: {COLOR_ACCENT};
 }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QTextEdit:focus {{ border-color: {COLOR_ACCENT}; }}
+/* 変えられない入力欄（保護された設定など）が、ほかの欄と同じ見た目で区別できなかった */
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QDateEdit:disabled,
+QTimeEdit:disabled {{ background: #262626; border-color: #3a3a3a; color: #777777; }}
 /* 数値・日付の上下ボタン（入力欄の背景・枠線を指定したため、既定の描画では暗い背景に埋もれて見えなかった） */
 QSpinBox, QDoubleSpinBox, QDateEdit, QTimeEdit {{ padding-right: 22px; }}
 QSpinBox::up-button, QDoubleSpinBox::up-button, QDateEdit::up-button, QTimeEdit::up-button,

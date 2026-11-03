@@ -135,7 +135,16 @@ def test_dialog_result_values(qtbot):
         "scan_type": "update",
         "target": "",
         "cron": "0 3 * * 0",
+        "wake": False,
     }
+    assert dialog.wake_check.isHidden()  # 従来のアプリでは出さない（サービスだけの機能）
+
+
+def test_wake_is_shown_and_kept_in_the_tray(qtbot):
+    dialog = JobEditDialog(initial={"name": "毎晩", "scan_type": "update", "cron": "0 3 * * *", "wake": True},
+                           show_wake=True)
+    qtbot.addWidget(dialog)
+    assert not dialog.wake_check.isHidden() and dialog.result_values()["wake"] is True
 
 
 def test_schedule_screen_add_job_calls_service(qtbot, monkeypatch):

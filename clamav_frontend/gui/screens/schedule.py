@@ -5,6 +5,8 @@
 Phase6: SchedulerServiceとの結線を追加
 Phase 11: スケジュール・種別の人間可読表示、次回実行日時、最終実行結果（成功／失敗／検知あり）の表示と
           ログ画面への遷移、有効/無効の切替、「今すぐ実行」のバックグラウンド実行（実行中に画面が固まらない）を追加
+段階 12-4c（トレイGUI）: 追加・編集・削除・有効無効の切り替えを画面の中にためておき、［変更を保存］で 1 回の昇格に
+          まとめる（bind_services の batch。gui/pending_edits.py）。編集画面に「スリープ中でも起こして実行する」を出す
 """
 from __future__ import annotations
 
@@ -22,10 +24,12 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
 )
 
-from core.exceptions import AppError
+from api_client.admin_ops import Operation
+from core.exceptions import AppError, ElevationCancelledError
 from gui.dialogs.job_edit_dialog import SCAN_TYPE_LABELS, JobEditDialog
 from gui.error_dialog import show_confirm_dialog, show_error_dialog
-from gui.screens.base import BaseScreen
+from gui.pending_edits import MARK_UNSAVED, PendingEdits, SaveBar, failure_text
+from gui.screens.base import BaseScreen, wrap_layout
 
 _ID_ROLE = 0x0103
 _WEEKDAYS = {"0": "日", "1": "月", "2": "火", "3": "水", "4": "木", "5": "金", "6": "土", "7": "日"}
@@ -127,13 +131,24 @@ class ScheduleScreen(BaseScreen):
         frame.setLayout(action_layout)
         self.add_layout_widget(frame)
 
+        # 変更の保存（トレイGUI だけ）
+        self.save_card = self.begin_card("変更の保存")
+        self.save_bar = SaveBar(self.save_changes, self.discard_changes)
+        self.add_layout_widget(wrap_layout(self.save_bar.layout))
+        self.save_card.setVisible(False)
+        self._batch = None
+        self._pending = PendingEdits()
+
         self._scheduler_service = None
         self._job_runner: _JobRunner | None = None
         self._on_show_log = None
 
     # -- サービス層との結線 -----------------------------------------------------
-    def bind_services(self, scheduler_service, on_show_log=None) -> None:
-        """on_show_log: 最終実行結果のダブルクリック時に呼ばれる（ジョブ名でログ画面を絞り込む）"""
+    def bind_services(self, scheduler_service, on_show_log=None, batch=None) -> None:
+        """on_show_log: 最終実行結果のダブルクリック時に呼ばれる（ジョブ名でログ画面を絞り込む）
+        batch(操作の一覧): トレイGUI。変更をためておき、［変更を保存］でまとめて送る（api_client.elevation）"""
+        self._batch = batch
+        self.save_card.setVisible(batch is not None)
         self._scheduler_service = scheduler_service
         self._on_show_log = on_show_log
         self._job_runner = _JobRunner(scheduler_service)
@@ -144,24 +159,36 @@ class ScheduleScreen(BaseScreen):
         if self._scheduler_service is None:
             return
         records = self._scheduler_service.list_all()
-        self.job_table.setRowCount(0)
+        pending = self._pending
+        rows = []
         for record in records:
+            shown = pending.updated.get(record.id, {})
+            rows.append((record.id, shown.get("name", record.name), shown.get("target", record.target),
+                         shown.get("scan_type", record.scan_type), shown.get("cron", record.cron),
+                         pending.state_text(record.id, record.enabled), record.next_run, record.last_run))
+        for i, item in enumerate(pending.added):
+            rows.append((-(i + 1), item["name"], item["target"], item["scan_type"], item["cron"],
+                         pending.state_text(-(i + 1), True), "", ""))
+        self.job_table.setRowCount(0)
+        for key, name, target, scan_type, cron, state, next_run, last_run in rows:
             row = self.job_table.rowCount()
             self.job_table.insertRow(row)
             values = [
-                (record.name, record.target or ""),
-                (SCAN_TYPE_LABELS.get(record.scan_type, record.scan_type), ""),
-                (describe_cron(record.cron), f"Cron式: {record.cron}"),
-                ("有効" if record.enabled else "無効", ""),
-                (_local_datetime(record.next_run) if record.next_run else "-", ""),
-                (describe_last_run(record.last_run), "ダブルクリックでログを表示"),
+                (name, target or ""),
+                (SCAN_TYPE_LABELS.get(scan_type, scan_type), ""),
+                (describe_cron(cron), f"Cron式: {cron}"),
+                (state, ""),
+                (_local_datetime(next_run) if next_run else "-", ""),
+                (describe_last_run(last_run) if key > 0 else MARK_UNSAVED, "ダブルクリックでログを表示"),
             ]
             for col, (value, tooltip) in enumerate(values):
                 item = QTableWidgetItem(value)
-                item.setData(_ID_ROLE, record.id)
+                item.setData(_ID_ROLE, key)
                 if tooltip:
                     item.setToolTip(tooltip)
                 self.job_table.setItem(row, col, item)
+        if self._batch is not None:
+            self.save_bar.show_count(len(pending))
 
     def _selected_id(self) -> int | None:
         selected_rows = {idx.row() for idx in self.job_table.selectedIndexes()}
@@ -187,10 +214,14 @@ class ScheduleScreen(BaseScreen):
     def _on_add_job_clicked(self) -> None:
         if self._scheduler_service is None:
             return
-        dialog = JobEditDialog(self)
+        dialog = JobEditDialog(self, show_wake=self._batch is not None)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         values = dialog.result_values()
+        if self._batch is not None:
+            self._pending.add(values)
+            self.reload()
+            return
         try:
             self._scheduler_service.add_job(
                 values["name"], values["scan_type"], values["cron"], target=values["target"]
@@ -200,6 +231,9 @@ class ScheduleScreen(BaseScreen):
             show_error_dialog(self, exc)
 
     def _on_edit_job_clicked(self) -> None:
+        if self._batch is not None:
+            self._edit_pending()
+            return
         record = self._selected_record()
         if record is None or self._scheduler_service is None:
             return
@@ -224,6 +258,12 @@ class ScheduleScreen(BaseScreen):
             show_error_dialog(self, exc)
 
     def _on_delete_job_clicked(self) -> None:
+        if self._batch is not None:
+            key = self._selected_id()
+            if key is not None:
+                self._pending.remove(key)  # 保存するまでは取り消せるため、ここでは確かめない
+                self.reload()
+            return
         record = self._selected_record()
         if record is None or self._scheduler_service is None:
             return
@@ -236,12 +276,21 @@ class ScheduleScreen(BaseScreen):
         record = self._selected_record()
         if record is None or self._scheduler_service is None:
             return
+        if self._batch is not None:
+            self._pending.toggle(record.id, record.enabled)
+            self.reload()
+            return
         self._scheduler_service.set_enabled(record.id, not record.enabled)
         self.reload()
 
     def _on_run_now_clicked(self) -> None:
         record = self._selected_record()
         if record is None or self._job_runner is None:
+            return
+        if record.id in self._pending.updated or record.id in self._pending.removed:
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.information(self, "今すぐ実行", "このジョブには保存していない変更があります。先に［変更を保存］してください。")
             return
         self._job_runner.start(record.id)
         # 完了するとreload()で実際の結果に置き換わる
@@ -253,3 +302,65 @@ class ScheduleScreen(BaseScreen):
         self.reload()
         if error is not None:
             show_error_dialog(self, error)
+
+    # -- 変更の保存（トレイGUI） ---------------------------------------------------
+    def _edit_pending(self) -> None:
+        key = self._selected_id()
+        if key is None:
+            return
+        if key < 0:
+            initial = dict(self._pending.added[-key - 1])
+        else:
+            record = next((r for r in self._scheduler_service.list_all() if r.id == key), None)
+            if record is None or key in self._pending.removed:
+                return
+            initial = self._pending.updated.get(key) or {
+                "name": record.name, "scan_type": record.scan_type, "target": record.target, "cron": record.cron,
+                "wake": bool(getattr(record, "wake", False))}
+        dialog = JobEditDialog(self, initial=initial, show_wake=True)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._pending.update(key, dialog.result_values())
+        self.reload()
+
+    def has_unsaved_changes(self) -> bool:
+        return len(self._pending) > 0
+
+    def pending_operations(self) -> list[Operation]:
+        """保存していない変更を、API の操作の一覧にする（削除 → 変更 → 有効無効 → 追加の順）"""
+        def body(values: dict) -> dict:
+            return {k: values.get(k, "" if k != "wake" else False) for k in ("name", "scan_type", "cron", "target", "wake")}
+
+        ops = [Operation("DELETE", f"/schedules/{key}") for key in sorted(self._pending.removed)]
+        ops += [Operation("PUT", f"/schedules/{key}", body(values)) for key, values in sorted(self._pending.updated.items())]
+        ops += [Operation("PATCH", f"/schedules/{key}", {"enabled": enabled})
+                for key, enabled in sorted(self._pending.enabled.items())]
+        ops += [Operation("POST", "/schedules", body(values)) for values in self._pending.added]
+        return ops
+
+    def save_changes(self) -> bool:
+        """［変更を保存］: 1 回の昇格でまとめて保存する。保存できた（または変更が無い）とき True"""
+        if self._batch is None:
+            return True
+        ops = self.pending_operations()
+        if not ops:
+            return True
+        try:
+            self._batch(ops)
+        except ElevationCancelledError:
+            return False  # 取り消した: 変更はそのまま残す
+        except AppError as exc:
+            self._pending.clear()
+            self.reload()
+            self.save_bar.show_result(failure_text(exc, len(ops)) + "一覧はサービスの今の内容です。", ok=False)
+            show_error_dialog(self, exc)
+            return False
+        self._pending.clear()
+        self.reload()
+        self.save_bar.show_result(f"{len(ops)} 件の変更を保存しました。", ok=True)
+        return True
+
+    def discard_changes(self) -> None:
+        self._pending.clear()
+        self.reload()
+        self.save_bar.show_result("保存していない変更を取り消しました。", ok=True)

@@ -29,3 +29,10 @@ def test_arrow_image_is_a_triangle(qapp):
     assert image.pixelColor(width // 2, height - 1).alpha() > 0
     assert image.pixelColor(0, 0).alpha() == 0
     assert image.pixelColor(width - 1, 0).alpha() == 0
+
+
+def test_disabled_inputs_look_different():
+    # 変えられない入力欄（保護された設定など）が、ほかの欄と同じ見た目だった（Linux 実機の確認での指摘）
+    rule = re.search(r"QLineEdit:disabled[^{]*\{([^}]*)\}", theme.STYLE_SHEET)
+    assert rule and "background" in rule.group(1) and "QComboBox:disabled" in rule.group(0)
+    assert "QSpinBox:disabled" in rule.group(0)

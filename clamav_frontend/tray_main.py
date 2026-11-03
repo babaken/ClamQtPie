@@ -239,19 +239,30 @@ class TrayApp:
         scan_screen.bind_services(p.scan, p.quarantine)
         scan_screen.bind_history(p.scan_history)
         quarantine_screen.bind_services(p.quarantine)
-        realtime_screen.bind_services(p.realtime, p.watch_targets, p.excludes)
+        def action_operation(action: str):
+            # 検知時アクションの保存（PUT /config）。ほかの設定は今の値のまま
+            import copy
+
+            model = copy.deepcopy(p.config.current)
+            model.realtime.default_action = action
+            return p.config.operation_for(model)
+
+        # 除外・監視対象・スケジュールの変更は画面の中にためておき、［変更を保存］で 1 回の昇格にまとめる（段階 12-4c）
+        realtime_screen.bind_services(p.realtime, p.watch_targets, p.excludes, batch=p.api.batch,
+                                      config_operation=action_operation)
 
         def show_log_for(keyword: str) -> None:
             window.navigate_to("log")
             window.get_screen("log").filter_by_keyword(keyword)
 
-        window.get_screen("schedule").bind_services(p.scheduler, on_show_log=show_log_for)
+        window.get_screen("schedule").bind_services(p.scheduler, on_show_log=show_log_for, batch=p.api.batch)
         update_screen.bind_services(p.update_service, p.update, p.clamav, config_service=p.config,
                                     on_open_settings=lambda: window.navigate_to("settings"))
         window.get_screen("settings").bind_services(
             p.config, p.notification, AutostartService(_autostart_command()),
             on_saved=lambda _config: (realtime_screen.sync_action_from_config(),
                                       update_screen.reload_auto_update_label()),
+            service_mode=True,
         )
         window.get_screen("log").bind_services(p.log_reader)
         window.get_screen("diagnostics").bind_services(DiagnosticsProxy(p))

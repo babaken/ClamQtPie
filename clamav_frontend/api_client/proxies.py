@@ -94,13 +94,30 @@ class ConfigProxy:
     def invalidate(self) -> None:
         self._current = None
 
-    def save(self, model: ConfigModel) -> None:
-        """GUI の設定は gui.json に書き、サービスの設定は変えたときだけ PUT /config（admin）で保存する"""
-        save_gui_general(self._gui_path, model.general)
+    def operation_for(self, model: ConfigModel):
+        """model のサービスの設定を保存する操作（PUT /config）。最後に読んだ内容と同じなら None"""
+        from api_client.admin_ops import Operation
+
         service_part = _service_part(model)
-        if service_part != self._service_part:
-            self._api.call("PUT", "/config", service_part)
-            self._service_part = service_part
+        return None if service_part == self._service_part else Operation("PUT", "/config", service_part)
+
+    def save(self, model: ConfigModel, smtp_password: str | None = None) -> None:
+        """GUI の設定は gui.json に書き、サービスの設定は変えたときだけ PUT /config（admin）で保存する。
+        SMTP のパスワードも渡されたら、同じ 1 回の昇格で保存する（段階 12-4c）"""
+        from api_client.admin_ops import Operation
+
+        save_gui_general(self._gui_path, model.general)
+        operations = [op for op in (self.operation_for(model),) if op is not None]
+        if smtp_password:
+            operations.append(Operation("PUT", "/config/smtp-password", {"password": smtp_password}))
+        if operations:
+            batch = getattr(self._api, "batch", None)
+            if batch is not None:
+                batch(operations)
+            else:
+                for op in operations:
+                    self._api.call(op.method, op.path, op.body)
+        self._service_part = _service_part(model)
         self._current = model
 
     def set_smtp_password(self, password: str) -> None:

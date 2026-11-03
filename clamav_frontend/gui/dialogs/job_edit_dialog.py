@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -39,7 +40,8 @@ SCAN_TYPE_LABELS = {"scan": "スキャン", "update": "定義更新"}
 
 
 class JobEditDialog(QDialog):
-    def __init__(self, parent=None, initial: dict | None = None) -> None:
+    def __init__(self, parent=None, initial: dict | None = None, show_wake: bool = False) -> None:
+        """show_wake: 「スリープ中でも起こして実行する」を表示する（トレイGUI。サービスが OS の復帰タイマーを設定する）"""
         super().__init__(parent)
         self.setWindowTitle("ジョブ編集")
         layout = QFormLayout(self)
@@ -70,6 +72,13 @@ class JobEditDialog(QDialog):
         self.cron_edit = QLineEdit()
         layout.addRow("Cron式", self.cron_edit)
 
+        self.wake_check = QCheckBox("スリープ中でも起こして実行する")
+        self.wake_check.setToolTip(
+            "実行の 2 分前に PC をスリープから起こします。ノート PC を鞄に入れているときなどにも起きるため、"
+            "必要なジョブだけにしてください。PC によっては起こせないことがあります（その場合は復帰の後に実行します）")
+        layout.addRow("", self.wake_check)
+        layout.setRowVisible(self.wake_check, show_wake)
+
         self.error_label = plain(QLabel(""))
         self.error_label.setStyleSheet("color: #e53935;")
         self.error_label.setVisible(False)
@@ -90,6 +99,7 @@ class JobEditDialog(QDialog):
             preset = next((label for label, value in _CRON_PRESETS.items() if value == cron), None)
             self.cron_preset_combo.setCurrentText(preset or _CUSTOM_LABEL)
             self.cron_edit.setText(cron)
+            self.wake_check.setChecked(bool(initial.get("wake", False)))
         # 初期選択のプリセットはcurrentTextChangedが発火しないため明示的に反映する
         self._on_preset_changed(self.cron_preset_combo.currentText())
         self._on_type_changed(self.scan_type())
@@ -149,6 +159,7 @@ class JobEditDialog(QDialog):
             "scan_type": self.scan_type(),
             "target": self.target_edit.text().strip() if self.scan_type() == "scan" else "",
             "cron": self.cron_edit.text().strip(),
+            "wake": self.wake_check.isChecked(),
         }
 
 

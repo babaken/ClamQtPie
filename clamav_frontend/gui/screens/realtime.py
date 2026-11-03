@@ -3,6 +3,8 @@
 
 参照: 画面設計書3章
 Phase5: RealtimeManager / WatchTargetService / ExcludeService との結線を追加
+段階 12-4c（トレイGUI）: 監視対象・除外・検知時アクションの変更を画面の中にためておき、［変更を保存］で
+          1 回の昇格にまとめる（bind_services の batch。gui/pending_edits.py）。従来のアプリはその場で変える
 """
 from __future__ import annotations
 
@@ -20,8 +22,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.exceptions import WatchTargetLostError
+from api_client.admin_ops import Operation
+from core.exceptions import AppError, WatchTargetLostError
 from gui.error_dialog import show_confirm_dialog, show_error_dialog
+from gui.pending_edits import PendingEdits, SaveBar, failure_text
 from gui.screens.base import BaseScreen, configure_table, wrap_layout
 
 _ID_ROLE = 0x0102
@@ -109,6 +113,18 @@ class RealtimeScreen(BaseScreen):
         self.add_layout_widget(self.action_quarantine_radio)
         self.add_layout_widget(self.action_notify_only_radio)
 
+        # 5. 変更の保存（トレイGUI だけ）
+        self.save_card = self.begin_card("変更の保存")
+        self.save_bar = SaveBar(self.save_changes, self.discard_changes)
+        self._add_hlayout(self.save_bar.layout)
+        self.save_card.setVisible(False)
+
+        self._batch = None
+        self._config_operation = None
+        self._pending_targets = PendingEdits()
+        self._pending_excludes = PendingEdits()
+        self._pending_action: str | None = None
+        self._syncing_action = False
         self._realtime_manager = None
         self._watch_target_service = None
         self._exclude_service = None
@@ -116,7 +132,13 @@ class RealtimeScreen(BaseScreen):
         self._showing_scan_error = False
 
     # -- サービス層との結線 -----------------------------------------------------
-    def bind_services(self, realtime_manager, watch_target_service, exclude_service) -> None:
+    def bind_services(self, realtime_manager, watch_target_service, exclude_service, batch=None,
+                      config_operation=None) -> None:
+        """batch(操作の一覧): トレイGUI。変更をためておき、［変更を保存］でまとめて送る（api_client.elevation）。
+        config_operation(検知時アクション) -> Operation | None: 検知時アクションを保存する操作（PUT /config）"""
+        self._batch = batch
+        self._config_operation = config_operation
+        self.save_card.setVisible(batch is not None)
         self._realtime_manager = realtime_manager
         self._watch_target_service = watch_target_service
         self._exclude_service = exclude_service
@@ -134,24 +156,34 @@ class RealtimeScreen(BaseScreen):
         """検知時アクションのラジオボタンを設定値に合わせる（設定画面で既定値を保存した直後にも呼ばれる）"""
         if self._realtime_manager is None:
             return
+        if self._pending_action is not None:
+            return  # 保存していない選択を、ほかの画面での保存で上書きしない
         action = self._realtime_manager.config.default_action
-        self.action_quarantine_radio.setChecked(action == "quarantine")
-        self.action_notify_only_radio.setChecked(action == "notify_only")
+        self._syncing_action = True
+        try:
+            self.action_quarantine_radio.setChecked(action == "quarantine")
+            self.action_notify_only_radio.setChecked(action == "notify_only")
+        finally:
+            self._syncing_action = False
 
     # -- 監視対象パス -----------------------------------------------------
     def reload_targets(self) -> None:
         if self._watch_target_service is None:
             return
         records = self._watch_target_service.list_all()
+        pending = self._pending_targets
+        rows = [(r.id, r.path, pending.state_text(r.id, r.enabled)) for r in records]
+        rows += [(-(i + 1), item["path"], pending.state_text(-(i + 1), True)) for i, item in enumerate(pending.added)]
         self.target_table.setRowCount(0)
-        for record in records:
+        for key, path, state in rows:
             row = self.target_table.rowCount()
             self.target_table.insertRow(row)
-            path_item = QTableWidgetItem(record.path)
-            path_item.setData(_ID_ROLE, record.id)
+            path_item = QTableWidgetItem(path)
+            path_item.setData(_ID_ROLE, key)
             self.target_table.setItem(row, 0, path_item)
-            self.target_table.setItem(row, 1, QTableWidgetItem("有効" if record.enabled else "無効"))
-        self.no_target_hint_label.setVisible(len(records) == 0)
+            self.target_table.setItem(row, 1, QTableWidgetItem(state))
+        self.no_target_hint_label.setVisible(len(rows) == 0)
+        self._show_pending_count()
         # Windowsリアルタイム監視詳細設計書3.1節: 対象0件の間はON操作自体を無効化し、ツールチップで理由を表示
         has_enabled = any(r.enabled for r in records)
         running = self._realtime_manager is not None and self._realtime_manager.is_running
@@ -187,6 +219,11 @@ class RealtimeScreen(BaseScreen):
             return
         item = self.target_table.item(next(iter(rows)), 0)
         target_id, path = item.data(_ID_ROLE), item.text()
+        if self._batch is not None:
+            saved = next((r.enabled for r in self._watch_target_service.list_all() if r.id == target_id), True)
+            self._pending_targets.toggle(target_id, saved)
+            self.reload_targets()
+            return
         record = next((r for r in self._watch_target_service.list_all() if r.id == target_id), None)
         if record is None:
             return
@@ -207,6 +244,10 @@ class RealtimeScreen(BaseScreen):
         path = QFileDialog.getExistingDirectory(self, "監視対象フォルダを選択")
         if not path:
             return
+        if self._batch is not None:
+            self._pending_targets.add({"path": path})
+            self.reload_targets()
+            return
         self._watch_target_service.add(path)
         self.reload_targets()
         if self._realtime_manager is not None and self._realtime_manager.is_running:
@@ -222,6 +263,10 @@ class RealtimeScreen(BaseScreen):
         item = self.target_table.item(row, 0)
         target_id = item.data(_ID_ROLE)
         path = item.text()
+        if self._batch is not None:
+            self._pending_targets.remove(target_id)
+            self.reload_targets()
+            return
 
         self._watch_target_service.remove(target_id)
         if self._realtime_manager is not None and self._realtime_manager.is_running:
@@ -233,16 +278,20 @@ class RealtimeScreen(BaseScreen):
         if self._exclude_service is None:
             return
         all_rules = self._exclude_service.list_all()
+        pending = self._pending_excludes
         for type_key, table in self._exclude_tables.items():
-            rules = [r for r in all_rules if r.type == type_key]
+            rows = [(r.id, r.value, pending.state_text(r.id, r.enabled)) for r in all_rules if r.type == type_key]
+            rows += [(-(i + 1), item["value"], pending.state_text(-(i + 1), True))
+                     for i, item in enumerate(pending.added) if item["type"] == type_key]
             table.setRowCount(0)
-            for rule in rules:
+            for key, value, state in rows:
                 row = table.rowCount()
                 table.insertRow(row)
-                value_item = QTableWidgetItem(rule.value)
-                value_item.setData(_ID_ROLE, rule.id)
+                value_item = QTableWidgetItem(value)
+                value_item.setData(_ID_ROLE, key)
                 table.setItem(row, 0, value_item)
-                table.setItem(row, 1, QTableWidgetItem("有効" if rule.enabled else "無効"))
+                table.setItem(row, 1, QTableWidgetItem(state))
+        self._show_pending_count()
 
     def _current_exclude_type(self) -> str:
         return _EXCLUDE_TYPES[self.exclude_tabs.currentIndex()][1]
@@ -279,6 +328,12 @@ class RealtimeScreen(BaseScreen):
         if not value:
             return
         existing = {(r.type, r.value) for r in self._exclude_service.list_all()}
+        if self._batch is not None:
+            existing |= {(item["type"], item["value"]) for item in self._pending_excludes.added}
+            if (type_key, value) not in existing:
+                self._pending_excludes.add({"type": type_key, "value": value})
+            self.reload_excludes()
+            return
         if (type_key, value) not in existing:  # 同じ値の重複登録はしない
             self._exclude_service.add(type_key, value)
         self._after_exclude_changed(type_key)
@@ -288,6 +343,10 @@ class RealtimeScreen(BaseScreen):
             return
         exclude_id = self._selected_exclude_id()
         if exclude_id is None:
+            return
+        if self._batch is not None:
+            self._pending_excludes.remove(exclude_id)  # 保存するまでは取り消せるため、ここでは確かめない
+            self.reload_excludes()
             return
         if not show_confirm_dialog(self, "除外設定の削除", "選択した除外設定を削除しますか？"):
             return
@@ -299,6 +358,11 @@ class RealtimeScreen(BaseScreen):
             return
         exclude_id = self._selected_exclude_id()
         if exclude_id is None:
+            return
+        if self._batch is not None:
+            saved = next((r.enabled for r in self._exclude_service.list_all() if r.id == exclude_id), True)
+            self._pending_excludes.toggle(exclude_id, saved)
+            self.reload_excludes()
             return
         rule = next((r for r in self._exclude_service.list_all() if r.id == exclude_id), None)
         if rule is None:
@@ -337,11 +401,82 @@ class RealtimeScreen(BaseScreen):
             self.toggle_button.setText("監視を開始する")
 
     def _on_action_changed(self, checked: bool) -> None:
-        if self._realtime_manager is None:
+        if self._realtime_manager is None or self._syncing_action:
             return
-        self._realtime_manager.config.default_action = (
-            "quarantine" if checked else "notify_only"
-        )
+        action = "quarantine" if checked else "notify_only"
+        if self._batch is not None:
+            saved = self._realtime_manager.config.default_action
+            self._pending_action = None if action == saved else action
+            self._show_pending_count()
+            return
+        self._realtime_manager.config.default_action = action
+
+    # -- 変更の保存（トレイGUI） ---------------------------------------------------
+    def has_unsaved_changes(self) -> bool:
+        return self._pending_count() > 0
+
+    def _pending_count(self) -> int:
+        return len(self._pending_targets) + len(self._pending_excludes) + (self._pending_action is not None)
+
+    def _show_pending_count(self) -> None:
+        if self._batch is not None:
+            self.save_bar.show_count(self._pending_count())
+
+    def pending_operations(self) -> list[Operation]:
+        """保存していない変更を、API の操作の一覧にする（削除 → 有効無効 → 追加 → 検知時アクションの順）"""
+        lists = (("/excludes", self._pending_excludes), ("/realtime/targets", self._pending_targets))
+        ops = [Operation("DELETE", f"{path}/{key}") for path, pending in lists for key in sorted(pending.removed)]
+        ops += [Operation("PATCH", f"{path}/{key}", {"enabled": enabled})
+                for path, pending in lists for key, enabled in sorted(pending.enabled.items())]
+        ops += [Operation("POST", "/realtime/targets", {"path": item["path"]}) for item in self._pending_targets.added]
+        ops += [Operation("POST", "/excludes", {"type": item["type"], "value": item["value"],
+                                                "enabled": item.get("enabled", True)})
+                for item in self._pending_excludes.added]
+        if self._pending_action is not None and self._config_operation is not None:
+            op = self._config_operation(self._pending_action)
+            if op is not None:
+                ops.append(op)
+        return ops
+
+    def save_changes(self) -> bool:
+        """［変更を保存］: 1 回の昇格でまとめて保存する。保存できた（または変更が無い）とき True"""
+        if self._batch is None:
+            return True
+        ops = self.pending_operations()
+        if not ops:
+            self.discard_changes()
+            return True
+        try:
+            self._batch(ops)
+        except AppError as exc:
+            from core.exceptions import ElevationCancelledError
+
+            if isinstance(exc, ElevationCancelledError):
+                return False  # 取り消した: 変更はそのまま残す
+            self._clear_pending()
+            self._reload_all()
+            self.save_bar.show_result(failure_text(exc, len(ops)) + "一覧はサービスの今の内容です。", ok=False)
+            show_error_dialog(self, exc)
+            return False
+        self._clear_pending()
+        self._reload_all()
+        self.save_bar.show_result(f"{len(ops)} 件の変更を保存しました。", ok=True)
+        return True
+
+    def discard_changes(self) -> None:
+        self._clear_pending()
+        self._reload_all()
+        self.save_bar.show_result("保存していない変更を取り消しました。", ok=True)
+
+    def _clear_pending(self) -> None:
+        self._pending_targets.clear()
+        self._pending_excludes.clear()
+        self._pending_action = None
+
+    def _reload_all(self) -> None:
+        self.reload_targets()
+        self.reload_excludes()
+        self.sync_action_from_config()
 
     # -- RealtimeManagerからのシグナル受信 -----------------------------------
     def _on_detected(self, path: str, virus_name: str) -> None:
