@@ -59,3 +59,28 @@ def write_gui_config(path: Path, data: dict) -> None:
         if os.path.exists(tmp_name):
             os.remove(tmp_name)
         raise
+
+
+def read_gui_general(path: Path) -> GeneralConfig:
+    """gui.json の general を読む（無い・読めない・型の違う値は既定値。トレイGUI。段階 12-4b）"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    general = data.get("general") if isinstance(data, dict) else None
+    return GeneralConfig(**gui_settings_from(general)["general"])
+
+
+def save_gui_general(path: Path, general: GeneralConfig) -> None:
+    """gui.json の general を書き換える（一時ファイルに書いてから置き換える）"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"schema_version": GUI_SCHEMA_VERSION, "general": asdict(general)}
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".gui_", suffix=".json.tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False, indent=2))
+        os.replace(tmp_name, path)
+    except BaseException:
+        if os.path.exists(tmp_name):
+            os.remove(tmp_name)
+        raise

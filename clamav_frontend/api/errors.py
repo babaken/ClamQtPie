@@ -80,7 +80,11 @@ def _app_error_response(exc: AppError) -> JSONResponse:
     return JSONResponse(error_body(exc.code, exc.message, exc.detail), status_code=status, headers=headers)
 
 
-async def _handle_app_error(_request: Request, exc: AppError) -> JSONResponse:
+async def _handle_app_error(request: Request, exc: AppError) -> JSONResponse:
+    if isinstance(exc, ApiForbiddenError):
+        # 断った要求を残す（トレイGUI のエラーのダイアログの「詳細を見る」で、ログからこのコードを探せるように）
+        logger.warning(f"権限が足りないため断りました: {request.method} {request.url.path}（{exc.detail or exc.message}）",
+                       extra={"error_code": exc.code})
     return _app_error_response(exc)
 
 

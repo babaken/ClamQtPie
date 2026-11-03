@@ -156,13 +156,14 @@ def test_connection_failure_checks_again_next_time():
         def check(self):
             pass
 
+    # ポートを押さえたまま待ち受けない（ほかのテストのサーバーに同じポートを使われないように）
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    client = ClamdClient(ClamdConfig(connection_type="tcp", tcp_host="127.0.0.1", tcp_port=port))
-    client.verifier = Passing()
-    with pytest.raises(ClamdConnectionError):
-        client.ping()
+        client = ClamdClient(ClamdConfig(connection_type="tcp", tcp_host="127.0.0.1", tcp_port=port))
+        client.verifier = Passing()
+        with pytest.raises(ClamdConnectionError):
+            client.ping()
     assert client.verifier.invalidated == 1
 
 

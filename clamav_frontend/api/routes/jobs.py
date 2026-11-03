@@ -33,6 +33,13 @@ KEEPALIVE_SEC = 15.0
 MAX_SUBSCRIBERS = 16
 
 
+class QuarantineBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    path: str = Field(min_length=1, max_length=_MAX_PATH)
+    virus_name: str = Field(min_length=1, max_length=200)
+
+
 class ScanBody(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -40,6 +47,8 @@ class ScanBody(BaseModel):
     targets: list[str] | None = Field(None, max_length=_MAX_TARGETS)
     include_subfolders: bool = True
     apply_exclude: bool = True
+    #: スキャン履歴の実行元。トレイGUI の画面から頼んだものは gui（段階 12-4b。表示の区別だけに使う）
+    source: str = Field("api", pattern="^(api|gui)$")
 
 
 def _ctx(request: Request):
@@ -60,16 +69,30 @@ def check_user_scan(request: Request, body: ScanBody) -> None:
         raise ApiForbiddenError(detail="フルスキャンには管理者の権限が要ります")
     if not body.targets:
         return  # 管理者が決めた場所（scan.quick_targets）か、対象が無い（400）
+    _check_inside_requester(request, body.targets, "利用者のフォルダの外をスキャンするには管理者の権限が要ります")
+
+
+@router.post("/quarantine", status_code=201)
+async def quarantine_file(request: Request, body: QuarantineBody, role: str = Depends(require_user)) -> dict:
+    """検知したファイルを手で隔離する（スキャン画面の「隔離」）。サービスで user のトークンなら、
+    頼んだ利用者のフォルダの中のファイルだけ（12章 R-9 と同じ判断。ほかの利用者のファイルを動かさせない）"""
+    ctx = _ctx(request)
+    if ctx.service_mode and role != ROLE_ADMIN:
+        await run_in_threadpool(_check_inside_requester, request, [body.path],
+                                "利用者のフォルダの外のファイルを隔離するには管理者の権限が要ります")
+    return await _on_main(request, actions.quarantine_file, body.path, body.virus_name)
+
+
+def _check_inside_requester(request: Request, paths: list[str], message: str) -> None:
     ctx = _ctx(request)
     client, server = request.client, request.scope.get("server")
     home = None
     if ctx.requester_home is not None and client is not None and server:
         home = ctx.requester_home((client.host, client.port), (server[0], server[1]))
     if not home:
-        raise ApiForbiddenError(detail="スキャンを頼んだ利用者を確かめられないため、場所を指定したスキャンには管理者の権限が要ります")
-    outside = [t for t in body.targets if not is_inside(t, home)]
-    if outside:
-        raise ApiForbiddenError(detail="利用者のフォルダの外をスキャンするには管理者の権限が要ります")
+        raise ApiForbiddenError(detail="頼んだ利用者を確かめられないため、管理者の権限が要ります")
+    if any(not is_inside(p, home) for p in paths):
+        raise ApiForbiddenError(detail=message)
 
 
 @router.post("/scans", status_code=202)
@@ -79,7 +102,7 @@ async def start_scan(request: Request, body: ScanBody, role: str = Depends(requi
     if _ctx(request).service_mode and role != ROLE_ADMIN:
         await run_in_threadpool(check_user_scan, request, body)
     job = await _on_main(request, actions.start_scan, body.type, body.targets, body.include_subfolders,
-                         body.apply_exclude)
+                         body.apply_exclude, body.source)
     return {"job": job}
 
 

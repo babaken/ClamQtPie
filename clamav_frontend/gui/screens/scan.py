@@ -41,6 +41,7 @@ from gui.error_dialog import show_confirm_dialog, show_error_dialog
 from gui.plain_text import plain, plain_tooltip
 from gui.screens.base import BaseScreen, wrap_layout
 from gui.theme import set_variant
+from gui.time_text import local_time_text
 
 _VIEW_UPDATE_INTERVAL_MS = 200
 
@@ -289,6 +290,8 @@ class ScanScreen(BaseScreen):
         self._view_timer.stop()
         if self._latest_progress is not None:
             scanned, total, current_path = self._latest_progress
+            # トレイGUI では、問題の無いファイルの結果（file_scanned）は届かない。進み具合の件数を使う
+            self._scanned_count = max(self._scanned_count, scanned)
             if total > 0:
                 self.progress_bar.setRange(0, total)
                 self.progress_bar.setValue(scanned)
@@ -296,6 +299,8 @@ class ScanScreen(BaseScreen):
         self.counter_label.setText(_counter_text(self._detected_count, self._error_count, self._scanned_count))
 
     def _on_finished(self, summary: dict) -> None:
+        if isinstance(summary.get("scanned"), int):
+            self._scanned_count = max(self._scanned_count, summary["scanned"])
         self._flush_view()
         self._latest_progress = None
         self.start_button.setEnabled(True)
@@ -320,7 +325,7 @@ class ScanScreen(BaseScreen):
         else:
             label = _STATUS_LABELS.get(status, status)
         # 表示は見える形にする（UTF-8 にできない名前の文字は、Qt の文字列では消えて別のファイルの名前に見えるため）
-        values = [visible_controls(path), label, detail, detected_at]
+        values = [visible_controls(path), label, detail, local_time_text(detected_at)]
         for col, value in enumerate(values):
             item = QTableWidgetItem(value)
             item.setToolTip(plain_tooltip(value))  # 列の幅で切れた内容（検査できなかった理由等）も読めるようにする

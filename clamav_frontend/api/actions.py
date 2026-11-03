@@ -62,6 +62,17 @@ def _state(enabled: bool) -> str:
 
 
 # -- 6.3 隔離 -------------------------------------------------------------------------
+def quarantine_file(ctx: ApiContext, path: str, virus_name: str) -> dict:
+    """スキャン画面の「隔離」（検知したファイルを手で隔離する。段階 12-4b）"""
+    if not os.path.isabs(path) or not os.path.isfile(path):
+        raise ValueError("隔離するファイルは、存在するファイルを絶対パスで指定してください")
+    audit(CATEGORY_QUARANTINE, f"ファイルの隔離を要求しました: {path}（{virus_name}）")
+    row = ctx.quarantine_service.quarantine(path, virus_name)
+    _notify(ctx, CHANGED_QUARANTINE)
+    return {"id": row.id, "original_path": row.original_path, "virus_name": row.virus_name,
+            "sha256": row.sha256, "size": row.size, "detected_at": row.detected_at, "status": "quarantined"}
+
+
 def restore_quarantine(ctx: ApiContext, quarantine_id: int, overwrite: bool) -> None:
     """元の場所にだけ復元する（12章 25。復元先を指定させない）"""
     row = ctx.quarantine_service.get(quarantine_id)
@@ -437,7 +448,7 @@ def _scan_targets(ctx: ApiContext, scan_type: str,
 
 
 def start_scan(ctx: ApiContext, scan_type: str, targets: list[str] | None, include_subfolders: bool,
-               apply_exclude: bool) -> dict:
+               apply_exclude: bool, source: str = "api") -> dict:
     if scan_type not in SCAN_LABELS:
         raise ValueError("スキャンの種類が正しくありません")
     if ctx.scan_dispatcher.is_running:
@@ -447,9 +458,9 @@ def start_scan(ctx: ApiContext, scan_type: str, targets: list[str] | None, inclu
         raise ValueError("スキャンの対象がありません")
     label = SCAN_LABELS[scan_type]
     audit(CATEGORY_SCAN, f"{label}を開始しました: {', '.join(paths)}")
-    ctx.jobs.expect_source("scan", "api")
+    ctx.jobs.expect_source("scan", source)
     ctx.scan_dispatcher.start(paths, include_subfolders=include_subfolders, apply_exclude=apply_exclude,
-                              label=label, skip_dirs=skip_dirs, source="api", scan_type=scan_type)
+                              label=label, skip_dirs=skip_dirs, source=source, scan_type=scan_type)
     _notify(ctx, CHANGED_SCAN_STARTED)
     return ctx.jobs.current("scan")
 

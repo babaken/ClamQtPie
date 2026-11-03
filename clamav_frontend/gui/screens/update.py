@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from gui.error_dialog import show_error_dialog
 from gui.screens.base import BaseScreen
+from gui.time_text import local_time_text
 from gui.theme import set_variant
 from gui.plain_text import plain
 
@@ -120,7 +121,7 @@ class UpdateScreen(BaseScreen):
             result_label = {"success": "成功", "failure": "失敗", "no_change": "最新"}.get(
                 record.result, record.result
             )
-            values = [record.executed_at, result_label, record.before_version, record.after_version]
+            values = [local_time_text(record.executed_at), result_label, record.before_version, record.after_version]
             for col, value in enumerate(values):
                 self.history_table.setItem(row, col, QTableWidgetItem(value))
 
