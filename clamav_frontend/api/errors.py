@@ -95,8 +95,14 @@ async def _handle_validation_error(_request: Request, exc: RequestValidationErro
                         status_code=400)
 
 
-async def _handle_value_error(_request: Request, exc: ValueError) -> JSONResponse:
-    return JSONResponse(error_body(_VALIDATION_CODE, _VALIDATION_MESSAGE, str(exc)), status_code=400)
+async def _handle_value_error(request: Request, exc: ValueError) -> JSONResponse:
+    # ValueError の文はサービスが利用者向けに書いた説明（「監視するフォルダがありません…」など）なので、
+    # それをメッセージにする。トレイGUI のエラーのダイアログはメッセージとコードだけを出すため、detail に
+    # 入れると届かない。断った要求はログにも残す（ダイアログの「詳細を見る」でこのコードを探せるように）
+    message = str(exc).strip() or _VALIDATION_MESSAGE
+    logger.warning(f"リクエストを断りました: {request.method} {request.url.path}（{message}）",
+                   extra={"error_code": _VALIDATION_CODE})
+    return JSONResponse(error_body(_VALIDATION_CODE, message), status_code=400)
 
 
 #: FastAPI・Starlette が自分で返すエラー（存在しないパスなど）の表示用メッセージ

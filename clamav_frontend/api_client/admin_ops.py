@@ -41,6 +41,9 @@ ADMIN_ROUTES: tuple[tuple[str, re.Pattern], ...] = tuple((m, re.compile(f"^{p}$"
     ("DELETE", "/config/smtp-password"),
     ("POST", "/notifications/test-mail"),
     ("DELETE", "/logs"),
+    # WebUI の ON/OFF・ログインの設定（Bearer の admin だけ。段階 12-5c）
+    ("PUT", "/web"),
+    ("PUT", "/web/credentials"),
     # user のトークンでは断られることのあるもの（フルスキャン・自分のフォルダの外・スケジュールのスキャンの中止）
     ("POST", "/scans"),
     ("POST", "/scans/current/cancel"),
@@ -171,6 +174,35 @@ def _config_changes(old: dict, new: dict, prefix: str = "") -> list[str]:
     return changes
 
 
+def _minutes_text(minutes: int) -> str:
+    days, rest = divmod(minutes, 24 * 60)
+    hours, mins = divmod(rest, 60)
+    parts = [f"{days} 日" if days else "", f"{hours} 時間" if hours else "", f"{mins} 分" if mins else ""]
+    return " ".join(p for p in parts if p) or "0 分"
+
+
+def _web_timer_text(body: dict) -> str:
+    from core.duration_text import local_time_text
+
+    if "off_at" in body and body["off_at"]:
+        return f"{local_time_text(str(body['off_at'])) or _short(body['off_at'])} に自動で OFF にします"
+    minutes = body.get("off_after_min")
+    if isinstance(minutes, int) and not isinstance(minutes, bool):
+        return f"{_minutes_text(minutes)}後に自動で OFF にします"
+    return "自動では OFF にしません（OFF にするまで使えます）"
+
+
+def _describe_web(body: dict) -> list[str]:
+    timer = "off_at" in body or "off_after_min" in body
+    if body.get("enabled") is True:
+        return ["WebUI を ON にします（このPC のブラウザから使えるようにします）", f"  {_web_timer_text(body)}"]
+    if body.get("enabled") is False:
+        return ["WebUI を OFF にします（ログイン中の WebUI はすべてログアウトします）"]
+    if timer:
+        return [f"WebUI を OFF にする時刻を変えます: {_web_timer_text(body)}"]
+    return ["WebUI の設定を変えます"]
+
+
 def describe(op: Operation, lookup: Lookup | None = None) -> list[str]:
     """確認画面に出す説明（1 行目が操作、2 行目以降は細目）"""
     lookup = lookup or Lookup()
@@ -227,6 +259,12 @@ def describe(op: Operation, lookup: Lookup | None = None) -> list[str]:
         return ["テストメールを送ります"]
     if (m, p) == ("DELETE", "/logs"):
         return ["ログを消去します（元に戻せません）"]
+    if (m, p) == ("PUT", "/web"):
+        return _describe_web(body)
+    if (m, p) == ("PUT", "/web/credentials"):
+        # パスワードは確認画面に出さない
+        return [f"WebUI のログインを設定します（ユーザー名: {_short(body.get('username', ''))}）",
+                "  ログイン中の WebUI はすべてログアウトします"]
     if (m, p) == ("POST", "/scans"):
         kind = _SCAN_TYPES.get(body.get("type"), "スキャン")
         targets = body.get("targets") or []

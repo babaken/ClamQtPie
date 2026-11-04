@@ -41,9 +41,11 @@ from core.version import APP_NAME  # noqa: E402
 from gui.error_dialog import set_default_detail_handler, show_confirm_dialog  # noqa: E402
 from gui.main_window import MainWindow  # noqa: E402
 from gui.notification_dialog import NotificationListDialog  # noqa: E402
+from gui.screens.realtime import show_no_target_warning  # noqa: E402
 from gui.theme import apply_theme  # noqa: E402
 from gui.tray import TrayIcon, TrayIconState  # noqa: E402
 from gui.tray_notifications import DesktopToaster, TrayNotifier  # noqa: E402
+from gui.webui_menu import WebUiMenu  # noqa: E402
 
 import logging  # noqa: E402
 
@@ -104,6 +106,7 @@ class TrayApp:
         self.proxies: ServiceProxies | None = None
         self.notifier: TrayNotifier | None = None
         self._notification_dialog: NotificationListDialog | None = None
+        self.webui: WebUiMenu | None = None
         self._activation: ActivationWatcher | None = None
         #: サービスにつながらないときのエラーコード（つながっている間は None）
         self._down_code: str | None = None
@@ -285,6 +288,9 @@ class TrayApp:
                         self.tray_icon.set_state(TrayIconState.MONITORING, True)
                         return
                     p.realtime.stop()
+                elif not p.watch_targets.list_enabled_paths():
+                    # 先に案内する（サービスに送ると、昇格の認証と確認画面を通った後で断られる）
+                    show_no_target_warning(window)
                 else:
                     p.realtime.start()
             except AppError as exc:
@@ -364,6 +370,9 @@ class TrayApp:
         self.tray_icon.notifications_action.setVisible(True)
         self.tray_icon.notifications_action.triggered.connect(self.show_notifications)
         self.notifier.pending_changed.connect(self._on_pending_changed)
+        # WebUI の ON/OFF・ログインの設定（admin の操作は昇格ヘルパーを通す。段階 12-5c）
+        self.webui = WebUiMenu(self.tray_icon.webui_menu, p.api, lambda: window)
+        self.tray_icon.webui_menu.menuAction().setVisible(True)
 
         self._status_timer.timeout.connect(home_screen.refresh_status)
         self._status_timer.start(_STATUS_INTERVAL_MS)

@@ -172,6 +172,18 @@ def test_off_at_must_be_in_the_future_and_within_a_year():
             duration_text.check_off_at(value, now)
 
 
+def test_until_accepts_a_time_of_day():
+    # 時刻だけなら今日のその時刻、過ぎていれば明日（clamqtpie-ctl web timer --until 23:00）
+    now = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
+    later = datetime.fromisoformat(duration_text.parse_until("23:00", now)).astimezone()
+    assert (later.date(), later.hour, later.minute) == (now.date(), 23, 0)
+    earlier = datetime.fromisoformat(duration_text.parse_until("9:30", now)).astimezone()
+    assert earlier - now == timedelta(hours=21, minutes=30)
+    for value in ("24:00", "12:60", "12"):
+        with pytest.raises(ValueError):
+            duration_text.parse_until(value, now)
+
+
 # -- 設定 ----------------------------------------------------------------------------------------------
 def test_webui_cannot_stay_on_without_a_password():
     model = ConfigModel()

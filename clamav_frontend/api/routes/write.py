@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from api import actions
 from api.auth import require_admin
 from api.routes.read import exclude_item
-from core.diagnostics_service import mask_report
+from core.diagnostics_service import masked_report_text
 from core.exceptions import ApiConflictError, AppError
 from core.logger import CATEGORY_SYSTEM
 
@@ -108,7 +108,7 @@ async def stop_clamd(request: Request) -> Response:
 async def run_diagnostics(request: Request) -> dict:
     report = await run_in_threadpool(_ctx(request).diagnostics_service.run)
     # 問い合わせ等に貼る前提の、伏せ字にした版を返す（ホームフォルダ・ユーザー名・ソケットのパスなど）
-    return {"has_problem": report.has_problem, "report": mask_report(report.to_text(), extra=report.sensitive)}
+    return {"has_problem": report.has_problem, "report": masked_report_text(report.to_text(), report.sensitive)}
 
 
 # -- 6.3 隔離 ---------------------------------------------------------------------------

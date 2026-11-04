@@ -325,12 +325,17 @@ class RealtimeScreen(BaseScreen):
             return
 
         if checked:
+            if not self._watch_target_service.list_enabled_paths():
+                # 先に案内する（サービスに送ると、昇格の認証と確認画面を通った後で断られる）
+                self.toggle_button.setChecked(False)
+                show_no_target_warning(self)
+                return
             started = self._realtime_manager.start()
             if not started:
                 self.toggle_button.setChecked(False)
                 # clamonacc方式では対象があっても起動失敗し得る（その場合はscan_errorで別途表示済み）
                 if not self._watch_target_service.list_enabled_paths():
-                    _show_no_target_warning(self)
+                    show_no_target_warning(self)
                 return
             self.toggle_button.setText("監視を停止する")
         else:
@@ -460,11 +465,11 @@ def _ask_add_target_now(parent) -> bool:
     return box.clickedButton() is add_button
 
 
-def _show_no_target_warning(parent) -> None:
+def show_no_target_warning(parent) -> None:
     from PySide6.QtWidgets import QMessageBox
 
     QMessageBox.warning(
         parent,
         "監視を開始できません",
-        "監視対象が設定されていません。「追加」から監視対象フォルダを設定してください。",
+        "監視するフォルダがありません。先に「追加」から監視するフォルダを追加してください。",
     )

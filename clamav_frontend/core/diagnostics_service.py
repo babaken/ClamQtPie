@@ -104,6 +104,19 @@ class DiagnosticsReport:
         return "\n".join(lines) + "\n"
 
 
+#: 伏せ字の版の先頭に添える、伏せたもの・伏せていないものの説明（読み手に基準が分かるように。段階 12-5c）
+MASK_NOTE = (
+    "（伏せ字の版: ホームフォルダ・ユーザー名・コンピューター名、アプリのフォルダ、clamd のソケット・ホスト、"
+    "設定ファイル（clamd.conf・freshclam.conf）と clamonacc の場所を伏せています。"
+    "ClamAV の実行ファイルと定義のフォルダは、多くの環境で同じ場所のため伏せていません）"
+)
+
+
+def masked_report_text(text: str, sensitive: dict[str, str] | None = None) -> str:
+    """問い合わせ等に貼る版（説明＋伏せ字にしたレポート）"""
+    return f"{MASK_NOTE}\n\n{mask_report(text, extra=sensitive)}"
+
+
 def mask_report(
     text: str,
     home: str | None = None,

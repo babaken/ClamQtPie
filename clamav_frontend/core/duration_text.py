@@ -4,7 +4,7 @@ WebUI を自動で OFF にするまでの長さ・日時の読み取り（サー
 - 長さは数字＋単位（m 分、h 時間、d 日、w 週、y 年＝365 日）。組み合わせてよい（30m、23h、2d、1d12h、1y）。
   大文字・小文字は区別しない
 - 範囲は 1 分〜366 日（527040 分）。範囲外・書き方の誤りは ValueError
-- 日時（--until）はローカル時刻として読み、過去と 366 日より先は ValueError
+- 日時（--until）はローカル時刻として読み、過去と 366 日より先は ValueError。時刻だけ（23:00）なら今日（過ぎていれば明日）
 """
 from __future__ import annotations
 
@@ -39,12 +39,27 @@ def off_at_after(minutes: int, now: datetime | None = None) -> str:
     return (now + timedelta(minutes=check_off_minutes(minutes))).isoformat(timespec="seconds")
 
 
+_TIME_ONLY = re.compile(r"^(\d{1,2}):(\d{2})$")
+
+
 def parse_until(text: str, now: datetime | None = None) -> str:
-    """日時（タイムゾーンが無ければローカル時刻）を UTC の ISO 8601 にする"""
+    """日時（タイムゾーンが無ければローカル時刻）を UTC の ISO 8601 にする。時刻だけ（23:00）なら、今日の
+    その時刻（過ぎていれば明日）とする"""
+    value = (text or "").strip()
+    found = _TIME_ONLY.match(value)
+    if found:
+        hour, minute = int(found.group(1)), int(found.group(2))
+        if hour > 23 or minute > 59:
+            raise ValueError(f"時刻の書き方が正しくありません（例: 23:00）: {text}")
+        local_now = (now or datetime.now(timezone.utc)).astimezone()
+        moment = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if moment <= local_now:
+            moment += timedelta(days=1)
+        return check_off_at(moment.astimezone(timezone.utc).isoformat(timespec="seconds"), now)
     try:
-        moment = datetime.fromisoformat((text or "").strip())
+        moment = datetime.fromisoformat(value)
     except ValueError:
-        raise ValueError(f"日時の書き方が正しくありません（例: 2026-11-01T18:00）: {text}") from None
+        raise ValueError(f"日時の書き方が正しくありません（例: 23:00、2026-11-01T18:00）: {text}") from None
     if moment.tzinfo is None:
         moment = moment.astimezone()  # ローカル時刻として読む
     return check_off_at(moment.astimezone(timezone.utc).isoformat(timespec="seconds"), now)

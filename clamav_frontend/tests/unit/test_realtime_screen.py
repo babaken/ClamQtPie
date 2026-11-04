@@ -54,11 +54,11 @@ def test_bind_services_loads_targets_and_excludes(qtbot):
     assert screen.action_quarantine_radio.isChecked() is True
 
 
-def test_toggle_start_failure_shows_warning_and_unchecks(qtbot, monkeypatch):
+def test_toggle_without_targets_guides_before_starting(qtbot, monkeypatch):
+    # 監視するフォルダが無ければ、開始を送る前に案内する（サービス経由では昇格の認証の後で断られるため）
     screen = _make_screen(qtbot)
     manager = MagicMock()
     manager.config.default_action = "quarantine"
-    manager.start.return_value = False  # 監視対象0件を想定
     watch_target_service = MagicMock()
     watch_target_service.list_all.return_value = []
     watch_target_service.list_enabled_paths.return_value = []
@@ -69,17 +69,17 @@ def test_toggle_start_failure_shows_warning_and_unchecks(qtbot, monkeypatch):
     warned = []
     import gui.screens.realtime as realtime_module
 
-    monkeypatch.setattr(realtime_module, "_show_no_target_warning", lambda *a: warned.append(True))
+    monkeypatch.setattr(realtime_module, "show_no_target_warning", lambda *a: warned.append(True))
 
     screen.toggle_button.setChecked(True)
     screen._on_toggle_clicked(True)
 
-    manager.start.assert_called_once()
+    manager.start.assert_not_called()
     assert warned == [True]
     assert screen.toggle_button.isChecked() is False
 
 
-def test_toggle_start_failure_with_targets_does_not_show_no_target_warning(qtbot, monkeypatch):
+def test_toggle_start_failure_with_targets_does_notshow_no_target_warning(qtbot, monkeypatch):
     # clamonacc方式の起動失敗（認証キャンセル等）は監視対象があっても起こる。
     # その場合のエラーはscan_errorで表示されるため「監視対象なし」警告は出さない
     screen = _make_screen(qtbot)
@@ -96,7 +96,7 @@ def test_toggle_start_failure_with_targets_does_not_show_no_target_warning(qtbot
     warned = []
     import gui.screens.realtime as realtime_module
 
-    monkeypatch.setattr(realtime_module, "_show_no_target_warning", lambda *a: warned.append(True))
+    monkeypatch.setattr(realtime_module, "show_no_target_warning", lambda *a: warned.append(True))
 
     screen.toggle_button.setChecked(True)
     screen._on_toggle_clicked(True)

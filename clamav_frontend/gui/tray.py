@@ -2,7 +2,7 @@
 TrayIcon — タスクトレイ常駐アイコン・メニュー
 
 参照: タスクトレイ常駐アプリプロセス設計書5章、画面設計書9章
-- メニュー: メイン画面を開く／今すぐスキャン／定義更新／リアルタイム監視ON-OFF／終了
+- メニュー: メイン画面を開く／今すぐスキャン／定義更新／リアルタイム監視ON-OFF／未読の通知／WebUI／終了
 - アイコン状態: 通常／監視中／検知あり(未対応)／エラー（優先順位: エラー > 検知あり > 監視中 > 通常）
 """
 from __future__ import annotations
@@ -66,6 +66,9 @@ class TrayIcon(QSystemTrayIcon):
         # 未読の通知の一覧（トレイGUI だけ。サービスが保存した通知。段階 12-4b）
         self.notifications_action = QAction("未読の通知", self._menu)
         self.notifications_action.setVisible(False)
+        # WebUI の ON/OFF・ログインの設定（サービスにつながってから中身を作る。段階 12-5c。gui/webui_menu.py）
+        self.webui_menu = QMenu("WebUI", self._menu)
+        self.webui_menu.menuAction().setVisible(False)
         self.quit_action = QAction("終了", self._menu)
 
         self._menu.addAction(self.open_action)
@@ -73,6 +76,7 @@ class TrayIcon(QSystemTrayIcon):
         self._menu.addAction(self.update_now_action)
         self._menu.addAction(self.toggle_realtime_action)
         self._menu.addAction(self.notifications_action)
+        self._menu.addMenu(self.webui_menu)
         self._menu.addSeparator()
         self._menu.addAction(self.quit_action)
         self.setContextMenu(self._menu)

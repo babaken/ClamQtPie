@@ -153,7 +153,8 @@ def set_realtime(ctx: ApiContext, enabled: bool) -> bool:
     if enabled:
         if not manager.is_running and not manager.start():
             if not ctx.watch_target_service.list_enabled_paths():
-                raise ValueError("有効な監視対象がありません")
+                # 新しく導入した直後はこの状態から始まるため、次に何をすればよいかを書く
+                raise ValueError("監視するフォルダがありません。先に監視するフォルダを追加してください")
             raise RealtimeError(detail="リアルタイム監視を開始できませんでした")
     elif manager.is_running:
         manager.stop()
