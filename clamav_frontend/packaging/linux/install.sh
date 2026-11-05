@@ -82,6 +82,9 @@ install -d -m 755 /usr/local/bin
 ln -sfn "$DEST/clamqtpie-ctl" /usr/local/bin/clamqtpie-ctl
 
 systemctl daemon-reload
+# 起動の回数の上限（StartLimitBurst=3／1 日。落ち続けるときの再起動を抑えるもの）は、手での開始・導入も数える。
+# 導入は管理者が意図して行う操作なので、数え直してから開始する（同じ日の更新のやり直しで起動を断られないように）
+systemctl reset-failed clamqtpie.service 2>/dev/null || true
 systemctl enable --now clamqtpie.service
 echo "== 導入しました =="
 systemctl --no-pager --lines=0 status clamqtpie.service || true

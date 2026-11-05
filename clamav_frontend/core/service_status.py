@@ -38,3 +38,28 @@ def service_running(system: str | None = None, run=subprocess.run) -> bool:
         return result.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+#: systemd が起動の回数の上限で開始を断っているときの Result
+START_LIMIT_HIT = "start-limit-hit"
+
+
+def service_stop_reason(system: str | None = None, run=subprocess.run) -> str | None:
+    """Linux: サービスが失敗で止まっていれば systemd の Result（例: start-limit-hit）。それ以外・Windows は None
+    （Windows の回復動作は自動の再起動にだけ効き、手での開始は断られない）"""
+    system = system or platform.system()
+    if system == "Windows":
+        return None
+    systemctl = find_system_tool("systemctl", system)
+    if systemctl is None:
+        return None
+    try:
+        result = run([systemctl, "show", SYSTEMD_UNIT, "-p", "ActiveState", "-p", "Result"], capture_output=True,
+                     timeout=5, env=child_env(None, system))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = result.stdout.decode("utf-8", "replace") if isinstance(result.stdout, bytes) else (result.stdout or "")
+    values = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+    if values.get("ActiveState") != "failed":
+        return None
+    return values.get("Result") or None

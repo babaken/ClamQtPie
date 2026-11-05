@@ -31,6 +31,7 @@ h2 { font-size: 20px; margin: 0 0 12px; }
 h3 { font-size: 15px; margin: 0 0 10px; }
 code { background: var(--card-alt); padding: 1px 4px; border-radius: 3px; }
 .muted { color: var(--muted); }
+p.small { font-size: 12px; margin: 2px 0 8px; }
 .error { color: var(--ng); min-height: 1.2em; }
 .ok { color: var(--ok); }
 .warn { color: var(--warn); }

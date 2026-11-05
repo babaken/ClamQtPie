@@ -12,6 +12,8 @@ GUI のない環境でも、サービスの状態の確認と、Web API から�
     clamqtpie-ctl migrate --from DIR [--yes] [--restart]
     clamqtpie-ctl web status | enable [--for D | --until T] | timer (D | --until T | clear) | disable
     clamqtpie-ctl web set-login [--username NAME] [--generate | --password-stdin] | hash-password
+    clamqtpie-ctl web totp setup | status | reset [--yes]
+    clamqtpie-ctl web unlock
 
 - config set は、変更の前後の値を表示して確認を求める（--yes で省略）。サービスが動いている間は変えない
   （サービスが保存するときに上書きされるため）。--restart を付けると、サービスを止めて変え、また開始する
@@ -23,6 +25,10 @@ GUI のない環境でも、サービスの状態の確認と、Web API から�
 - web は WebUI の ON/OFF・自動で OFF にする時刻・ログインの設定（3.4節。段階 12-5a）。サービスが動いていれば
   admin のトークンで PUT /web・PUT /web/credentials を送り（セッションの破棄などをサービスに行わせる）、止まっていれば
   設定ファイルを直接変える。パスワードはコマンドラインの引数では受け取らない（ps・シェルの履歴から見えるため）
+- web totp は二段階認証の設定・状態・解除（段階 12-5d）。setup は秘密鍵を作って端末に QR コードと秘密鍵を表示し、
+  認証アプリのコードを入れてもらってから、秘密鍵とコードを一緒にサービスへ送る（止まっていれば設定を直接変える）。
+  予備のコードは端末にだけ 1 回表示する。reset はスマートフォンをなくしたときなどに解除する
+- web unlock は、確認コードの間違いが続いて止めた WebUI のログインを解く（web set-login でパスワードを変えても解ける）
 """
 from __future__ import annotations
 
@@ -47,7 +53,13 @@ from core.exec_path import child_env, find_system_tool, validate_executable, val
 from core.secret_store import FileSecretStore  # noqa: E402
 from core.service_endpoint import read_endpoint, verify_service_listener  # noqa: E402
 from core.service_paths import ServicePaths, UnsafeDataDirectoryError, prepare_directories  # noqa: E402
-from core.service_status import SYSTEMD_UNIT, WINDOWS_SERVICE_NAME, service_running  # noqa: E402
+from core.service_status import (  # noqa: E402
+    START_LIMIT_HIT,
+    SYSTEMD_UNIT,
+    WINDOWS_SERVICE_NAME,
+    service_running,
+    service_stop_reason,
+)
 from core.version import APP_NAME, APP_VERSION  # noqa: E402
 
 EXIT_OK = 0
@@ -67,6 +79,10 @@ _WEB_COMMAND_FIELDS = {
     "api.web_username": "web set-login --username",
     "api.web_password_hash": "web set-login",
     "api.web_password_length": "web set-login",
+    "api.web_totp_enabled": "web totp setup / web totp reset",
+    "api.web_totp_last_step": "web totp setup",
+    "api.web_recovery_code_hashes": "web totp setup",
+    "api.web_totp_failures": "web unlock",
 }
 
 
@@ -92,6 +108,11 @@ def cmd_status(paths: ServicePaths, out) -> int:
     running = service_running()
     print(f"{APP_NAME} {APP_VERSION}", file=out)
     print(f"サービス: {'動いています' if running else '止まっています'}", file=out)
+    if not running and service_stop_reason() == START_LIMIT_HIT:
+        # 短い間に何度も落ちたため、systemd が起動の回数の上限で止めている。原因を確かめてから数え直して開始する
+        print("  落ち続けたため、起動の回数の上限で止めています。原因はログ（journalctl -u clamqtpie・"
+              "/var/log/clamqtpie/）で確かめ、直してから次を実行してください:", file=out)
+        print("  sudo systemctl reset-failed clamqtpie && sudo systemctl start clamqtpie", file=out)
     # サービスが待ち受けたポート（endpoint.json）。無ければ設定の値
     port = read_endpoint(paths.api_dir) or config.api.port
     print(f"内部 API: 127.0.0.1:{port}", file=out)
@@ -142,6 +163,9 @@ def cmd_config_show(paths: ServicePaths, out) -> int:
         api_section["web_password_hash"] = "（設定済み）"
     if api_section.get("web_password_length"):
         api_section["web_password_length"] = "（伏せています）"
+    hashes = api_section.get("web_recovery_code_hashes")
+    if hashes:
+        api_section["web_recovery_code_hashes"] = f"（{len(hashes)} 個。伏せています）"
     print(json.dumps(data, ensure_ascii=False, indent=2), file=out)
     return EXIT_OK
 
@@ -527,10 +551,24 @@ def _web_update(paths: ServicePaths, body: dict, out) -> dict:
     return _web_status_offline(config.api)
 
 
+def _login_stopped(api_config) -> bool:
+    from api.web_control import login_stopped
+
+    return login_stopped(api_config)
+
+
+_STOPPED_TEXT = ("止めています（パスワードは合っていて確認コードだけが違うログインが続いたため。パスワードが漏れている"
+                 "おそれがあります。web set-login でパスワードを変えるか、web unlock で解けます。予備のコードなら"
+                 "ログインできます）")
+
+
 def _web_status_offline(api_config) -> dict:
     return {"enabled": api_config.web_enabled, "running": False, "lan": False,
             "urls": [f"http://127.0.0.1:{api_config.web_port}/web/login"], "username": api_config.web_username,
-            "password_set": bool(api_config.web_password_hash), "totp_set": False, "tls": "off",
+            "password_set": bool(api_config.web_password_hash), "totp_set": bool(api_config.web_totp_enabled),
+            "recovery_codes_left": len(api_config.web_recovery_code_hashes) if api_config.web_totp_enabled else 0,
+            "login_stopped": _login_stopped(api_config),
+            "tls": "off",
             "off_at": api_config.web_off_at or None, "session_timeout_min": api_config.session_timeout_min}
 
 
@@ -549,7 +587,12 @@ def _print_web_status(status: dict, out) -> None:
     print(f"ユーザー名: {status.get('username')}", file=out)
     print(f"パスワード: {'設定済み' if status.get('password_set') else '未設定（web set-login で設定してください）'}",
           file=out)
-    print(f"二段階認証: {'設定済み' if status.get('totp_set') else '未設定'}", file=out)
+    if status.get("totp_set"):
+        print(f"二段階認証: 設定済み（予備のコードの残り: {status.get('recovery_codes_left', 0)} 個）", file=out)
+    else:
+        print("二段階認証: 未設定（web totp setup で設定できます）", file=out)
+    if status.get("login_stopped"):
+        print(f"ログイン: {_STOPPED_TEXT}", file=out)
     print(f"HTTPS: {'無効' if status.get('tls', 'off') == 'off' else status.get('tls')}", file=out)
     print(f"LAN からの接続: {'許可' if status.get('lan') else '許可しない（このPC のブラウザだけ）'}", file=out)
 
@@ -571,13 +614,110 @@ def _read_new_password(generate: bool, from_stdin: bool, out, ask_password, read
     return password
 
 
-def cmd_web(paths: ServicePaths, args, out, ask_password=getpass.getpass, read_line=None) -> int:
+def _print_qr(uri: str, out) -> None:
+    """端末に QR コードを表示する（表示できない文字コードの端末では、秘密鍵の手入力だけを案内する）"""
+    from core.totp import qr_text
+
+    text = qr_text(uri)
+    encoding = getattr(out, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        print("（この端末では QR コードを表示できません。下の秘密鍵を認証アプリに手で入れてください）", file=out)
+        return
+    print(text, file=out)
+
+
+def cmd_web_totp(paths: ServicePaths, args, out, ask=input) -> int:
+    from api.web_control import disable_totp, enable_totp
+    from core import totp
+    from core.exceptions import ConfigValidationError
+
+    action = args.totp_action
+    config = _config_service(paths).load().api
+    if action == "status":
+        api = _web_api(paths)
+        status = _web_call(api, "GET", "/web") if api is not None else _web_status_offline(config)
+        if status.get("totp_set"):
+            print(f"二段階認証: 設定済み（予備のコードの残り: {status.get('recovery_codes_left', 0)} 個）", file=out)
+        else:
+            print("二段階認証: 未設定", file=out)
+        return EXIT_OK
+    if action == "reset":
+        if not config.web_totp_enabled:
+            print("二段階認証は設定されていません", file=out)
+            return EXIT_OK
+        if not args.yes and ask("二段階認証を解除します。ログイン中の WebUI はすべてログアウトします。"
+                                "よろしいですか [y/N]: ").strip().lower() != "y":
+            print("取り消しました", file=out)
+            return EXIT_ERROR
+        api = _web_api(paths)
+        if api is not None:
+            _web_call(api, "DELETE", "/web/totp")
+        else:
+            disable_totp(_config_service(paths))
+            _audit(paths, "clamqtpie-ctl: WebUI の二段階認証を解除しました")
+            print("サービスは止まっています。設定ファイルを変えました（次の開始から使われます）", file=out)
+        print("WebUI の二段階認証を解除しました", file=out)
+        return EXIT_OK
+    if action == "setup":
+        if config.web_totp_enabled and ask(
+                "二段階認証は設定済みです。設定し直すと、今の認証アプリの登録と予備のコードは使えなくなります。"
+                "続けますか [y/N]: ").strip().lower() != "y":
+            print("取り消しました", file=out)
+            return EXIT_ERROR
+        secret = totp.generate_secret()
+        uri = totp.otpauth_uri(secret, totp.machine_name())
+        print("スマートフォンの認証アプリ（Google Authenticator・Microsoft Authenticator など）で、次の QR コードを"
+              "読み取ってください。", file=out)
+        _print_qr(uri, out)
+        print(f"手で入れるときの秘密鍵: {' '.join(secret[i:i + 4] for i in range(0, len(secret), 4))}", file=out)
+        code = ask("認証アプリに表示された 6 桁のコード: ").strip()
+        api = _web_api(paths)
+        if api is not None:
+            codes = _web_call(api, "POST", "/web/totp", {"secret": secret, "code": code})["recovery_codes"]
+        else:
+            try:
+                codes = enable_totp(_config_service(paths), secret, code)
+            except ConfigValidationError as exc:
+                raise CtlError(exc.message) from None
+            _audit(paths, "clamqtpie-ctl: WebUI の二段階認証を設定しました")
+            print("サービスは止まっています。設定ファイルを変えました（次の開始から使われます）", file=out)
+        print("WebUI の二段階認証を設定しました。", file=out)
+        # 予備のコードは端末にだけ 1 回表示する（ログには残さない）
+        print("予備のコード（スマートフォンをなくしたときに、確認コードの代わりに 1 個ずつ使えます。"
+              "この画面にだけ表示します。控えてください）:", file=out)
+        for item in codes:
+            print(f"  {item}", file=out)
+        return EXIT_OK
+    return EXIT_ERROR
+
+
+def _web_unlock(paths: ServicePaths, out) -> int:
+    api = _web_api(paths)
+    if api is not None:
+        was_stopped = _web_call(api, "GET", "/web").get("login_stopped")
+        _web_call(api, "POST", "/web/unlock")
+    else:
+        from api.web_control import unlock_login
+
+        was_stopped = unlock_login(_config_service(paths))
+        _audit(paths, "clamqtpie-ctl: WebUI のログインの停止を解きました")
+        print("サービスは止まっています。設定ファイルを変えました（次の開始から使われます）", file=out)
+    print("WebUI のログインの停止を解きました" if was_stopped
+          else "WebUI のログインは止めていません（確認コードの間違いの回数を 0 に戻しました）", file=out)
+    return EXIT_OK
+
+
+def cmd_web(paths: ServicePaths, args, out, ask_password=getpass.getpass, read_line=None, ask=input) -> int:
     from core.duration_text import parse_duration_minutes, parse_until
 
     if read_line is None:
         # --password-stdin でも、端末で手入力するときは、入力した文字を画面に出さない
         read_line = (lambda: ask_password("新しいパスワード: ")) if sys.stdin.isatty() else sys.stdin.readline
     action = args.web_action
+    if action == "totp":
+        return cmd_web_totp(paths, args, out, ask)
     try:
         if action == "status":
             api = _web_api(paths)
@@ -611,6 +751,8 @@ def cmd_web(paths: ServicePaths, args, out, ask_password=getpass.getpass, read_l
         if action == "disable":
             _print_web_status(_web_update(paths, {"enabled": False}, out), out)
             return EXIT_OK
+        if action == "unlock":
+            return _web_unlock(paths, out)
     except ValueError as exc:
         raise CtlError(str(exc)) from None
 
@@ -693,6 +835,13 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--password-stdin", action="store_true", help="パスワードを標準入力から 1 行読む")
     hashing = web.add_parser("hash-password", help="パスワードの保存形式のハッシュだけを出力する（設定は変えない）")
     hashing.add_argument("--password-stdin", action="store_true", help="パスワードを標準入力から 1 行読む")
+    web.add_parser("unlock", help="確認コードの間違いが続いて止めた WebUI のログインを解く")
+    totp_parser = web.add_parser("totp", help="二段階認証（認証アプリの確認コード）の設定・状態・解除")
+    totp_actions = totp_parser.add_subparsers(dest="totp_action", required=True)
+    totp_actions.add_parser("setup", help="二段階認証を設定する（QR コードを表示し、コードを入れて確かめる）")
+    totp_actions.add_parser("status", help="二段階認証の状態を表示する")
+    reset = totp_actions.add_parser("reset", help="二段階認証を解除する（スマートフォンをなくしたときなど）")
+    reset.add_argument("--yes", action="store_true", help="確認を省く")
     return parser
 
 
@@ -721,7 +870,7 @@ def main(argv: list[str] | None = None, out=sys.stdout, ask=input, ask_password=
         if args.command == "migrate":
             return cmd_migrate(paths, args.source, args.yes, args.restart, not args.data_dir, out, ask, ask_password)
         if args.command == "web":
-            return cmd_web(paths, args, out, ask_password)
+            return cmd_web(paths, args, out, ask_password, ask=ask)
     except CtlError as exc:
         print(f"エラー: {exc}", file=sys.stderr)
         return EXIT_ERROR

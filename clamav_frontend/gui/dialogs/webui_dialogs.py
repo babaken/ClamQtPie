@@ -4,6 +4,8 @@
 - WebUiTimerDialog: OFF にする時刻を、長さ（90m・8h・2d など）か日時で決める
 - WebUiLoginDialog: ログインのユーザー名・パスワード（自動で作ることもできる）
 - GeneratedPasswordDialog: 自動で作ったパスワードを 1 回だけ見せる（コピーできる）
+- TotpSetupDialog: 二段階認証の QR コード・秘密鍵を見せ、認証アプリのコードを入れてもらう（段階 12-5d）
+- RecoveryCodesDialog: 予備のコードを 1 回だけ見せる（コピーできる）
 
 入力の検査はサービスと同じ関数（core/duration_text.py・core/web_password.py）で行い、通らなければダイアログを
 閉じずに赤字で知らせる。
@@ -12,7 +14,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from PySide6.QtCore import QDateTime
+from PySide6.QtCore import QDateTime, Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -23,12 +26,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QRadioButton,
     QVBoxLayout,
 )
 
-from core import duration_text, web_password
+from core import duration_text, totp, web_password
 from core.version import APP_NAME
 
 _ERROR_STYLE = "color: #e5484d;"
@@ -186,6 +190,84 @@ class GeneratedPasswordDialog(QDialog):
         copy_button = QPushButton("コピー")
         copy_button.clicked.connect(lambda: QApplication.clipboard().setText(password))
         row.addWidget(copy_button)
+        layout.addLayout(row)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText("閉じる")
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
+class TotpSetupDialog(QDialog):
+    """二段階認証の設定。秘密鍵はこのダイアログで作り、code() と一緒に POST /web/totp へ送る"""
+
+    def __init__(self, parent=None, account: str | None = None, secret: str | None = None,
+                 error: str | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"{APP_NAME}: WebUI の二段階認証")
+        self.secret = secret or totp.generate_secret()
+        layout = QVBoxLayout(self)
+        intro = QLabel("スマートフォンの認証アプリ（Google Authenticator・Microsoft Authenticator など）で、"
+                       "次の QR コードを読み取ってください。設定すると、WebUI のログインと管理者の操作の前の確認で、"
+                       "認証アプリに表示される 6 桁のコードが要ります。")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        self.qr_label = QLabel()
+        self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pixmap = QPixmap()
+        # 認証アプリに出る名前は、この PC の名前（複数の PC の WebUI を見分けられるように）
+        pixmap.loadFromData(totp.qr_png(totp.otpauth_uri(self.secret, account or totp.machine_name())), "PNG")
+        self.qr_label.setPixmap(pixmap)
+        layout.addWidget(self.qr_label)
+        form = QFormLayout()
+        self.secret_edit = QLineEdit(" ".join(self.secret[i:i + 4] for i in range(0, len(self.secret), 4)))
+        self.secret_edit.setReadOnly(True)
+        form.addRow("手で入れるときの秘密鍵", self.secret_edit)
+        self.code_edit = QLineEdit()
+        self.code_edit.setMaxLength(6)
+        self.code_edit.setPlaceholderText("123456")
+        form.addRow("認証アプリのコード（6 桁）", self.code_edit)
+        layout.addLayout(form)
+        self.error_label = _error_label()
+        if error:
+            # サービスがコードを断ったので開き直した（秘密鍵は同じ。認証アプリに登録し直さなくてよい）
+            self.error_label.setText(error)
+        layout.addWidget(self.error_label)
+        layout.addWidget(_ok_cancel_buttons(self))
+        self._code: str | None = None
+
+    def _try_accept(self) -> None:
+        code = self.code_edit.text().strip()
+        if not totp.looks_like_code(code):
+            self.error_label.setText("認証アプリに表示されている 6 桁の数字を入れてください")
+            return
+        self._code = code
+        self.accept()
+
+    def code(self) -> str | None:
+        return self._code
+
+
+class RecoveryCodesDialog(QDialog):
+    """予備のコードを 1 回だけ見せる"""
+
+    def __init__(self, parent, codes: list[str]) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"{APP_NAME}: 二段階認証の予備のコード")
+        layout = QVBoxLayout(self)
+        label = QLabel("WebUI の二段階認証を設定しました。\n"
+                       "スマートフォンをなくしたときは、確認コードの代わりに次の予備のコードを 1 個ずつ使えます"
+                       "（1 個につき 1 回だけ）。この画面を閉じると、もう表示できません。控えてください。")
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        text = "\n".join(codes)
+        self.codes_edit = QPlainTextEdit(text)
+        self.codes_edit.setReadOnly(True)
+        layout.addWidget(self.codes_edit)
+        row = QHBoxLayout()
+        copy_button = QPushButton("コピー")
+        copy_button.clicked.connect(lambda: QApplication.clipboard().setText(text))
+        row.addWidget(copy_button)
+        row.addStretch(1)
         layout.addLayout(row)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).setText("閉じる")

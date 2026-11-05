@@ -23,6 +23,7 @@ from core.exceptions import ConfigError, ConfigWriteError, KeyringUnavailableErr
 
 #: サービスの秘密の保存先での、SMTP パスワードの名前
 _SMTP_SECRET_NAME = "smtp_password"
+_TOTP_SECRET_NAME = "web_totp_secret"
 
 logger = logging.getLogger("clamav_frontend")
 
@@ -141,3 +142,18 @@ class ConfigService:
     def delete_smtp_password(self) -> None:
         if self._secret_store is not None:
             self._secret_store.delete(_SMTP_SECRET_NAME)
+
+    # -- 二段階認証の秘密鍵（段階 12-5d。設定ファイルには入れない） -----------------
+    def get_totp_secret(self) -> str | None:
+        if self._secret_store is None:
+            return None
+        return self._secret_store.get(_TOTP_SECRET_NAME)
+
+    def set_totp_secret(self, secret: str) -> None:
+        if self._secret_store is None:
+            raise KeyringUnavailableError(detail="二段階認証の秘密鍵の保存先がありません")
+        self._secret_store.set(_TOTP_SECRET_NAME, secret)
+
+    def delete_totp_secret(self) -> None:
+        if self._secret_store is not None:
+            self._secret_store.delete(_TOTP_SECRET_NAME)

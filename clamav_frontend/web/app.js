@@ -19,6 +19,8 @@ const state = {
   updateJob: null,
   config: null,
   realtime: null,
+  totp: false, // 二段階認証を設定しているか（再確認で確認コードを求める）
+  reauthCode: false,
 };
 
 /* -------- 共通 -------- */
@@ -140,10 +142,40 @@ function guarded(fn) {
 
 let reauthResolve = null;
 
+// 二段階認証を設定していれば、パスワードの代わりに確認コードで確かめる（設計書 3.3節）
+function setReauthMode(useCode) {
+  state.reauthCode = useCode;
+  const input = $("reauth-password");
+  $("reauth-intro").textContent = useCode
+    ? "次の操作を行います。続けるには、認証アプリの確認コード（または予備のコード）を入力してください（確認してから 5 分間は省きます）。"
+    : "次の操作を行います。続けるには、パスワードを入力してください（確認してから 5 分間は省きます）。";
+  $("reauth-label").textContent = useCode ? "確認コード" : "WebUI のパスワード";
+  input.type = useCode ? "text" : "password";
+  input.autocomplete = useCode ? "one-time-code" : "current-password";
+  input.inputMode = useCode ? "numeric" : "text";
+}
+
+// 予備のコードを使ったら、その場で残りの数と設定し直す方法を知らせる（見落とさないよう alert で出す）
+const RESETUP_GUIDE = "スマートフォンが使えないときは、トレイの「WebUI」→「二段階認証の設定...」か "
+  + "clamqtpie-ctl web totp setup で設定し直してください（WebUI からは設定し直せません）。";
+
+function recoveryNoticeText(left) {
+  if (left <= 0) {
+    return "予備のコードを使いました。予備のコードがなくなりました。スマートフォンをなくすと、管理者が解除するまで"
+      + `ログインできません。\n\n${RESETUP_GUIDE}`;
+  }
+  return `予備のコードを使いました（残り ${left} 個）。\n\n${RESETUP_GUIDE}`;
+}
+
+function showRecoveryNotice(data) {
+  if (data && data.recovery_used) alert(recoveryNoticeText(Number(data.recovery_codes_left) || 0));
+}
+
 function askReauth(lines) {
   const list = $("reauth-operations");
   list.replaceChildren(...lines.map((line, i) =>
     el("li", { class: i === 0 && lines.length > 1 && line.endsWith(":") ? "heading" : undefined, text: line })));
+  setReauthMode(Boolean(state.totp));
   $("reauth-password").value = "";
   $("reauth-error").textContent = "";
   $("reauth-dialog").showModal();
@@ -155,8 +187,10 @@ function askReauth(lines) {
 
 async function submitReauth(event) {
   event.preventDefault();
+  let reauthData = null;
   try {
-    await api("/auth/reauth", "POST", { password: $("reauth-password").value });
+    const value = $("reauth-password").value;
+    reauthData = await api("/auth/reauth", "POST", state.reauthCode ? { code: value } : { password: value });
   } catch (err) {
     if (err instanceof ApiError && err.code === "E8101") {
       $("reauth-dialog").close();
@@ -169,6 +203,7 @@ async function submitReauth(event) {
     return;
   }
   $("reauth-dialog").close();
+  showRecoveryNotice(reauthData);
   finishReauth(true);
 }
 
@@ -208,6 +243,7 @@ function showLogin(message = "") {
   $("login-view").hidden = false;
   $("login-error").textContent = message;
   $("login-password").value = "";
+  $("login-code").value = "";
   $("login-username").focus();
 }
 
@@ -218,11 +254,14 @@ async function submitLogin(event) {
     const data = await api("/auth/session", "POST", {
       username: $("login-username").value,
       password: $("login-password").value,
+      code: $("login-code").value.trim() || null,
     });
     enterApp(data);
+    showRecoveryNotice(data);
   } catch (err) {
     $("login-error").textContent = errorText(err);
     $("login-password").value = "";
+    $("login-code").value = "";
   }
 }
 
@@ -238,6 +277,7 @@ async function logout() {
 function enterApp(session) {
   state.csrf = session.csrf_token;
   state.username = session.username;
+  state.totp = Boolean(session.totp);
   $("user-name").textContent = session.username;
   showOffBanner(session.off_at);
   $("login-view").hidden = true;

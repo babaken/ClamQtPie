@@ -18,6 +18,9 @@ watchdog>=4.0
 fastapi>=0.115
 uvicorn>=0.30
 
+# 二段階認証の QR コード（段階12-5d。pure Python、依存なし）
+segno>=1.6
+
 # パッケージング
 pyinstaller>=6.3
 

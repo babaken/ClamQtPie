@@ -188,6 +188,15 @@ class ApiConfig:
     web_password_length: int = 0
     #: WebUI を自動で OFF にする日時（UTC の ISO 8601）。空なら期限なし
     web_off_at: str = ""
+    #: 二段階認証（TOTP。段階 12-5d）を設定済みか。秘密鍵は設定ファイルに入れず、秘密の保存先に置く
+    web_totp_enabled: bool = False
+    #: 最後に受け付けたコードのステップ番号（これ以前のコードは受け付けない。使い回しの防止）
+    web_totp_last_step: int = 0
+    #: 予備のコードの scrypt のハッシュ（使ったものは消す）
+    web_recovery_code_hashes: list[str] = field(default_factory=list)
+    #: 「パスワードは合っていて確認コードだけが違う」ログインの回数。core.totp.STOP_FAILURES になったら、パスワードと
+    #: 確認コードでのログインを止める。0 に戻すのは管理者の操作（ログインの停止を解く・パスワードの変更）だけ
+    web_totp_failures: int = 0
     #: WebUI のセッションの有効期限（最後の操作からの分）
     session_timeout_min: int = 30
 
@@ -370,6 +379,29 @@ def _validate_web(api: ApiConfig, warn) -> None:
         if api.web_enabled:
             warn("WebUI のパスワードが未設定のため、WebUI を OFF にします。")
             api.web_enabled = False
+    if not isinstance(api.web_totp_enabled, bool):
+        # 壊れていても二段階認証を外さない（外すのは clamqtpie-ctl web totp reset だけ）
+        warn(f"api.web_totp_enabled が不正な値です ({api.web_totp_enabled!r})。設定済みとして扱います。")
+        api.web_totp_enabled = True
+    step = api.web_totp_last_step
+    if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+        api.web_totp_last_step = 0
+    hashes = api.web_recovery_code_hashes
+    if not isinstance(hashes, list) or not all(isinstance(h, str) and is_valid_hash(h) for h in hashes):
+        warn("api.web_recovery_code_hashes が正しくありません。正しくない予備のコードを除きます。")
+        api.web_recovery_code_hashes = [h for h in (hashes if isinstance(hashes, list) else [])
+                                        if isinstance(h, str) and is_valid_hash(h)][:20]
+    failures = api.web_totp_failures
+    if isinstance(failures, bool) or not isinstance(failures, int) or failures < 0:
+        from core.totp import STOP_FAILURES
+
+        # 壊れていたら止めた側に倒す（管理者が「ログインの停止を解く」で戻せる）
+        warn(f"api.web_totp_failures が不正な値です ({failures!r})。WebUI のログインを止めた状態として扱います。")
+        api.web_totp_failures = STOP_FAILURES
+    if not api.web_totp_enabled:
+        api.web_totp_last_step = 0
+        api.web_recovery_code_hashes = []
+        api.web_totp_failures = 0
     if not isinstance(api.web_off_at, str) or (api.web_off_at and parse_off_at(api.web_off_at) is None):
         warn(f"api.web_off_at が不正な値です ({api.web_off_at!r})。期限なしにします。")
         api.web_off_at = ""

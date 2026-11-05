@@ -16,6 +16,11 @@
       <input id="login-username" name="username" autocomplete="username" required maxlength="32">
       <label for="login-password">パスワード</label>
       <input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="1024">
+      <!-- 二段階認証を設定しているかはログインの前には知らせない（いつも欄を出し、設定していなければ空欄でよい） -->
+      <label for="login-code">確認コード</label>
+      <input id="login-code" name="code" autocomplete="one-time-code" inputmode="numeric" maxlength="16"
+             placeholder="認証アプリの 6 桁（または予備のコード）">
+      <p class="muted small">二段階認証を設定していなければ、空欄のままでかまいません。</p>
       <button type="submit" class="primary">ログイン</button>
       <p id="login-error" class="error" role="alert"></p>
     </form>
@@ -390,9 +395,9 @@
   <dialog id="reauth-dialog">
     <form id="reauth-form" method="dialog">
       <h3>管理者の操作の確認</h3>
-      <p>次の操作を行います。続けるには、パスワードを入力してください（確認してから 5 分間は省きます）。</p>
+      <p id="reauth-intro">次の操作を行います。続けるには、パスワードを入力してください（確認してから 5 分間は省きます）。</p>
       <ul id="reauth-operations"></ul>
-      <label for="reauth-password">WebUI のパスワード</label>
+      <label for="reauth-password" id="reauth-label">WebUI のパスワード</label>
       <input id="reauth-password" type="password" autocomplete="current-password" maxlength="1024">
       <p id="reauth-error" class="error" role="alert"></p>
       <div class="row">

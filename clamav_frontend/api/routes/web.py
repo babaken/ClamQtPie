@@ -7,7 +7,10 @@ WebUI の設定とログインの API（サービス化・Web API設計書 6.11�
 - POST /auth/session（WebUI の待ち受けだけ）: ログイン。成功したら新しいセッションの Cookie と、セッションに
   結び付けた CSRF トークン（JSON）を返す。失敗はどちらが違ったかを区別しない。同じ接続元から 5 回続けて失敗したら
   5 分間 429（E8106）
-- DELETE /auth/session: ログアウト。POST /auth/reauth: admin の操作の前の再確認（パスワード。二段階認証は 12-5d）
+- DELETE /auth/session: ログアウト。POST /auth/reauth: admin の操作の前の再確認（二段階認証を設定していれば確認コード、
+  していなければパスワード）
+- POST /web/totp・DELETE /web/totp（admin の Bearer だけ）: 二段階認証の設定・解除（段階 12-5d）。設定していれば、
+  ログインにはパスワードに加えて確認コード（予備のコードも可）が要る。一度受け付けたコードは二度と受け付けない
 - ログイン・ログアウト・失敗・ロック・再確認を、接続元付きでログに残す
 """
 from __future__ import annotations
@@ -24,6 +27,7 @@ from core.exceptions import ApiAuthError, ApiLoginLockedError, ApiReauthRequired
 from core.logger import CATEGORY_SYSTEM, log_event
 from core.text_safety import visible_controls
 from core.web_password import usernames_match, verify_password
+from api.web_control import login_stopped
 
 logger = logging.getLogger("clamav_frontend")
 
@@ -47,10 +51,15 @@ class CredentialsBody(_Body):
     password: str = Field(max_length=1024)
 
 
+class TotpBody(_Body):
+    secret: str = Field(max_length=128)
+    code: str = Field(max_length=32)
+
+
 class LoginBody(_Body):
     username: str = Field(max_length=64)
     password: str = Field(max_length=1024)
-    #: 二段階認証のコード（段階 12-5d。それまでは受け取っても使わない）
+    #: 二段階認証のコード（設定していなければ使わない。予備のコードも可）
     code: str | None = Field(None, max_length=32)
 
 
@@ -90,6 +99,24 @@ async def web_credentials(request: Request, body: CredentialsBody) -> dict:
     return await _ctx(request).invoker.run(web.set_credentials, body.username, body.password)
 
 
+@web_router.post("/web/totp", dependencies=[Depends(require_bearer_admin)])
+async def web_totp_enable(request: Request, body: TotpBody) -> dict:
+    web = _web(request)
+    return await _ctx(request).invoker.run(web.enable_totp, body.secret, body.code)
+
+
+@web_router.post("/web/unlock", dependencies=[Depends(require_bearer_admin)])
+async def web_unlock(request: Request) -> dict:
+    """確認コードの間違いが続いて止めたログインを解く"""
+    return await _ctx(request).invoker.run(_web(request).unlock)
+
+
+@web_router.delete("/web/totp", dependencies=[Depends(require_bearer_admin)])
+async def web_totp_disable(request: Request) -> dict:
+    web = _web(request)
+    return await _ctx(request).invoker.run(web.disable_totp)
+
+
 # -- 3.3 ログイン（WebUI の待ち受けだけ） -------------------------------------------------------------
 def _check_login(entered_user: str, password: str, api) -> bool:
     # ユーザー名が違っても、パスワードの照合（scrypt）を必ず行う（どちらが違ったかを時間で見分けさせない）
@@ -99,9 +126,9 @@ def _check_login(entered_user: str, password: str, api) -> bool:
 
 
 def _raise_if_locked(request: Request) -> None:
-    remaining = _web(request).guard.locked_seconds(_client(request))
-    if remaining:
-        raise ApiLoginLockedError(detail=f"約 {max(1, remaining // 60)} 分後にやり直してください")
+    # 残りの時間は書かない（確認コードの間違いによる停止と、応答を同じにするため）
+    if _web(request).guard.locked_seconds(_client(request)):
+        raise ApiLoginLockedError()
 
 
 def _count_failure(request: Request, what: str) -> None:
@@ -114,15 +141,50 @@ def _count_failure(request: Request, what: str) -> None:
                        f"{visible_controls(client)}）", extra={"error_code": ApiLoginLockedError.default_code})
 
 
+async def _second_factor(request: Request, code):
+    """二段階認証のコードを確かめ、合えば使ったことにする（同じコードを二度と受け付けない）。合えば "totp" か
+    "recovery"、合わなければ None"""
+    web = _web(request)
+    factor = await run_in_threadpool(web.check_second_factor, code or "")
+    if factor is None or not await _ctx(request).invoker.run(web.consume_second_factor, factor):
+        return None
+    return factor[0]
+
+
+def _recovery_notice(request: Request, kind) -> dict:
+    """予備のコードを使ったら、画面で知らせるための残りの数"""
+    if kind != "recovery":
+        return {}
+    return {"recovery_used": True,
+            "recovery_codes_left": len(_ctx(request).config_service.current.api.web_recovery_code_hashes)}
+
+
 @auth_router.post("/auth/session")
 async def login(request: Request, body: LoginBody) -> JSONResponse:
     _raise_if_locked(request)
     api = _ctx(request).config_service.current.api
+    web = _web(request)
     ok = await run_in_threadpool(_check_login, body.username, body.password, api)  # scrypt は重いため
+    used = None
+    if api.web_totp_enabled:
+        # パスワードが違っても確認コードの照合を行う（どちらが違ったかを時間で見分けさせない）。
+        # 使ったことにするのは、パスワードも合ったときだけ
+        stopped = login_stopped(api)
+        factor = await run_in_threadpool(web.check_second_factor, body.code or "")
+        if ok and factor is None:
+            await _ctx(request).invoker.run(web.record_code_failure, _client(request))
+        if stopped and not (ok and factor is not None and factor[0] == "recovery"):
+            # 止めている間は、パスワード・確認コードの正否によらず、接続元ごとのロックと同じ応答にする
+            # （止まったことから、パスワードが合っていたと見分けさせない）。予備のコードだけは受け付ける
+            _count_failure(request, "ログイン")
+            raise ApiLoginLockedError()
+        ok = ok and factor is not None and await _ctx(request).invoker.run(web.consume_second_factor, factor)
+        used = factor[0] if ok else None
     if not ok:
         _count_failure(request, "ログイン")
+        if api.web_totp_enabled:
+            raise ApiAuthError("ユーザー名・パスワード・確認コードのどれかが違います")
         raise ApiAuthError("ユーザー名またはパスワードが違います")
-    web = _web(request)
     client = _client(request)
     web.guard.success(client)
     web.sessions.destroy(request.cookies.get(SESSION_COOKIE))  # 付いていた古いセッションは使わない
@@ -133,6 +195,8 @@ async def login(request: Request, body: LoginBody) -> JSONResponse:
         "username": api.web_username,
         "off_at": api.web_off_at or None,
         "session_timeout_min": api.session_timeout_min,
+        "totp": bool(api.web_totp_enabled),
+        **_recovery_notice(request, used),
     })
     response.set_cookie(SESSION_COOKIE, session.id, httponly=True, samesite="strict", path="/")
     return response
@@ -146,7 +210,8 @@ def current_session(request: Request, session=Depends(require_web_session)) -> d
     api = _ctx(request).config_service.current.api
     return {"csrf_token": session.csrf_token, "username": api.web_username, "off_at": api.web_off_at or None,
             "session_timeout_min": api.session_timeout_min,
-            "reauthenticated": _web(request).sessions.is_reauthenticated(session)}
+            "reauthenticated": _web(request).sessions.is_reauthenticated(session),
+            "totp": bool(api.web_totp_enabled)}
 
 
 @auth_router.delete("/auth/session")
@@ -162,14 +227,20 @@ def logout(request: Request, session=Depends(require_web_session)) -> Response:
 async def reauth(request: Request, body: ReauthBody, session=Depends(require_web_session)) -> dict:
     _raise_if_locked(request)
     api = _ctx(request).config_service.current.api
-    ok = await run_in_threadpool(verify_password, body.password or "", api.web_password_hash)
     web = _web(request)
+    used = None
+    if api.web_totp_enabled:
+        # 二段階認証を設定していれば確認コードで確かめる（パスワードは使わない。3.3節）。予備のコードも受け付ける
+        used = await _second_factor(request, body.code)
+        ok = used is not None
+    else:
+        ok = await run_in_threadpool(verify_password, body.password or "", api.web_password_hash)
     if not ok:
         _count_failure(request, "再確認")
         if web.guard.locked_seconds(_client(request)):
             web.sessions.destroy(session.id)  # ロックされたらセッションも破棄する（3.3節）
-        raise ApiReauthRequiredError("パスワードが違います")
+        raise ApiReauthRequiredError("確認コードが違います" if api.web_totp_enabled else "パスワードが違います")
     web.guard.success(_client(request))
     web.sessions.mark_reauthenticated(session)
     log_event(CATEGORY_SYSTEM, f"WebUI で管理者の操作の前の再確認をしました（接続元: {_client(request)}）")
-    return {"reauth_sec": 300}
+    return {"reauth_sec": 300, **_recovery_notice(request, used)}

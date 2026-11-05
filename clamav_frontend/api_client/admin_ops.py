@@ -44,6 +44,10 @@ ADMIN_ROUTES: tuple[tuple[str, re.Pattern], ...] = tuple((m, re.compile(f"^{p}$"
     # WebUI の ON/OFF・ログインの設定（Bearer の admin だけ。段階 12-5c）
     ("PUT", "/web"),
     ("PUT", "/web/credentials"),
+    # 二段階認証の設定・解除（Bearer の admin だけ。段階 12-5d）
+    ("POST", "/web/totp"),
+    ("DELETE", "/web/totp"),
+    ("POST", "/web/unlock"),
     # user のトークンでは断られることのあるもの（フルスキャン・自分のフォルダの外・スケジュールのスキャンの中止）
     ("POST", "/scans"),
     ("POST", "/scans/current/cancel"),
@@ -265,6 +269,14 @@ def describe(op: Operation, lookup: Lookup | None = None) -> list[str]:
         # パスワードは確認画面に出さない
         return [f"WebUI のログインを設定します（ユーザー名: {_short(body.get('username', ''))}）",
                 "  ログイン中の WebUI はすべてログアウトします"]
+    if (m, p) == ("POST", "/web/totp"):
+        # 秘密鍵・コードは確認画面に出さない
+        return ["WebUI の二段階認証を設定します", "  ログイン中の WebUI はすべてログアウトします"]
+    if (m, p) == ("DELETE", "/web/totp"):
+        return ["WebUI の二段階認証を解除します", "  ログイン中の WebUI はすべてログアウトします"]
+    if (m, p) == ("POST", "/web/unlock"):
+        return ["WebUI のログインの停止を解きます（確認コードの間違いが続いたため止めていたもの）",
+                "  パスワードが漏れているおそれがあるときは、先にパスワードを変えてください"]
     if (m, p) == ("POST", "/scans"):
         kind = _SCAN_TYPES.get(body.get("type"), "スキャン")
         targets = body.get("targets") or []
