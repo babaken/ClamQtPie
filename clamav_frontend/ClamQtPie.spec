@@ -78,6 +78,14 @@ _EXCLUDES = [
     "PySide6.QtPdf",
     "PySide6.QtSvg",
     "PySide6.QtVirtualKeyboard",
+    # 実行時に使わないもの（ほかのライブラリの開発用の機能から引き込まれる）。pygments は mako（alembic）の
+    # エラー表示の色付け・httpx のコマンドから、setuptools 一式はビルドの仕組みから入っていた。mako は pygments が
+    # 無ければ色付けなしに切り替える
+    "pygments",
+    "setuptools",
+    "pkg_resources",
+    "_distutils_hack",
+    "pydoc_data",
 ]
 
 
@@ -95,7 +103,10 @@ def _analysis(script: str, hidden=(), datas=()):
         win_no_prefer_redirects=False,
         win_private_assemblies=False,
         cipher=block_cipher,
-        noarchive=False,
+        # Python のモジュールを実行ファイルごとのアーカイブ（PYZ）に入れず、_internal/ に .pyc として置く。
+        # 4 つの実行ファイルは同じ _internal/ を使うので、同じモジュールが 1 回だけ入る（PYZ だと実行ファイルごとに
+        # 同じ中身を持ち、合わせて約 50 MB になっていた）
+        noarchive=True,
     )
 
 

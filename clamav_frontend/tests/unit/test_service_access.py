@@ -184,6 +184,16 @@ def test_spec_names_match_the_code():
     assert f"/opt/clamqtpie/{HELPER_LINUX_NAME}</annotate>" in policy and "<allow_active>auth_admin<" in policy
 
 
+def test_spec_shares_python_modules_between_executables():
+    """4 つの実行ファイルが Python のモジュールを別々に持たない（_internal/ の .pyc を共有する）こと"""
+    from pathlib import Path
+
+    spec = (Path(__file__).resolve().parents[2] / "ClamQtPie.spec").read_text(encoding="utf-8")
+    analysis = spec.split("def _analysis", 1)[1].split("def ", 1)[0]
+    assert "noarchive=True" in analysis
+    assert '"pygments"' in spec and '"setuptools"' in spec  # 実行時に使わないものを入れない
+
+
 # -- 旧版の自動起動の登録し直し ------------------------------------------------------------------
 def _linux_autostart(tmp_path, command):
     from core.autostart_service import AutostartService

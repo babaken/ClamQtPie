@@ -1574,3 +1574,23 @@ Linux の実機（EndeavourOS・KDE Plasma 6 の Wayland・systemd 262）で tar
 - **上限で止まっているときの知らせ**: `clamqtpie-ctl status` は、systemd の状態が failed・理由が `start-limit-hit`（`core/service_status.service_stop_reason`）なら、上限で止めていること、原因を確かめる場所（`journalctl -u clamqtpie`・`/var/log/clamqtpie/`）、直したあとに実行する `sudo systemctl reset-failed clamqtpie && sudo systemctl start clamqtpie` を表示する。トレイGUI の「サービスにつながりません」には `clamqtpie-ctl status` の案内を添える（ctl は root で動かすので、Linux は `sudo clamqtpie-ctl status`、Windows は管理者のコマンドプロンプトで、と書く）。数え直して開始するコマンドは作らない（原因を確かめずに起動し直す流れを作らない）。区別は Linux だけ（Windows は回復動作の後も手で開始できる）
 - **確認・デバッグ中**: その PC にだけ drop-in（`/etc/systemd/system/clamqtpie.service.d/debug-no-start-limit.conf`、`[Unit] StartLimitIntervalSec=0`）を置いて上限を外し、終わったら消す。置く・消す・状態を確かめるスクリプトは internal の `tools/` にあり、配布物・ctl には入れない
 - README の困ったときの節への記載は、12-6 の README の書き直しで行う
+
+## 78. 配布物: Python のモジュールを実行ファイルどうしで共有する
+
+段階 12 で実行ファイルが 4 つ（トレイGUI・サービス・昇格ヘルパー・clamqtpie-ctl。Windows は通知のクリックの ClamQtPieActivate も）になり、PyInstaller の既定ではそれぞれが自分の Python のアーカイブ（PYZ）に同じモジュールを持っていた。
+
+- **noarchive**: `ClamQtPie.spec` の Analysis を `noarchive=True` にし、モジュールを `_internal/` に .pyc として置く。実行ファイルは同じ `_internal/` を使うので、同じモジュールが 1 回だけ入る。ファイルの数は増える（Windows で約 830 → 約 2130）が、合計の大きさと起動の時間は減る
+- **入れないもの**: 実行時に使わない `pygments`（mako のエラー表示の色付け・httpx のコマンドから。mako は無ければ色付けなしに切り替える）・`setuptools`・`pkg_resources`・`_distutils_hack`・`pydoc_data` を `_EXCLUDES` に足した
+- **MERGE を使わなかった理由**: PyInstaller の `MERGE` は、実行ファイルどうしで共通の依存（DLL・データ）を 1 か所にまとめる仕組みで、PYZ の中身は対象にしない。また、まとめられた側の実行ファイルは onefile と同じ扱い（展開して使う）になり、onedir の配布物には合わない
+- **測った値**（変更前 → 変更後。Linux は WSL（Ubuntu）でビルドした値。大きさ・起動の時間はビルドした環境の Python・Qt のライブラリで変わり、Arch 系の実機でビルドした変更後の配布物は tar.gz 89.1 MB・展開後 237 MB・1572 ファイル・起動 約 150 ms だった。比べるときは同じ環境の変更前と比べる）:
+
+| | 変更前 | 変更後 |
+|---|---|---|
+| Windows のインストーラ | 70.4 MB | 31.3 MB |
+| Windows の導入後 | 130 MB・833 ファイル | 113 MB・2134 ファイル |
+| Windows の `clamqtpie-ctl --help` の起動 | 764 ms | 157 ms |
+| Linux の tar.gz | 109.3 MB | 73.3 MB |
+| Linux の展開後 | 217 MB・247 ファイル | 199 MB・1513 ファイル |
+| Linux の `clamqtpie-ctl --help` の起動 | 161 ms | 100 ms |
+
+- テスト（`test_service_access.py`）: spec の Analysis が `noarchive=True` で、実行時に使わないものを入れないことを確かめる
