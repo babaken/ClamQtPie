@@ -6,6 +6,8 @@ clamqtpie（Linux）のグループに入っている利用者だけにする（
 - share_with_users: サービスが起動のたびに作り直すトークン・接続先のファイルを、グループに読ませる
   （admin.token は読ませない）。グループが無ければ何もしない（開発中の確認用の導入）
 - add_user・remove_user・list_users: clamqtpie-ctl users（net localgroup／groupadd・usermod・gpasswd）
+- signin_is_stale: グループに入っているのに、今のサインイン（プロセスのトークン・補助グループ）にまだ入っていないか。
+  グループのメンバーシップはサインインしたときに決まるため、入れた後はサインインし直すまで効かない（トレイGUI の E8110 の案内）
 - program_location_problem: サービスの実行ファイルとそのフォルダを、一般の利用者が書き換えられないか（12章 33）
 
 Windows で Administrators に直接読ませないのは、UAC で昇格していない管理者では Administrators の SID が
@@ -188,6 +190,36 @@ def list_users(runner=subprocess.run) -> list[str]:
         return []
     members = (result.stdout or "").strip().split(":")[-1]
     return [m for m in members.split(",") if m]
+
+
+def _token_has_group() -> bool | None:
+    """このプロセスのトークン（Linux は補助グループ）にグループが入っているか。グループが無い・確かめられなければ None"""
+    if _IS_WINDOWS:
+        try:
+            import win32security
+
+            sid = win32security.LookupAccountName(None, WINDOWS_GROUP)[0]
+            return bool(win32security.CheckTokenMembership(None, sid))
+        except Exception:  # noqa: BLE001 - pywin32 が無い・グループが無いときは確かめない
+            return None
+    try:
+        import grp
+
+        return grp.getgrnam(LINUX_GROUP).gr_gid in os.getgroups()
+    except (ImportError, KeyError, OSError):
+        return None
+
+
+def signin_is_stale(user: str, runner=subprocess.run, token_has_group=_token_has_group) -> bool:
+    """user がグループに入っているのに、今のサインインにはまだ入っていない（サインインし直すと使える）なら True"""
+    if token_has_group() is not False:
+        return False
+    short = user.rsplit("\\", 1)[-1].lower()
+    try:
+        members = list_users(runner)
+    except AccessError:
+        return False
+    return any(member.rsplit("\\", 1)[-1].lower() == short for member in members)
 
 
 # -- サービスの実行ファイルの置き場所（12章 33） -------------------------------------------------

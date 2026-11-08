@@ -445,11 +445,7 @@ def main() -> int:
         connected = tray.try_connect()
     except ServicePermissionError as exc:
         user = _current_user()
-        logger.error(f"この利用者（{user}）は ClamQtPie を使う権限がないため、終了します ({exc.detail})",
-                     extra={"error_code": exc.code})
-        QMessageBox.critical(None, APP_NAME,
-                             f"{exc.message}（{exc.code}）。\n\n管理者に、次のコマンドでこの利用者を追加してもらってください。\n"
-                             f"clamqtpie-ctl users add {user}")
+        QMessageBox.critical(None, APP_NAME, permission_error_text(exc, user))
         lock.release()
         return 1
     if not connected:
@@ -460,6 +456,23 @@ def main() -> int:
     tray.shutdown()
     lock.release()
     return exit_code
+
+
+def permission_error_text(exc, user: str, stale=None) -> str:
+    """E8110 で終わるときの案内（ログにも残す）。グループに入っているのに今のサインインにまだ入っていなければ、
+    サインインし直しを案内する（インストーラが新しくグループに入れた直後など）"""
+    if stale is None:
+        from core.service_access import signin_is_stale as stale
+    if stale(user):
+        again = "サインアウトしてサインインし直して" if sys.platform == "win32" else "ログアウトしてログインし直して"
+        logger.error(f"この利用者（{user}）はグループに入っていますが、今のサインインにはまだ反映されていないため、終了します "
+                     f"({exc.detail})", extra={"error_code": exc.code})
+        return (f"{exc.message}（{exc.code}）。\n\nこの利用者は ClamQtPie を使えるグループに入っていますが、"
+                f"今のサインインにはまだ反映されていません。{again}ください（それでも使えなければ PC を再起動してください）。")
+    logger.error(f"この利用者（{user}）は ClamQtPie を使う権限がないため、終了します ({exc.detail})",
+                 extra={"error_code": exc.code})
+    return (f"{exc.message}（{exc.code}）。\n\n管理者に、次のコマンドでこの利用者を追加してもらってください。\n"
+            f"clamqtpie-ctl users add {user}")
 
 
 def _current_user() -> str:

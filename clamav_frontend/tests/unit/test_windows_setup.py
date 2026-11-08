@@ -62,7 +62,8 @@ def test_setup_install_registers_and_starts_the_service(tmp_path, monkeypatch):
     monkeypatch.setattr("core.service_access._IS_WINDOWS", True)
     runner = _Runner()
     out = io.StringIO()
-    windows_setup.setup_install(tmp_path / "data", tmp_path, "alice", out, runner, check=lambda p: None)
+    # 新しくグループに入れたら True（インストーラがサインインし直しを案内する）
+    assert windows_setup.setup_install(tmp_path / "data", tmp_path, "alice", out, runner, check=lambda p: None) is True
     names = [" ".join(c[1:]) for c in runner.calls]
     assert any("localgroup ClamQtPie Users /add" in n for n in names)
     assert any(n.endswith("alice /add") for n in names)
@@ -75,7 +76,8 @@ def test_setup_install_registers_and_starts_the_service(tmp_path, monkeypatch):
 def test_setup_install_updates_an_existing_service(tmp_path, monkeypatch):
     monkeypatch.setattr("core.service_access._IS_WINDOWS", True)
     runner = _Runner(installed=True, running=True)
-    windows_setup.setup_install(tmp_path / "data", tmp_path, "", io.StringIO(), runner, check=lambda p: None)
+    assert windows_setup.setup_install(tmp_path / "data", tmp_path, "", io.StringIO(), runner,
+                                       check=lambda p: None) is False
     names = [" ".join(c[1:]) for c in runner.calls]
     assert names.index("stop ClamQtPie") < next(i for i, n in enumerate(names) if n.endswith("delayed update"))
 
@@ -122,3 +124,25 @@ def test_service_process_is_waited_for_and_killed_if_it_lingers():
     runner = Lingering()
     windows_setup.wait_process_exit(runner, sleep=lambda s: None, wait_sec=1)
     assert runner.calls[-1] == ["taskkill.exe", "/F", "/IM", "ClamQtPieService.exe"]
+@pytest.mark.parametrize("added, expected", [(True, 10), (False, 0)])
+def test_ctl_setup_install_reports_that_sign_in_is_required(tmp_path, monkeypatch, added, expected):
+    """利用者をグループに新しく入れたときだけ、インストーラに「サインインし直しが要る」（終了コード 10）を返す"""
+    import clamqtpie_ctl
+
+    monkeypatch.setattr(clamqtpie_ctl.sys, "platform", "win32")
+    monkeypatch.setattr(clamqtpie_ctl, "_audit", lambda paths, message: None)
+    monkeypatch.setattr(windows_setup, "setup_install", lambda *a, **k: added)
+    paths = clamqtpie_ctl.ServicePaths.under(tmp_path / "svc")
+    code = clamqtpie_ctl.cmd_setup(paths, "install", "alice", False, io.StringIO())
+    assert code == expected == (clamqtpie_ctl.EXIT_SIGNIN_REQUIRED if added else clamqtpie_ctl.EXIT_OK)
+
+
+def test_iss_asks_to_sign_in_again_and_does_not_start_the_tray():
+    """グループに新しく入れたときは、完了の画面で再起動の確認を出し、トレイGUI を起動しない"""
+    import clamqtpie_ctl
+
+    iss = (Path(__file__).resolve().parents[2] / "packaging" / "windows" / "ClamQtPie.iss").read_text(encoding="utf-8")
+    assert f"ExitSignInRequired = {clamqtpie_ctl.EXIT_SIGNIN_REQUIRED};" in iss
+    assert "function NeedRestart(): Boolean;" in iss and "FinishedRestartLabel=" in iss
+    run_lines = [line for line in iss.splitlines() if "runasoriginaluser" in line]
+    assert run_lines and all("not SignInRequired" in line for line in run_lines)

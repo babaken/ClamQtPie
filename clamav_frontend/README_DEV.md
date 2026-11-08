@@ -1616,3 +1616,11 @@ Linux の実機（EndeavourOS・KDE Plasma 6 の Wayland・systemd 262）で tar
 - 依存に `cryptography` を加えた（証明書の作成。標準ライブラリの `ssl` では作れない）
 - **配布物の python3t.dll**（ビルドで見つけた）: Windows の Python 3.15 用の cryptography（abi3・abi3t の両方の印の wheel）の `_rust.pyd` は `python3t.dll` を読み込む。開発環境では Python 本体の `abi3t-compat/python3t.dll` が読み込まれるが、PyInstaller はこれを集めないため、配布物では「DLL load failed while importing _rust」になった。spec の `_extra_binaries()` で `_internal/` に入れる
 - セキュリティの確かめに bandit を使う（開発用。Windows の `.venv` は Python 3.15 で PyYAML のビルド済みの版が無いため、WSL の venv に入れた）。12-5e1 で変えたファイルに新しい指摘はなかった
+## 80. 導入した直後のサインインし直し（Windows）
+
+Windows の実機の確認（#46）で見つけた。グループのメンバーシップはサインインしたときにトークンに入るため、インストーラが利用者を ClamQtPie Users に新しく入れても、サインインし直すまで効かない。インストーラが最後に元の利用者の権限で起動するトレイGUI は user.token を読めず、E8110 で終わっていた（それまでの確認は管理者の PowerShell からインストーラを動かしていて、トレイGUI も昇格して起動し、Administrators の権限で読めていたため表に出なかった）。グループを消して作り直したときも、SID が変わるので同じことが起きる。
+
+- **clamqtpie-ctl setup install**: 利用者をグループに新しく入れたら、終了コード 10（`EXIT_SIGNIN_REQUIRED`）で返す（`setup_install` が True を返す）。すでに入っていれば今までどおり 0
+- **インストーラ**: 10 なら完了の画面で再起動の確認を出す（`NeedRestart`。文は `[Messages]` の `FinishedRestartLabel` で、サインアウトしてサインインし直すまでトレイGUI は使えないことと、その代わりに今すぐ再起動するかを尋ねる）。トレイGUI は起動しない（`[Run]` の `Check: not SignInRequired`）。次のサインインで自動起動から起動する。更新（すでに入っている）は今までどおり
+- **トレイGUI の E8110**: グループに入っているのに、今のサインインのトークン（Linux は補助グループ）に入っていなければ（`service_access.signin_is_stale`）、追加の依頼ではなく、サインアウトしてサインインし直す（だめなら再起動）よう案内する。Windows は `CheckTokenMembership`、Linux は `os.getgroups()` で確かめる。確かめられなければ今までの案内
+- Linux の install.sh は、以前からグループに入れたときに「サインアウトしてサインインし直す」と表示している

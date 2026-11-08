@@ -65,6 +65,9 @@ from core.version import APP_NAME, APP_VERSION  # noqa: E402
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_NOT_ADMIN = 3
+#: setup install: 導入できたが、利用者をグループに新しく入れたため、サインインし直すまでトレイGUI を使えない
+#: （インストーラが完了の画面で案内し、トレイGUI を起動しない）
+EXIT_SIGNIN_REQUIRED = 10
 
 #: 設定するときに場所を確かめる項目（実行ファイルは名前も確かめる）
 _EXECUTABLE_FIELDS = {"update.freshclam_path": ("freshclam",), "realtime.clamonacc_path": ("clamonacc",)}
@@ -466,8 +469,10 @@ def cmd_setup(paths: ServicePaths, action: str, user: str, purge: bool, out, run
 
     try:
         if action == "install":
-            setup_install(paths.data_dir, Path(sys.executable).resolve().parent, user, out, runner)
+            added = setup_install(paths.data_dir, Path(sys.executable).resolve().parent, user, out, runner)
             _audit(paths, f"clamqtpie-ctl: 導入しました（{APP_NAME} {APP_VERSION}）")
+            if added:
+                return EXIT_SIGNIN_REQUIRED
         else:
             setup_uninstall(paths.data_dir, purge, out, runner)
     except (SetupError, AccessError, OSError) as exc:

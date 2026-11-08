@@ -9,6 +9,9 @@
 ;   閉じられない（Permission Denied + Session Mismatch。Windows の実機で発見）。そのため CloseApplications=no）
 ; - 旧版（ポータブル）の検出: 自動起動（HKCU\...\Run の ClamQtPie）がほかの場所を指していれば、移行を勧める
 ; - 削除: サービスを止めて登録を消す。データ（隔離ファイルを含む）は確かめて、既定は残す
+; - サインインし直し: 導入した利用者を ClamQtPie Users に新しく入れたとき（setup install の終了コード 10）は、
+;   サインインし直すまでグループが効かず、トレイGUI がつながらない（E8110）。完了の画面で案内して再起動の確認を出し、
+;   トレイGUI は起動しない（次のサインインで自動起動から起動する）
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -48,12 +51,21 @@ UsedUserAreasWarning=no
 [Languages]
 Name: "ja"; MessagesFile: "compiler:Languages\Japanese.isl"
 
+[Messages]
+; 再起動の確認は、利用者をグループに新しく入れたとき（NeedRestart）だけ出る
+FinishedRestartLabel=ClamQtPie を導入しました。%n%nこの利用者を ClamQtPie Users グループに入れたため、トレイGUI はサインアウトしてサインインし直すまで使えません（それまでトレイGUI は起動しません）。%n%nサインアウトの代わりに、今すぐ PC を再起動しますか？
+FinishedRestartMessage=ClamQtPie を導入しました。%n%nこの利用者を ClamQtPie Users グループに入れたため、トレイGUI はサインアウトしてサインインし直すまで使えません（それまでトレイGUI は起動しません）。%n%nサインアウトの代わりに、今すぐ PC を再起動しますか？
+
 [Tasks]
 Name: "autostart"; Description: "サインインしたときにトレイGUI を起動する"
 Name: "path"; Description: "管理用コマンド（clamqtpie-ctl）を PATH に追加する"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+; ファイルをすべて置いた後に clamqtpie-ctl setup install を実行する（同じファイルをもう一度置き、その AfterInstall で）。
+; ssPostInstall では遅い: Inno Setup は再起動の確認（NeedRestart）を ssPostInstall より前に決めるため
+; （テスト用のインストーラで確かめた）
+Source: "{#SourceDir}\clamqtpie-ctl.exe"; DestDir: "{app}"; Flags: ignoreversion; AfterInstall: RunSetupInstall
 
 [Icons]
 Name: "{autoprograms}\ClamQtPie"; Filename: "{app}\ClamQtPie.exe"; Comment: "ClamAV を使ったウイルス対策（トレイGUI）"
@@ -70,18 +82,34 @@ Type: filesandordirs; Name: "{app}\_internal"
 Type: dirifempty; Name: "{app}"
 
 [Run]
+; サインインし直すまでグループが効かないときは起動しない（E8110 で終わるため）
 Filename: "{app}\ClamQtPie.exe"; Description: "ClamQtPie（トレイGUI）を起動する"; \
-  Flags: postinstall nowait skipifsilent runasoriginaluser
+  Flags: postinstall nowait skipifsilent runasoriginaluser; Check: not SignInRequired
 ; 静かな更新（/SILENT）でも、終わらせたトレイGUI を起動し直す
-Filename: "{app}\ClamQtPie.exe"; Flags: nowait runasoriginaluser; Check: WizardSilent
+Filename: "{app}\ClamQtPie.exe"; Flags: nowait runasoriginaluser; Check: WizardSilent and not SignInRequired
 
 [Code]
 const
   EnvironmentKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
+  { clamqtpie-ctl setup install の終了コード: 導入できたが、利用者をグループに新しく入れた }
+  ExitSignInRequired = 10;
 
 var
   LegacyDir: String;
   PurgeData: Boolean;
+  NeedSignIn: Boolean;
+
+{ 利用者をグループに新しく入れたため、サインインし直すまでトレイGUI を使えない }
+function SignInRequired(): Boolean;
+begin
+  Result := NeedSignIn;
+end;
+
+{ 完了の画面で再起動の確認を出す（文は [Messages] の FinishedRestartLabel） }
+function NeedRestart(): Boolean;
+begin
+  Result := NeedSignIn;
+end;
 
 function CtlPath(): String;
 begin
@@ -225,22 +253,33 @@ begin
   end;
 end;
 
-procedure CurStepChanged(CurStep: TSetupStep);
+{ サービスの登録など（[Files] の最後の項目の AfterInstall。ファイルをすべて置いた後、NeedRestart の前） }
+procedure RunSetupInstall();
 var
   ResultCode: Integer;
   Output: String;
+  Ran: Boolean;
+begin
+  WizardForm.StatusLabel.Caption := 'サービスを登録しています...';
+  Ran := RunCtlWithOutput('setup install --user "' + ExpandConstant('{username}') + '"', ResultCode, Output);
+  Log('clamqtpie-ctl setup install: ' + IntToStr(ResultCode));
+  if Ran and (ResultCode = ExitSignInRequired) then
+    NeedSignIn := True
+  else if not Ran or (ResultCode <> 0) then
+    { 行の先頭に # を置かない（Inno Setup のプリプロセッサの命令とみなされる） }
+    MsgBox('サービスの登録に失敗しました（終了コード ' + IntToStr(ResultCode) + '）。' + #13#10#13#10 + Output + #13#10#13#10 +
+           '原因を取り除いてから、管理者のコマンドプロンプトで "' + CtlPath() + '" setup install を実行してください。',
+           mbError, MB_OK);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
 begin
   if CurStep <> ssPostInstall then
     Exit;
   if WizardIsTaskSelected('path') then
     AddToPath();
-  WizardForm.StatusLabel.Caption := 'サービスを登録しています...';
-  if not RunCtlWithOutput('setup install --user "' + ExpandConstant('{username}') + '"', ResultCode, Output) or
-     (ResultCode <> 0) then
-    { 行の先頭に # を置かない（Inno Setup のプリプロセッサの命令とみなされる） }
-    MsgBox('サービスの登録に失敗しました（終了コード ' + IntToStr(ResultCode) + '）。' + #13#10#13#10 + Output + #13#10#13#10 +
-           '原因を取り除いてから、管理者のコマンドプロンプトで "' + CtlPath() + '" setup install を実行してください。',
-           mbError, MB_OK);
   if (LegacyDir <> '') and not WizardSilent() then
   begin
     if MsgBox('旧版（ポータブル）の ClamQtPie を検出しました:' + #13#10 + LegacyDir + #13#10#13#10 +

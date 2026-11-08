@@ -122,22 +122,27 @@ def remove_service(runner=subprocess.run) -> None:
 
 
 # -- まとめ（clamqtpie-ctl setup） ----------------------------------------------------------------
-def setup_install(data_dir: Path, app_dir: Path, user: str, out, runner=subprocess.run, now=None, check=None) -> None:
+def setup_install(data_dir: Path, app_dir: Path, user: str, out, runner=subprocess.run, now=None, check=None) -> bool:
+    """導入・更新。user をグループに新しく入れたら True（サインインし直すまでトレイGUI が使えない）"""
     moved = set_aside_untrusted(data_dir, now, check)
     if moved is not None:
         print(f"一般の利用者が作った・書き換えられるデータのフォルダを退避しました: {moved}", file=out)
     from core.service_access import add_user, ensure_group, group_name
 
     ensure_group(runner)
+    added = False
     if user:
-        if add_user(user, runner):
-            print(f"{user} を {group_name()} に入れました", file=out)
+        added = add_user(user, runner)
+        if added:
+            print(f"{user} を {group_name()} に入れました（サインアウトしてサインインし直すと、トレイGUI を使えます）",
+                  file=out)
         else:
             print(f"{user} はすでに {group_name()} に入っています", file=out)
     stop_service(runner)
     register_service(app_dir, runner)
     start_service(runner)
     print("サービスを登録して開始しました", file=out)
+    return added
 
 
 def setup_uninstall(data_dir: Path, purge: bool, out, runner=subprocess.run) -> None:

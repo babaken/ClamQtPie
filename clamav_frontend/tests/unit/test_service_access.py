@@ -256,3 +256,31 @@ def test_ctl_users_add_tells_when_already_a_member(tmp_path, monkeypatch):
     monkeypatch.setattr(service_access, "add_user", lambda name, runner: False)
     assert clamqtpie_ctl.cmd_users(ServicePaths.under(tmp_path), "add", "alice", out, _Runner()) == 0
     assert "すでに" in out.getvalue() and "[ログ]" not in out.getvalue()
+# -- サインインし直しの案内（fix/install-signin） ------------------------------------------------
+def _members(*names):
+    if sys.platform == "win32":
+        return 0, ("エイリアス名     ClamQtPie Users\n\nメンバー\n\n" + "-" * 79 + "\n"
+                   + "".join(f"{n}\n" for n in names) + "コマンドは正常に終了しました。\n")
+    return 0, f"clamqtpie:x:990:{','.join(names)}\n"
+
+
+def test_member_whose_sign_in_predates_the_group_is_told_to_sign_in_again():
+    """グループに入っているのに今のサインインに入っていなければ、サインインし直せば使える"""
+    runner = _Runner([_members("PC01\\Alice")])
+    assert service_access.signin_is_stale("alice", runner, token_has_group=lambda: False) is True
+
+
+def test_non_member_is_not_told_to_sign_in_again():
+    runner = _Runner([_members("bob")])
+    assert service_access.signin_is_stale("alice", runner, token_has_group=lambda: False) is False
+
+
+@pytest.mark.parametrize("has_group", [True, None])
+def test_sign_in_is_not_stale_when_the_token_has_the_group_or_cannot_be_checked(has_group):
+    runner = _Runner([_members("alice")])
+    assert service_access.signin_is_stale("alice", runner, token_has_group=lambda: has_group) is False
+    assert runner.calls == []  # メンバーの一覧は読まない
+
+
+def test_token_group_check_does_not_fail():
+    assert service_access._token_has_group() in (True, False, None)

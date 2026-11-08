@@ -325,3 +325,12 @@ def qtbot_app(qtbot):
     from PySide6.QtWidgets import QApplication
 
     return QApplication.instance()
+def test_tray_permission_error_tells_a_stale_member_to_sign_in_again():
+    """グループに入っているのにサインインが古いときは、追加の依頼ではなくサインインし直しを案内する"""
+    import tray_main
+
+    error = ServicePermissionError(detail="user.token")
+    stale = tray_main.permission_error_text(error, "alice", stale=lambda user: True)
+    assert "E8110" in stale and "し直して" in stale and "users add" not in stale
+    other = tray_main.permission_error_text(error, "alice", stale=lambda user: False)
+    assert "clamqtpie-ctl users add alice" in other
