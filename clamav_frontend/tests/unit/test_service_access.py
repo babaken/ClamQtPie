@@ -194,6 +194,13 @@ def test_spec_shares_python_modules_between_executables():
     assert '"pygments"' in spec and '"setuptools"' in spec  # 実行時に使わないものを入れない
 
 
+def test_spec_bundles_the_abi3t_compat_dll():
+    """Windows の Python 3.15 で、cryptography（abi3t の拡張モジュール）が読み込む python3t.dll を配布物に入れること
+    （PyInstaller は自動では集めない。無いと HTTPS の証明書を作れない）"""
+    spec = (Path(__file__).resolve().parents[2] / "ClamQtPie.spec").read_text(encoding="utf-8")
+    assert '"abi3t-compat" / "python3t.dll"' in spec and "binaries=_extra_binaries()" in spec
+
+
 # -- 旧版の自動起動の登録し直し ------------------------------------------------------------------
 def _linux_autostart(tmp_path, command):
     from core.autostart_service import AutostartService

@@ -83,6 +83,7 @@ _WEB_COMMAND_FIELDS = {
     "api.web_totp_last_step": "web totp setup",
     "api.web_recovery_code_hashes": "web totp setup",
     "api.web_totp_failures": "web unlock",
+    "api.web_tls": "web tls on / web tls off",
 }
 
 
@@ -563,12 +564,13 @@ _STOPPED_TEXT = ("止めています（パスワードは合っていて確認�
 
 
 def _web_status_offline(api_config) -> dict:
+    scheme = "https" if api_config.web_tls != "off" else "http"
     return {"enabled": api_config.web_enabled, "running": False, "lan": False,
-            "urls": [f"http://127.0.0.1:{api_config.web_port}/web/login"], "username": api_config.web_username,
+            "urls": [f"{scheme}://127.0.0.1:{api_config.web_port}/web/login"], "username": api_config.web_username,
             "password_set": bool(api_config.web_password_hash), "totp_set": bool(api_config.web_totp_enabled),
             "recovery_codes_left": len(api_config.web_recovery_code_hashes) if api_config.web_totp_enabled else 0,
             "login_stopped": _login_stopped(api_config),
-            "tls": "off",
+            "tls": api_config.web_tls,
             "off_at": api_config.web_off_at or None, "session_timeout_min": api_config.session_timeout_min}
 
 
@@ -593,7 +595,10 @@ def _print_web_status(status: dict, out) -> None:
         print("二段階認証: 未設定（web totp setup で設定できます）", file=out)
     if status.get("login_stopped"):
         print(f"ログイン: {_STOPPED_TEXT}", file=out)
-    print(f"HTTPS: {'無効' if status.get('tls', 'off') == 'off' else status.get('tls')}", file=out)
+    tls = status.get("tls", "off")
+    print(f"HTTPS: {'無効' if tls == 'off' else '有効（ClamQtPie のローカル CA。web tls status で詳しく）'}", file=out)
+    for note in (status.get("tls_info") or {}).get("notes", []):
+        print(f"  注意: {note}", file=out)
     print(f"LAN からの接続: {'許可' if status.get('lan') else '許可しない（このPC のブラウザだけ）'}", file=out)
 
 
@@ -693,6 +698,103 @@ def cmd_web_totp(paths: ServicePaths, args, out, ask=input) -> int:
     return EXIT_ERROR
 
 
+# -- web tls（段階 12-5e1） --------------------------------------------------------------------------
+_REGISTER_HINT = ("ブラウザを使う端末（この PC を含む）に CA 証明書を登録すると、警告なしで開けます。web tls export-ca で"
+                  "書き出すか、WebUI のログイン画面からダウンロードし、フィンガープリントがこの表示と同じことを確かめてから"
+                  "登録してください（手順は README）")
+
+
+def _local_ca(paths: ServicePaths):
+    from core.local_ca import LocalCa
+
+    return LocalCa(paths.tls_dir)
+
+
+def _print_tls_status(paths: ServicePaths, mode: str, out) -> None:
+    print(f"HTTPS: {'無効' if mode == 'off' else '有効（ClamQtPie のローカル CA）'}", file=out)
+    status = _local_ca(paths).status()
+    if status.ca_fingerprint is None:
+        if mode != "off":
+            print("CA 証明書: まだ作っていません（サービスが WebUI を HTTPS で待ち受けるときに作ります）", file=out)
+        return
+    print(f"CA 証明書の SHA-256 のフィンガープリント: {status.ca_fingerprint}", file=out)
+    print(f"CA 証明書の期限: {status.ca_not_after:%Y-%m-%d}", file=out)
+    if status.server_not_after is not None:
+        print(f"サーバー証明書の期限: {status.server_not_after:%Y-%m-%d}（自動で作り直します）", file=out)
+        print(f"サーバー証明書の名前: {', '.join(status.server_names)}", file=out)
+    for note in status.notes:
+        print(f"注意: {note}", file=out)
+
+
+def cmd_web_tls(paths: ServicePaths, args, out, ask=input) -> int:
+    from api.web_control import tls_changes
+    from core.exceptions import ConfigValidationError
+
+    action = args.tls_action
+    if action == "status":
+        _print_tls_status(paths, _config_service(paths).load().api.web_tls, out)
+        return EXIT_OK
+    if action == "export-ca":
+        pem = _local_ca(paths).ca_pem()
+        if pem is None:
+            raise CtlError("CA 証明書がありません（web tls on で HTTPS を有効にし、サービスが WebUI を待ち受けると作ります）")
+        if args.file:
+            Path(args.file).write_bytes(pem)
+            print(f"CA 証明書を書き出しました: {args.file}", file=out)
+            print(f"SHA-256 のフィンガープリント: {_local_ca(paths).status().ca_fingerprint}", file=out)
+        else:
+            out.write(pem.decode("ascii"))
+        return EXIT_OK
+    if action in ("on", "off"):
+        mode = "local_ca" if action == "on" else "off"
+        try:
+            changes = tls_changes(mode)
+        except ConfigValidationError as exc:
+            raise CtlError(exc.message) from None
+        api = _web_api(paths)
+        if api is not None:
+            status = _web_call(api, "PUT", "/web/tls", {"mode": mode})
+        else:
+            _web_offline_save(paths, changes, f"WebUI の HTTPS を{'有効' if mode != 'off' else '無効'}にしました", out)
+            status = _web_status_offline(_config_service(paths).load().api)
+        print(f"WebUI の HTTPS を{'有効' if mode != 'off' else '無効'}にしました（ログイン中の WebUI はログアウトします）",
+              file=out)
+        _print_tls_status(paths, mode, out)
+        # http と https が入れ替わるので、開き直す URL を出す（WebUI が OFF のときはつながらないので出さない）
+        if status.get("enabled"):
+            for url in status.get("urls", []):
+                print(f"URL: {url}（開いている WebUI はこの URL で開き直してください）", file=out)
+        if mode != "off":
+            print(_REGISTER_HINT, file=out)
+        return EXIT_OK
+    if action == "reset-ca":
+        old = _local_ca(paths).status().ca_fingerprint
+        if not args.yes:
+            print("ローカル CA を作り直します。すべての端末で、新しい CA 証明書の登録のやり直しが要ります。", file=out)
+            if old:
+                print("ローカル CA は失効させられないため、各端末から前の CA 証明書を削除してください"
+                      f"（前の CA の SHA-256 のフィンガープリント: {old}）", file=out)
+            if not _confirm(ask, "作り直しますか？ [y/N]: "):
+                print("やめました", file=out)
+                return EXIT_OK
+        api = _web_api(paths)
+        if api is not None:
+            _web_call(api, "POST", "/web/tls/reset-ca")
+        else:
+            try:
+                _local_ca(paths).remove()
+            except OSError as exc:
+                raise CtlError(f"CA を消せませんでした（{exc}）") from None
+            _audit(paths, f"clamqtpie-ctl: WebUI のローカル CA を作り直しました（前の CA: {old or 'なし'}）")
+            print("サービスは止まっています。CA を消しました（HTTPS が有効なら、次の開始で作り直します）", file=out)
+        print("ローカル CA を作り直しました", file=out)
+        if old:
+            print(f"各端末から前の CA 証明書を削除してください（SHA-256 のフィンガープリント: {old}）", file=out)
+        _print_tls_status(paths, _config_service(paths).load().api.web_tls, out)
+        return EXIT_OK
+    return EXIT_ERROR
+
+
 def _web_unlock(paths: ServicePaths, out) -> int:
     api = _web_api(paths)
     if api is not None:
@@ -718,6 +820,8 @@ def cmd_web(paths: ServicePaths, args, out, ask_password=getpass.getpass, read_l
     action = args.web_action
     if action == "totp":
         return cmd_web_totp(paths, args, out, ask)
+    if action == "tls":
+        return cmd_web_tls(paths, args, out, ask)
     try:
         if action == "status":
             api = _web_api(paths)
@@ -842,6 +946,15 @@ def build_parser() -> argparse.ArgumentParser:
     totp_actions.add_parser("status", help="二段階認証の状態を表示する")
     reset = totp_actions.add_parser("reset", help="二段階認証を解除する（スマートフォンをなくしたときなど）")
     reset.add_argument("--yes", action="store_true", help="確認を省く")
+    tls_parser = web.add_parser("tls", help="WebUI の HTTPS（ClamQtPie のローカル CA）")
+    tls_actions = tls_parser.add_subparsers(dest="tls_action", required=True)
+    tls_actions.add_parser("on", help="HTTPS を有効にする（初回はローカル CA を作る）")
+    tls_actions.add_parser("off", help="HTTPS を無効にする")
+    tls_actions.add_parser("status", help="CA とサーバー証明書の期限・名前・フィンガープリントを表示する")
+    export = tls_actions.add_parser("export-ca", help="CA 証明書を書き出す（省略時は標準出力へ PEM）")
+    export.add_argument("file", nargs="?", help="書き出すファイル")
+    reset_ca = tls_actions.add_parser("reset-ca", help="ローカル CA を作り直す（全端末で登録のやり直しが要る）")
+    reset_ca.add_argument("--yes", action="store_true", help="確認を省く")
     return parser
 
 

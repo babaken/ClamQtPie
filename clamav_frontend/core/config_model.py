@@ -171,6 +171,10 @@ class ScheduleConfig:
     misfire_grace_sec: int = 3600
 
 
+#: api.web_tls に使える値
+WEB_TLS_MODES = ("off", "local_ca")
+
+
 @dataclass
 class ApiConfig:
     """Web API（サービス化・Web API設計書3.1節の内部API）。段階12-3までは従来のアプリの中で動かすため既定はOFF"""
@@ -197,6 +201,9 @@ class ApiConfig:
     #: 「パスワードは合っていて確認コードだけが違う」ログインの回数。core.totp.STOP_FAILURES になったら、パスワードと
     #: 確認コードでのログインを止める。0 に戻すのは管理者の操作（ログインの停止を解く・パスワードの変更）だけ
     web_totp_failures: int = 0
+    #: WebUI の HTTPS（段階 12-5e1）。"off"（HTTP）か "local_ca"（ClamQtPie のローカル CA で作った証明書。<データ>/tls/）。
+    #: 利用者が用意した証明書（"custom"）は v0.10.0 では受け付けない
+    web_tls: str = "off"
     #: WebUI のセッションの有効期限（最後の操作からの分）
     session_timeout_min: int = 30
 
@@ -402,6 +409,9 @@ def _validate_web(api: ApiConfig, warn) -> None:
         api.web_totp_last_step = 0
         api.web_recovery_code_hashes = []
         api.web_totp_failures = 0
+    if api.web_tls not in WEB_TLS_MODES:
+        warn(f"api.web_tls が不正な値です ({api.web_tls!r})。off へ補正します。")
+        api.web_tls = "off"
     if not isinstance(api.web_off_at, str) or (api.web_off_at and parse_off_at(api.web_off_at) is None):
         warn(f"api.web_off_at が不正な値です ({api.web_off_at!r})。期限なしにします。")
         api.web_off_at = ""

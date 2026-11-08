@@ -63,6 +63,11 @@ class ServicePaths:
         return self.data_dir / "secrets"
 
     @property
+    def tls_dir(self) -> Path:
+        """WebUI の HTTPS のローカル CA・サーバー証明書（core/local_ca.py。段階 12-5e1）"""
+        return self.data_dir / "tls"
+
+    @property
     def config_dir(self) -> Path:
         return self.config_file.parent
 

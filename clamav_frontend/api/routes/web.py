@@ -11,6 +11,8 @@ WebUI の設定とログインの API（サービス化・Web API設計書 6.11�
   していなければパスワード）
 - POST /web/totp・DELETE /web/totp（admin の Bearer だけ）: 二段階認証の設定・解除（段階 12-5d）。設定していれば、
   ログインにはパスワードに加えて確認コード（予備のコードも可）が要る。一度受け付けたコードは二度と受け付けない
+- PUT /web/tls・POST /web/tls/reset-ca（admin の Bearer だけ）: HTTPS の方式とローカル CA の作り直し（段階 12-5e1）。
+  HTTPS のときは、セッションの Cookie を __Host-clamqtpie_session（Secure）にする
 - ログイン・ログアウト・失敗・ロック・再確認を、接続元付きでログに残す
 """
 from __future__ import annotations
@@ -22,7 +24,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from api.auth import SESSION_COOKIE, require_bearer_admin, require_user, require_web_session
+from api.auth import require_bearer_admin, require_user, require_web_session, session_cookie_name
 from core.exceptions import ApiAuthError, ApiLoginLockedError, ApiReauthRequiredError
 from core.logger import CATEGORY_SYSTEM, log_event
 from core.text_safety import visible_controls
@@ -54,6 +56,10 @@ class CredentialsBody(_Body):
 class TotpBody(_Body):
     secret: str = Field(max_length=128)
     code: str = Field(max_length=32)
+
+
+class TlsBody(_Body):
+    mode: str = Field(max_length=16)
 
 
 class LoginBody(_Body):
@@ -109,6 +115,18 @@ async def web_totp_enable(request: Request, body: TotpBody) -> dict:
 async def web_unlock(request: Request) -> dict:
     """確認コードの間違いが続いて止めたログインを解く"""
     return await _ctx(request).invoker.run(_web(request).unlock)
+
+
+@web_router.put("/web/tls", dependencies=[Depends(require_bearer_admin)])
+async def web_tls(request: Request, body: TlsBody) -> dict:
+    """HTTPS の方式（off・local_ca。段階 12-5e1）"""
+    return await _ctx(request).invoker.run(_web(request).set_tls, body.mode)
+
+
+@web_router.post("/web/tls/reset-ca", dependencies=[Depends(require_bearer_admin)])
+async def web_tls_reset_ca(request: Request) -> dict:
+    """ローカル CA を作り直す（全端末で登録のやり直しが要る）"""
+    return await _ctx(request).invoker.run(_web(request).reset_ca)
 
 
 @web_router.delete("/web/totp", dependencies=[Depends(require_bearer_admin)])
@@ -187,7 +205,8 @@ async def login(request: Request, body: LoginBody) -> JSONResponse:
         raise ApiAuthError("ユーザー名またはパスワードが違います")
     client = _client(request)
     web.guard.success(client)
-    web.sessions.destroy(request.cookies.get(SESSION_COOKIE))  # 付いていた古いセッションは使わない
+    cookie = session_cookie_name(request)
+    web.sessions.destroy(request.cookies.get(cookie))  # 付いていた古いセッションは使わない
     session = web.sessions.create(client)
     log_event(CATEGORY_SYSTEM, f"WebUI にログインしました（ユーザー名: {api.web_username}、接続元: {client}）")
     response = JSONResponse({
@@ -198,7 +217,8 @@ async def login(request: Request, body: LoginBody) -> JSONResponse:
         "totp": bool(api.web_totp_enabled),
         **_recovery_notice(request, used),
     })
-    response.set_cookie(SESSION_COOKIE, session.id, httponly=True, samesite="strict", path="/")
+    response.set_cookie(cookie, session.id, httponly=True, samesite="strict", path="/",
+                        secure=request.url.scheme == "https")
     return response
 
 
@@ -219,7 +239,8 @@ def logout(request: Request, session=Depends(require_web_session)) -> Response:
     _web(request).sessions.destroy(session.id)
     log_event(CATEGORY_SYSTEM, f"WebUI からログアウトしました（接続元: {_client(request)}）")
     response = Response(status_code=204)
-    response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, samesite="strict")
+    https = request.url.scheme == "https"
+    response.delete_cookie(session_cookie_name(request), path="/", httponly=True, samesite="strict", secure=https)
     return response
 
 

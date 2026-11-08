@@ -23,6 +23,14 @@
       <p class="muted small">二段階認証を設定していなければ、空欄のままでかまいません。</p>
       <button type="submit" class="primary">ログイン</button>
       <p id="login-error" class="error" role="alert"></p>
+      <!-- HTTPS（ローカル CA）のときだけ出す。端末に CA 証明書を登録すると、警告なしで開ける（段階 12-5e1） -->
+      <section id="login-ca" class="login-ca muted small" hidden>
+        <p>この WebUI は ClamQtPie のローカル CA の証明書を使っています。ブラウザの警告を出さないようにするには、
+          CA 証明書をこの端末に登録してください。登録の前に、フィンガープリントが ClamQtPie を動かしている PC の表示
+          （clamqtpie-ctl web tls status）と同じことを確かめてください。</p>
+        <p><a id="login-ca-link" href="/web/ca.crt" download="clamqtpie-ca.crt">CA 証明書をダウンロード</a></p>
+        <p>SHA-256: <code id="login-ca-fingerprint"></code></p>
+      </section>
     </form>
   </main>
 

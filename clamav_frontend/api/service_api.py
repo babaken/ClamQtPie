@@ -98,7 +98,7 @@ class ServiceApi:
             service_mode=True, requester_home=requester_home,
         )
         tokens = ApiTokens(rt.paths.api_dir)
-        context.web = self.web = WebController(context, tokens)
+        context.web = self.web = WebController(context, tokens, tls_dir=rt.paths.tls_dir)
         server = ApiServer(create_app(tokens, context), config.api.port, tokens=tokens)
         try:
             tokens.write_files()
@@ -170,6 +170,7 @@ class ServiceApi:
         web = getattr(self, "web", None)
         if web is not None:
             web.check_timer()  # 決めた時刻になったら WebUI を OFF にする（2 秒ごと。日時の比べだけ）
+            web.check_tls()  # 1 日 1 回、HTTPS のサーバー証明書の名前・期限を確かめる
         rt = self.runtime
         reachable = self._clamd_running
         self._status.on_status(SimpleNamespace(

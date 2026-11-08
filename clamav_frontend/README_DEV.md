@@ -1594,3 +1594,25 @@ Linux の実機（EndeavourOS・KDE Plasma 6 の Wayland・systemd 262）で tar
 | Linux の `clamqtpie-ctl --help` の起動 | 161 ms | 100 ms |
 
 - テスト（`test_service_access.py`）: spec の Analysis が `noarchive=True` で、実行時に使わないものを入れないことを確かめる
+
+## 79. 段階 12-5e1: WebUI の HTTPS（ローカル CA）
+
+サービス化・Web API設計書 3.5節。12-5e は 2 つに分けた（e1: HTTPS とローカル CA、e2: LAN からの接続）。決めたことの記録は internal の `docs/dig/2026-11-05-12-5e.md`。HTTPS は LAN からの接続の前提で、v0.10.0 では `clamqtpie-ctl web tls` だけで有効にする（トレイGUI には出さない）。
+
+- **LAN の範囲**（`core/net_scope.py`）: 各インターフェースの IPv4 のアドレスとネットマスク（psutil）から、直接つながっているサブネットを求める。プライベートアドレス（10/8・172.16/12・192.168/16）だけで、リンクローカル・ループバック・/32 を除く。仮想ブリッジ・VPN（`docker*`・`br-*`・`virbr*`・`veth*`・`tun*`・`wg*`・`vEthernet (WSL…)`・`vEthernet (Default Switch)` など）を名前で除く。Windows のインターフェースの名前は「イーサネット 3」のような表示名で見分けられないため、レジストリのアダプターの説明（DriverDesc。`VirtualBox Host-Only`・`TAP-Windows`・`WireGuard` など）でも除く（実機で VirtualBox のホストだけのネットワーク 192.168.56.0/24 が LAN に入っていたため）。e2 の接続元の検査・待ち受けのアドレスもこれを使う
+- **IPv4 だけ**（設計書からの変更）: 家庭の IPv6 の多くはグローバルアドレスで許可の条件（プライベートだけ）に入らず、一時アドレスは 1 日ほどで変わって証明書の作り直しが続くため。ループバックの `::1` は今までどおり
+- **ローカル CA**（`core/local_ca.py`）: ECDSA P-256・2 年・`BasicConstraints(ca, pathlen=0)`・Name Constraints（critical）。許す名前は localhost・このPC の名前（短い名前・FQDN・`.local`・`.lan`・`.home.arpa`。DNS に使えない文字を含む名前は入れない）、許す IP は 127.0.0.0/8 と CA を作った時点の LAN のサブネット。サーバー証明書は 1 年・SAN は名前と 127.0.0.1・各 LAN のアドレス（CA の Name Constraints の外のものは入れない）。置き場所は `<データ>/tls/`（`ServicePaths.tls_dir`。鍵は `write_private_file` で SYSTEM・root だけ）
+- **自動更新**: WebUI を HTTPS で待ち受けるときと 1 日 1 回（`WebController.check_tls`。2 秒ごとの定期処理から呼び、前回から 1 日たったときだけ確かめる）、サーバー証明書の名前・アドレスの変化か期限まで 30 日を切ったことを見て作り直し、待ち受けだけを始め直す（セッションは残す）
+- **CA は自動では作り直さない**: 作り直すとすべての端末で登録のやり直しになるため。期限の 30 日前から・サブネットが CA を作ったときと変わったら、`GET /web` の `tls_info.notes`・`web status`・`web tls status` で `web tls reset-ca` を案内する。期限が切れたら作らずに、前のサーバー証明書があれば HTTPS のまま待ち受ける（ブラウザに警告が出る。LAN 許可を OFF にするのは e2）
+- **このPC の信頼ストアには登録しない**: ループバックは HTTP でもブラウザが安全な接続として扱うので、このPC で HTTPS を使う利点は小さく、信頼ストアの書き換えは乗っ取られたときの影響を広げる。このPC もほかの端末と同じく `web tls export-ca` で書き出して手で登録する
+- **CA 証明書の配布**（設計書からの変更）: HTTP の別ポート（`api.web_ca_port`、8767）は作らない。HTTPS の WebUI がログインの前でも `/web/ca.crt`（DER。Android・Windows・macOS でそのまま開ける）と `/web/ca-info`（SHA-256 のフィンガープリント）を配り、ログイン画面に「CA 証明書をダウンロード」とフィンガープリントを出す。守りの中心はフィンガープリントの照合で、別ポートで得られるのは「警告を一度越えなくてよい」ことだけのため。HTTP のときは 404。`http://` で開いたときの HTTPS への転送は無い
+- **待ち受け**: `ApiServer(tls=(サーバー証明書, 鍵))` で uvicorn に渡す（TLS 1.2 より古いものは Python の既定で受け付けない）。HTTPS の方式を変えたら待ち受けを始め直し、セッションをすべて破棄する
+- **Cookie**: HTTPS のときは `__Host-clamqtpie_session`（Secure・Path=/・Domain なし）。HTTP のときは今までどおり `clamqtpie_session`。どちらかは要求の scheme（`proxy_headers` は無効なので実際の接続のもの）で決める。HSTS は付けない。状態を変える要求の Origin は、scheme も含めて Host と同じであること（HTTPS の WebUI に HTTP のページから送らせない）
+- **CA を作り直した後の古いタブ**（Linux 実機の確認で見つけた）: 作り直す前から開いていたタブは、証明書の検証が通らずに要求が失敗するが、ブラウザの JavaScript には理由（証明書のエラーか）が渡らず、「サービスにつながりません」と見分けられない。そのため、つながらないときの文に「HTTPS の証明書（ローカル CA）を作り直した場合は、ページを読み直してください」を足した
+- **API**: `PUT /web/tls {"mode": "off"|"local_ca"}`・`POST /web/tls/reset-ca`（admin の Bearer だけ。reset-ca は前の CA のフィンガープリントを返す）。`GET /web` の `tls`・`tls_info`
+- **clamqtpie-ctl**: `web tls on|off|status|export-ca [FILE]|reset-ca [--yes]`。サービスが止まっていれば設定ファイルを変える・CA を消す（CA を作るのはサービスだけ）。reset-ca は、ローカル CA は失効させられないので前の CA を各端末から消すよう、フィンガープリント付きで案内する。CA の鍵を書き出すコマンドは無い。`web tls on|off` は、WebUI が ON なら切り替えた後の URL も出す（scheme が変わるため。Windows 実機の確認で、前の `http://` の URL を開いてしまったことから）
+- **Windows で CA 証明書を登録するとき**（Windows 実機の確認で見つけた）: .crt を開いて証明書のインポート ウィザードで「証明書の種類に基づいて、自動的に証明書ストアを選択する」を選ぶと、CA が「中間証明機関」に入る。Firefox 系のブラウザ（Floorp で確認）は Windows の証明書も読み込む（`security.enterprise_roots.enabled`）ため、ブラウザ自身に CA を登録して信頼しても、同じ CA が Windows の中間証明機関にあると `SEC_ERROR_UNKNOWN_ISSUER` で警告が消えない（中間証明機関から消すと通る。同じ作りのテスト用の証明書で再現と解消を確かめた）。README の登録手順（12-6）では、Windows は「証明書をすべて次のストアに配置する」→「信頼されたルート証明機関」を選ぶこと、Firefox 系は中間証明機関に入っていたら消すことを書く
+- **設定**: `api.web_tls`（`"off"`・`"local_ca"`、既定 off）。利用者が用意した証明書（`"custom"`・`use-cert`）は v0.10.0 では受け付けない（不正な値として off に戻す）
+- 依存に `cryptography` を加えた（証明書の作成。標準ライブラリの `ssl` では作れない）
+- **配布物の python3t.dll**（ビルドで見つけた）: Windows の Python 3.15 用の cryptography（abi3・abi3t の両方の印の wheel）の `_rust.pyd` は `python3t.dll` を読み込む。開発環境では Python 本体の `abi3t-compat/python3t.dll` が読み込まれるが、PyInstaller はこれを集めないため、配布物では「DLL load failed while importing _rust」になった。spec の `_extra_binaries()` で `_internal/` に入れる
+- セキュリティの確かめに bandit を使う（開発用。Windows の `.venv` は Python 3.15 で PyYAML のビルド済みの版が無いため、WSL の venv に入れた）。12-5e1 で変えたファイルに新しい指摘はなかった

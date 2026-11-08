@@ -76,10 +76,12 @@ class ApiServer:
     """uvicorn をスレッドで動かす。start() で待ち受けを始め、stop() で止める"""
 
     def __init__(self, app, port: int, tokens: ApiTokens | None = None, name: str = "ApiServer",
-                 event_tag: str = "internal") -> None:
+                 event_tag: str = "internal", tls: tuple[str, str] | None = None) -> None:
         """name: スレッドの名前（WebUI の待ち受けは "WebUI"）。event_tag: 止めるときに終わらせるイベントの購読の印
-        （内部 API と WebUI の待ち受けは同じ EventHub を使うため、自分の待ち受けの購読だけを終わらせる）"""
+        （内部 API と WebUI の待ち受けは同じ EventHub を使うため、自分の待ち受けの購読だけを終わらせる）。
+        tls: HTTPS で待ち受けるときの (サーバー証明書, 鍵) のファイル（WebUI だけ。段階 12-5e1）"""
         self._app = app
+        self._tls = tls
         self._port = port
         self._tokens = tokens  # 止めたときにトークンファイルを消す
         self._name = name
@@ -112,6 +114,9 @@ class ApiServer:
             proxy_headers=False,
             # 止めるときは、つながったままのイベントの購読（SSE）を待ち続けずに切る
             timeout_graceful_shutdown=1,
+            # HTTPS（WebUI だけ）。TLS 1.2 より古いものは Python の既定の設定で受け付けない
+            ssl_certfile=self._tls[0] if self._tls else None,
+            ssl_keyfile=self._tls[1] if self._tls else None,
         )
         self._server = uvicorn.Server(config)
         self._thread = threading.Thread(

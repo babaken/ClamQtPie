@@ -89,11 +89,22 @@ _EXCLUDES = [
 ]
 
 
+def _extra_binaries():
+    """PyInstaller が自動では集めない DLL。Windows の Python 3.15 では、abi3t の拡張モジュール（cryptography の
+    _rust.pyd。段階 12-5e1）が python3t.dll（Python 本体の abi3t-compat/ にある互換の DLL）を読み込む。無いと
+    配布物で「DLL load failed while importing _rust」になる"""
+    found = []
+    compat = Path(sys.base_prefix) / "abi3t-compat" / "python3t.dll"
+    if sys.platform == "win32" and compat.is_file():
+        found.append((str(compat), "."))
+    return found
+
+
 def _analysis(script: str, hidden=(), datas=()):
     return Analysis(
         [str(_ROOT / script)],
         pathex=[str(_ROOT)],
-        binaries=[],
+        binaries=_extra_binaries(),
         datas=list(datas),
         hiddenimports=_HIDDEN + list(hidden),
         hookspath=[],

@@ -81,6 +81,8 @@ label { display: inline-flex; align-items: center; gap: 6px; }
 .login { display: flex; justify-content: center; align-items: center; min-height: 100vh; }
 .login-card { width: 340px; display: flex; flex-direction: column; gap: 8px; }
 .login-card label { min-width: 0; }
+.login-ca { border-top: 1px solid var(--border); padding-top: 8px; }
+.login-ca code { word-break: break-all; }
 
 /* 画面の枠 */
 .topbar {

@@ -52,6 +52,9 @@ LISTENER_WEB = "web"
 #: WebUI のセッションの Cookie と、CSRF トークンを送るヘッダ。Cookie はポートで分かれないため、このPC で動く
 #: ほかのアプリ（127.0.0.1 の別のポート）の Cookie と名前が重ならないよう、アプリの名前を付ける
 SESSION_COOKIE = "clamqtpie_session"
+#: HTTPS のときの Cookie の名前（段階 12-5e1）。__Host- を付けると、ブラウザは Secure・Path=/・Domain なしのときだけ
+#: 受け付ける（HTTP のページや別の名前から上書きさせない）
+SECURE_SESSION_COOKIE = "__Host-clamqtpie_session"
 CSRF_HEADER = "x-csrf-token"
 
 
@@ -114,6 +117,12 @@ def is_web_request(request: Request) -> bool:
     return listener_of(request) == LISTENER_WEB
 
 
+def session_cookie_name(request: Request) -> str:
+    """この要求で使うセッションの Cookie の名前（HTTPS かどうかで分ける。uvicorn の proxy_headers は無効なので、
+    scheme は実際の接続のもの）"""
+    return SECURE_SESSION_COOKIE if request.url.scheme == "https" else SESSION_COOKIE
+
+
 def web_session(request: Request):
     """WebUI の要求のセッション（api.web_sessions.WebSession）。無い・期限切れなら 401。状態を変える要求は
     CSRF トークンも確かめる（違えば 403）"""
@@ -122,7 +131,7 @@ def web_session(request: Request):
         return cached
     if request.headers.get("authorization"):
         raise ApiAuthError("WebUI ではトークンでの認証は使えません")
-    session = request.app.state.web.sessions.get(request.cookies.get(SESSION_COOKIE))
+    session = request.app.state.web.sessions.get(request.cookies.get(session_cookie_name(request)))
     if session is None:
         raise ApiAuthError("ログインしてください")
     if request.method in _STATE_CHANGING_METHODS:
@@ -215,7 +224,8 @@ def _check_web_request(request: Request) -> JSONResponse | None:
             referer = request.headers.get("referer")
             parts = urlsplit(referer) if referer else None
             origin = f"{parts.scheme}://{parts.netloc}" if parts and parts.scheme else None
-        if origin is None or origin.lower() != f"http://{host}":
+        # scheme も同じであること（HTTPS の WebUI に HTTP のページから送らせない）
+        if origin is None or origin.lower() != f"{request.url.scheme}://{host}":
             return _reject(request, 403, "Origin がこの WebUI のものではありません")
     return None
 

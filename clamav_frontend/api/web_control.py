@@ -11,6 +11,10 @@ WebUI の待ち受けと設定（サービス化・Web API設計書 3.1節・3.3
 - 二段階認証（段階 12-5d）: 秘密鍵は頼む側（トレイGUI・clamqtpie-ctl）が作って QR コードを見せ、利用者が認証アプリの
   コードを入れた後で、秘密鍵とコードを一緒に POST /web/totp に送る（昇格を 1 回で済ませるため。サービスは仮の秘密鍵を
   持たない）。コードが合えば有効にし、予備のコードを返す（この応答でだけ）。設定・解除したらセッションをすべて破棄する
+- HTTPS（段階 12-5e1。api.web_tls == "local_ca"）: ローカル CA（core/local_ca.py）で作ったサーバー証明書で待ち受ける。
+  待ち受けを始めるときと 1 日 1 回、名前・アドレスの変化と期限を確かめ、作り直したら待ち受けを始め直す。CA は自動では
+  作り直さない（期限・サブネットの変化は status の tls_info.notes で知らせる）。HTTPS の ON/OFF・CA の作り直しは
+  PUT /web/tls・POST /web/tls/reset-ca（admin の Bearer だけ）
 - 「パスワードは合っていて確認コードだけが違う」ログインを数え（api.web_totp_failures）、totp.STOP_FAILURES 回になったら、
   管理者が解くまで（POST /web/unlock・パスワードの変更）パスワードと確認コードでのログインを止めて通知する。
   時間・ログインの成功・再起動では戻さない（パスワードが漏れた後のコードの総当たりを防ぐ）
@@ -19,7 +23,8 @@ from __future__ import annotations
 
 import copy
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from api.server import LOOPBACK_HOST, ApiServer
 from api.web_sessions import LoginGuard, WebSessions
@@ -28,6 +33,8 @@ from core.exceptions import ApiAuthError, ApiLoginLockedError, ConfigValidationE
 from core.logger import CATEGORY_SYSTEM, log_event
 from core.text_safety import visible_controls
 from core import totp
+from core.config_model import WEB_TLS_MODES
+from core.local_ca import CA_CERT, SERVER_CERT, SERVER_KEY, LocalCa
 from core.web_password import hash_password, password_problem, username_problem
 
 logger = logging.getLogger("clamav_frontend")
@@ -157,16 +164,32 @@ def consume_second_factor(config_service, factor) -> bool:
     return True
 
 
+def tls_changes(mode) -> dict:
+    """PUT /web/tls の本文から、変える api.* の値を作る"""
+    if mode not in WEB_TLS_MODES:
+        raise ConfigValidationError("HTTPS の方式は off か local_ca を指定してください", detail="mode")
+    return {"web_tls": mode}
+
+
+#: サーバー証明書の名前・期限を確かめる間隔
+_TLS_CHECK_INTERVAL = timedelta(days=1)
+
+
 def web_state_text(api) -> str:
     when = f"（{local_time_text(api.web_off_at)} に OFF）" if api.web_enabled and api.web_off_at else ""
     return f"{'ON' if api.web_enabled else 'OFF'}{when}"
 
 
 class WebController:
-    def __init__(self, context, tokens, server_factory=ApiServer) -> None:
+    def __init__(self, context, tokens, server_factory=ApiServer, tls_dir: Path | None = None) -> None:
+        """tls_dir: ローカル CA・サーバー証明書の置き場所（ServicePaths.tls_dir。None なら HTTPS を使えない）"""
         self._context = context
         self._tokens = tokens
         self._server_factory = server_factory
+        self.ca = LocalCa(tls_dir) if tls_dir is not None else None
+        #: 待ち受けているのが HTTPS か（Cookie の名前・Secure に使う）と、最後に証明書を確かめた時刻
+        self.serving_tls = False
+        self._tls_checked_at: datetime | None = None
         config_service = context.config_service
         self.sessions = WebSessions(lambda: config_service.current.api.session_timeout_min)
         self.guard = LoginGuard()
@@ -185,17 +208,19 @@ class WebController:
         """GET /web の内容（パスワードのハッシュは返さない）"""
         api = self._api
         port = self.server.port if self.is_running else api.web_port
+        scheme = "https" if api.web_tls != "off" else "http"
         return {
             "enabled": bool(api.web_enabled),
             "running": self.is_running,
             "lan": False,
-            "urls": [f"http://{LOOPBACK_HOST}:{port}/web/login"],
+            "urls": [f"{scheme}://{LOOPBACK_HOST}:{port}/web/login"],
             "username": api.web_username,
             "password_set": bool(api.web_password_hash),
             "totp_set": bool(api.web_totp_enabled),
             "recovery_codes_left": len(api.web_recovery_code_hashes) if api.web_totp_enabled else 0,
             "login_stopped": login_stopped(api),
-            "tls": "off",
+            "tls": api.web_tls,
+            "tls_info": self.tls_info(),
             "off_at": api.web_off_at or None,
             "session_timeout_min": api.session_timeout_min,
         }
@@ -208,7 +233,8 @@ class WebController:
             if self.server is not None:
                 self.stop()
             return
-        if self.server is not None and self.server.port != api.web_port:
+        want_tls = api.web_tls != "off"
+        if self.server is not None and (self.server.port != api.web_port or self.serving_tls != want_tls):
             self.stop()
         if self.server is None:
             self.start()
@@ -217,8 +243,12 @@ class WebController:
         from api.app import create_app
 
         port = self._api.web_port
+        tls = self._prepare_tls() if self._api.web_tls != "off" else None
+        if tls is False:
+            return
         app = create_app(self._tokens, self._context, listener="web", web=self)
-        server = self._server_factory(app, port, name="WebUI", event_tag="web")
+        kwargs = {"tls": tls} if tls else {}
+        server = self._server_factory(app, port, name="WebUI", event_tag="web", **kwargs)
         try:
             server.start()
         except (OSError, RuntimeError) as exc:
@@ -230,10 +260,82 @@ class WebController:
                          f"ポート {port} で待ち受けられなかったため、WebUI を OFF にしました")
             return
         self.server = server
-        log_event(CATEGORY_SYSTEM, f"WebUI の待ち受けを開始しました（{LOOPBACK_HOST}:{server.port}）")
+        self.serving_tls = bool(tls)
+        scheme = "https" if tls else "http"
+        log_event(CATEGORY_SYSTEM, f"WebUI の待ち受けを開始しました（{scheme}://{LOOPBACK_HOST}:{server.port}）")
+
+    def _prepare_tls(self):
+        """HTTPS の証明書を用意する。(サーバー証明書, 鍵) のファイル。用意できなければ WebUI を OFF にして False"""
+        problem = None
+        if self.ca is None:
+            problem = "HTTPS の証明書の置き場所がありません"
+        else:
+            try:
+                if self.ca.ensure():
+                    log_event(CATEGORY_SYSTEM, "WebUI の HTTPS のサーバー証明書を作りました")
+            except RuntimeError as exc:
+                # CA の期限切れ: 前の証明書があれば HTTPS のまま待ち受ける（ブラウザに警告が出る。12-5e の dig Q13）
+                logger.warning(str(exc), extra={"error_code": "E8100"})
+                if not self.ca.path(SERVER_CERT).is_file():
+                    problem = str(exc)
+            except Exception as exc:  # noqa: BLE001 - 証明書を作れなくても、サービスは止めずに WebUI を OFF にする
+                problem = f"HTTPS の証明書を作れませんでした (detail: {exc})"
+        self._tls_checked_at = datetime.now(timezone.utc)
+        if problem:
+            logger.warning(f"{problem}。WebUI を OFF にします", extra={"error_code": "E8100"})
+            self._save(web_enabled=False, web_off_at="")
+            self._notify("WebUI を開始できませんでした", f"{problem}。WebUI を OFF にしました")
+            return False
+        return str(self.ca.path(SERVER_CERT)), str(self.ca.path(SERVER_KEY))
+
+    def check_tls(self, now: datetime | None = None) -> bool:
+        """1 日 1 回、サーバー証明書の名前・アドレス・期限を確かめ、作り直したら待ち受けを始め直す（メインスレッドで、
+        定期的に呼ぶ）。始め直したら True"""
+        now = now or datetime.now(timezone.utc)
+        if not (self.is_running and self.serving_tls and self.ca is not None):
+            return False
+        if self._tls_checked_at is not None and now - self._tls_checked_at < _TLS_CHECK_INTERVAL:
+            return False
+        self._tls_checked_at = now
+        try:
+            renewed = self.ca.ensure(now=now)
+        except RuntimeError as exc:
+            logger.warning(str(exc), extra={"error_code": "E8100"})
+            return False
+        except Exception as exc:  # noqa: BLE001 - 作り直せなくても、今の証明書で待ち受けを続ける
+            logger.warning(f"WebUI の HTTPS のサーバー証明書を作り直せませんでした (detail: {exc})",
+                           extra={"error_code": "E8100"})
+            return False
+        if not renewed:
+            return False
+        log_event(CATEGORY_SYSTEM, "名前・アドレスの変化か期限のため、WebUI の HTTPS のサーバー証明書を作り直しました")
+        self._restart_listener()
+        return True
+
+    def _restart_listener(self) -> None:
+        """待ち受けだけを始め直す（セッションは残す）"""
+        if self.server is not None:
+            self.server.stop()
+            self.server = None
+        self.start()
+
+    def tls_info(self) -> dict | None:
+        """HTTPS の状態（CA のフィンガープリント・期限、サーバー証明書の名前、知らせること）。CA が無ければ None"""
+        if self.ca is None or self._api.web_tls == "off" or not self.ca.path(CA_CERT).is_file():
+            return None
+        status = self.ca.status()
+        return {
+            "ca_fingerprint": status.ca_fingerprint,
+            "ca_not_after": status.ca_not_after.isoformat() if status.ca_not_after else None,
+            "ca_expired": status.ca_expired,
+            "server_not_after": status.server_not_after.isoformat() if status.server_not_after else None,
+            "server_names": status.server_names,
+            "notes": status.notes,
+        }
 
     def stop(self) -> None:
         dropped = self.sessions.clear()
+        self.serving_tls = False
         if self.server is not None:
             self.server.stop()
             self.server = None
@@ -272,6 +374,35 @@ class WebController:
         log_event(CATEGORY_SYSTEM, f"Web API: WebUI のログインを設定しました（ユーザー名: {username}、"
                                    f"破棄したセッション: {dropped} 件{'、ログインの停止も解きました' if was_stopped else ''}）")
         return self.status()
+
+    def set_tls(self, mode) -> dict:
+        """PUT /web/tls（メインスレッドで呼ぶ）。方式を変えたら待ち受けを始め直し、セッションをすべて破棄する
+        （Cookie の名前・Secure が変わるため）"""
+        changes = tls_changes(mode)
+        if changes["web_tls"] == self._api.web_tls:
+            return self.status()
+        self._save(**changes)
+        dropped = self.sessions.clear()
+        self.apply()
+        state = "有効" if mode != "off" else "無効"
+        log_event(CATEGORY_SYSTEM, f"Web API: WebUI の HTTPS を{state}にしました（破棄したセッション: {dropped} 件）")
+        return self.status()
+
+    def reset_ca(self) -> dict:
+        """POST /web/tls/reset-ca（メインスレッドで呼ぶ）。ローカル CA とサーバー証明書を消し、HTTPS で待ち受けて
+        いれば作り直して待ち受けを始め直す。前の CA のフィンガープリントを返す（各端末から消してもらうため）"""
+        if self.ca is None:
+            raise ConfigValidationError("HTTPS の証明書の置き場所がありません", detail="tls")
+        old = self.ca.status().ca_fingerprint
+        self.ca.remove()
+        dropped = self.sessions.clear()
+        if self.server is not None:
+            self._restart_listener()
+        log_event(CATEGORY_SYSTEM, f"Web API: WebUI のローカル CA を作り直しました（前の CA: {old or 'なし'}、"
+                                   f"破棄したセッション: {dropped} 件）")
+        result = self.status()
+        result["previous_ca_fingerprint"] = old
+        return result
 
     def unlock(self) -> dict:
         """POST /web/unlock（メインスレッドで呼ぶ）"""

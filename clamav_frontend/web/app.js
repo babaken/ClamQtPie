@@ -7,7 +7,9 @@
 "use strict";
 
 const API = "/api/v1";
-const OFFLINE_MESSAGE = "サービスにつながりません。WebUI が OFF になったか、サービスが止まった可能性があります";
+// つながらない理由はブラウザから分からない（証明書のエラーも同じ失敗になる）ため、HTTPS の証明書を作り直した場合も書く
+const OFFLINE_MESSAGE = "サービスにつながりません。WebUI が OFF になったか、サービスが止まった可能性があります。"
+  + "HTTPS の証明書（ローカル CA）を作り直した場合は、ページを読み直してください";
 const state = {
   csrf: null,
   username: "",
@@ -245,6 +247,21 @@ function showLogin(message = "") {
   $("login-password").value = "";
   $("login-code").value = "";
   $("login-username").focus();
+}
+
+/** HTTPS（ローカル CA）のとき、ログイン画面に CA 証明書のダウンロードとフィンガープリントを出す */
+async function showCaInfo() {
+  if (location.protocol !== "https:") return;
+  try {
+    const response = await fetch("/web/ca-info", { credentials: "same-origin" });
+    if (!response.ok) return;
+    const info = await response.json();
+    if (!info.fingerprint) return;
+    $("login-ca-fingerprint").textContent = info.fingerprint;
+    $("login-ca").hidden = false;
+  } catch (_err) {
+    // 出せなくてもログインはできる
+  }
 }
 
 async function submitLogin(event) {
@@ -1168,5 +1185,6 @@ document.addEventListener("DOMContentLoaded", () => {
   $("quarantine-show-all").addEventListener("change", () => loadQuarantine().catch(handleError));
   $("reauth-dialog").addEventListener("cancel", () => finishReauth(false));
   updateScheduleForm();
+  showCaInfo();
   checkSession();
 });

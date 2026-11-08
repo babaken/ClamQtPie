@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -59,7 +60,11 @@ def test_home_shows_that_the_service_is_unreachable(qtbot):
     qtbot.addWidget(screen)
     clamav = MagicMock()
     clamav.ping.return_value = True
-    clamav.get_version.return_value = ("ClamAV 1.5.4", "28172", "Mon Nov 2 15:24:10 2026")
+    # 定義は今日の日付（古い定義の表示にならないように。clamd の書式は英語の曜日・月）
+    now = datetime.now()
+    day = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[now.weekday()]
+    month = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")[now.month - 1]
+    clamav.get_version.return_value = ("ClamAV 1.5.4", "28172", f"{day} {month} {now.day} {now:%H:%M:%S %Y}")
     screen.bind_services(clamav, SimpleNamespace(is_running=False), MagicMock(), MagicMock(), MagicMock())
     clamav.ping.reset_mock()
 
