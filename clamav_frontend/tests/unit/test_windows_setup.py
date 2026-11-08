@@ -67,7 +67,7 @@ def test_setup_install_registers_and_starts_the_service(tmp_path, monkeypatch):
     names = [" ".join(c[1:]) for c in runner.calls]
     assert any("localgroup ClamQtPie Users /add" in n for n in names)
     assert any(n.endswith("alice /add") for n in names)
-    assert any(n.endswith("--startup delayed install") for n in names)  # 遅延自動起動
+    assert any(n.endswith("--startup auto install") for n in names)  # 通常の自動起動（遅延にしない）
     assert "failure ClamQtPie reset= 86400 actions= restart/60000/restart/60000" in names
     assert "failureflag ClamQtPie 1" in names and "start ClamQtPie" in names
     assert "サービスを登録して開始しました" in out.getvalue()
@@ -79,7 +79,7 @@ def test_setup_install_updates_an_existing_service(tmp_path, monkeypatch):
     assert windows_setup.setup_install(tmp_path / "data", tmp_path, "", io.StringIO(), runner,
                                        check=lambda p: None) is False
     names = [" ".join(c[1:]) for c in runner.calls]
-    assert names.index("stop ClamQtPie") < next(i for i, n in enumerate(names) if n.endswith("delayed update"))
+    assert names.index("stop ClamQtPie") < next(i for i, n in enumerate(names) if n.endswith("--startup auto update"))
 
 
 def test_setup_uninstall_keeps_data_unless_purged(tmp_path):

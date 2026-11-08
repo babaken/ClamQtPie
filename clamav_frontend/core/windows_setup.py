@@ -73,7 +73,8 @@ def service_installed(runner=subprocess.run) -> bool:
 
 def register_service(app_dir: Path, runner=subprocess.run) -> None:
     command = "update" if service_installed(runner) else "install"
-    result = _run([*service_command(app_dir), "--startup", "delayed", command], runner)
+    # 通常の自動起動（遅延にすると、サインインした直後のトレイGUI が約 2 分つながらない。更新でも遅延を外す）
+    result = _run([*service_command(app_dir), "--startup", "auto", command], runner)
     if result.returncode != 0 or not service_installed(runner):
         raise SetupError(f"サービスを登録できません: {(result.stderr or result.stdout or '').strip()[:300]}")
     # 失敗したら 60 秒後に起動し直す（2 回まで、1 日で数え直す）。エラーで止まったときも対象にする（12-3d-2）
