@@ -171,6 +171,7 @@ class ServiceApi:
         if web is not None:
             web.check_timer()  # 決めた時刻になったら WebUI を OFF にする（2 秒ごと。日時の比べだけ）
             web.check_tls()  # 1 日 1 回、HTTPS のサーバー証明書の名前・期限を確かめる
+            web.check_lan()  # LAN から待ち受けていれば、1 分ごとに LAN のアドレスの変化を確かめる
         rt = self.runtime
         reachable = self._clamd_running
         self._status.on_status(SimpleNamespace(

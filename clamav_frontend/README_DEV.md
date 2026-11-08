@@ -1630,3 +1630,19 @@ Windows の実機の確認（#46）で見つけた。グループのメンバー
 
 - `register_service` は導入でも更新でも `--startup auto` で登録する（pywin32 は `auto` のとき遅延の設定を外すので、遅延で導入済みのサービスも更新で通常の自動起動になる）
 - clamd がまだ起動していなくても、サービスは今までどおりつなぎ直す
+## 82. 段階 12-5e2: WebUI の LAN からの接続（試験的）
+
+サービス化・Web API設計書 3.1節・3.3節。決めたことの記録は internal の `docs/dig/2026-11-05-12-5e.md`。v0.10.0 では試験的で、有効にできるのは `clamqtpie-ctl web lan on` だけ（トレイGUI には設定の項目を出さない）。
+
+- **許可の条件**（`core/web_lan.lan_problems`）: HTTPS（ローカル CA）・二段階認証を設定済み・パスワードが 12 文字以上（`web_password.MIN_LENGTH_LAN`）。満たさなければ `PUT /web {"lan": true}` は 400。HTTPS の無効化（`tls_changes`）・二段階認証の解除（`disable_totp`。ctl の `web totp reset` も）・12 文字より短いパスワード（`credential_changes`）・CA の期限切れ（`_prepare_tls`・`check_tls`。通知する）で `api.web_lan` を false に戻す。設定ファイルを書き換えて条件を満たさない true にしても、読み込むときに false に直す
+- **WebUI を OFF にしても許可は残す**（dig Q9）。ON にすると LAN からも待ち受ける。LAN から待ち受けていることは隠さず見せる: `web status`、トレイの WebUI のサブメニュー（「LAN からの接続: 許可（試験的）」の行）、トレイから ON にするときの昇格の確認画面（本文に `lan: true` を付けて送り、「LAN からも接続できます」と出す）、WebUI の画面の上の帯
+- **待ち受け**: HTTPS で待ち受けるときだけ、ループバックと LAN の各アドレス（`LanScope.listen_hosts`）の同じポートで待ち受ける（`ApiServer(hosts=...)`。uvicorn にソケットを複数渡す）。`create_listen_socket` は、ループバックのほかは `allow_lan` のときの LAN のアドレス（プライベートの IPv4）だけを受け付ける（`0.0.0.0` などで待ち受けない）。LAN のアドレス・サブネットの変化は 1 分ごとに確かめ（`check_lan`）、変わったら待ち受けを始め直す（サーバー証明書も、名前・アドレスが変われば作り直される）
+- **接続元・Host**（`api/auth._check_web_request`）: LAN から待ち受けているときだけ（`web.scope`）、接続元に LAN のサブネットを、Host にこのPC の名前（短い名前・`.local`・`.lan`・`.home.arpa`・FQDN）と LAN のアドレスを加える。Origin が Host と同じであることは今までどおり
+- **セッション**: LAN からの接続を許可している間の有効期限は 15 分（設定の値がもっと短ければそちら。`web_lan.session_timeout_min`）。許可を変えたらセッションをすべて破棄する
+- **全体のロック**（`LoginGuard.lan_failure`）: LAN からのログイン・再確認の失敗が 1 時間に 30 回になったら、LAN からのログインを 15 分止めて通知する（接続元を変えながらの総当たり）。このPC のブラウザからのログインは止めない。接続元ごとのロック（5 回で 5 分）は今までどおり
+- **Windows のファイアウォール**: LAN から待ち受けるときに受信の規則 `ClamQtPie WebUI`（TCP の WebUI のポート、`remoteip=localsubnet`、`profile=private`、サービスの実行ファイルだけ）を作り直し、待ち受けをやめたら消す。削除（`setup uninstall`）でも消す。LAN のネットワークがパブリックなら、規則は広げずに「プライベートに切り替えるとつながる（信頼できないネットワークでは切り替えない）」と知らせる（`Get-NetConnectionProfile`。dig Q8）
+- **Linux のファイアウォール**: 変えない。ufw・firewalld が有効なら開け方を、無効なら注意を知らせる（`web status` の「注意」）
+- **トレイGUI の LAN・HTTPS の設定の項目と、隠し設定 `api.web_lan_menu` は作らなかった**（全体の dig で、v0.10.0 では隠す前提だった）。隠したまま使われない UI を足すより、試験的でなくすときにトレイの項目とあわせて作るほうが、確かめる範囲が小さいため
+- `clamqtpie-ctl web lan on|off`。HTTPS の無効化・二段階認証の解除・短いパスワードで許可が OFF になったら、そのことも表示する。`api.web_lan` は `config set` では変えさせない
+- **`clamqtpie-ctl web tls renew`**（`POST /web/tls/renew`）: CA はそのままで、サーバー証明書だけを作り直す。Windows の実機の確認（Android の Firefox）で見つけた: 端末で警告を越えて証明書の例外を作ると、後で CA を登録しても、例外がある間は「接続が安全ではありません」と表示され続け、Android の Firefox には例外を消す画面が無い。例外はそのときのサーバー証明書に結び付くため、サーバー証明書を作り直すと使われなくなり、CA で確かめられる（実機で確かめた）。CA の登録はやり直さなくてよい
+- **`clamqtpie-ctl config set --restart` の止まるのを待つ処理**（Windows 実機の確認で見つけた不具合）: `sc stop` の後、`sc query` に RUNNING が無いことで止まったとみなしていたため、止まる途中（STOP_PENDING）で設定を書き換えて開始し、開始が 1056（動いている）で失敗していた（止まる途中のサービスが設定を上書きするおそれもある）。STOPPED（か登録が無い）になるまで待つ（`service_status.service_stopped`）

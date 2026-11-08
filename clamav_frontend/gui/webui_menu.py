@@ -11,7 +11,9 @@
 - 二段階認証の設定...（段階 12-5d）: 秘密鍵はダイアログで作って QR コードを見せ、利用者がコードを入れた後で、秘密鍵と
   コードを 1 回の昇格で POST /web/totp に送る。設定済みなら「設定し直す」「解除する」を選ぶ
 - ログインの停止を解く: 確認コードの間違いが続いて WebUI のログインを止めているときだけ使える（POST /web/unlock）
-- LAN・HTTPS の項目は 12-5e で足す
+- LAN からの接続を許可しているときは、状態の行の下に「LAN からの接続: 許可（試験的）」を出し（隠し設定によらず）、
+  ON にするときは本文に lan: true を付けて、昇格の確認画面に「LAN からも接続できます」と出す（段階 12-5e2）。
+  LAN・HTTPS の設定の項目はトレイには出さない（v0.10.0 では clamqtpie-ctl web lan・web tls だけ）
 """
 from __future__ import annotations
 
@@ -74,6 +76,8 @@ class WebUiMenu(QObject):
 
         self.state_action = QAction("WebUI: -", menu)
         self.state_action.setEnabled(False)
+        self.lan_action = QAction("LAN からの接続: 許可（試験的）", menu)
+        self.lan_action.setEnabled(False)
         self.open_action = QAction("ブラウザで開く", menu)
         self.on_menu = QMenu("ON にする", menu)
         self.duration_actions: list[QAction] = []
@@ -95,6 +99,7 @@ class WebUiMenu(QObject):
         self.unlock_action = QAction("ログインの停止を解く", menu)
 
         menu.addAction(self.state_action)
+        menu.addAction(self.lan_action)
         menu.addAction(self.open_action)
         menu.addSeparator()
         menu.addMenu(self.on_menu)
@@ -127,6 +132,7 @@ class WebUiMenu(QObject):
         status = self.status
         enabled = bool(status and status.get("enabled"))
         self.state_action.setText(state_text(status))
+        self.lan_action.setVisible(bool(status and status.get("lan")))
         self.open_action.setEnabled(enabled and bool(status.get("running")) and bool(status.get("urls")))
         self.on_menu.setEnabled(status is not None and not enabled)  # ON の間は「OFF にする時刻を変更...」
         self.timer_action.setEnabled(enabled)
@@ -159,7 +165,9 @@ class WebUiMenu(QObject):
             if login is None:
                 return
             operations.append(Operation("PUT", "/web/credentials", {"username": login[0], "password": login[1]}))
-        operations.append(Operation("PUT", "/web", {"enabled": True, **timer}))
+        # LAN からの接続を許可しているときは、確認画面で分かるように lan: true も送る（許可の設定は変わらない）
+        lan = {"lan": True} if (self.status or {}).get("lan") else {}
+        operations.append(Operation("PUT", "/web", {"enabled": True, **lan, **timer}))
         if self._run(operations) and login and login[2]:
             GeneratedPasswordDialog(self._parent(), login[0], login[1]).exec()
 

@@ -195,3 +195,44 @@ def test_systemd_start_resets_the_start_limit(monkeypatch):
         clamqtpie_ctl._control_service("start")
     assert calls == [["/usr/bin/systemctl", "reset-failed", "clamqtpie.service"],
                      ["/usr/bin/systemctl", "start", "clamqtpie.service"]]
+def test_windows_stop_waits_until_the_service_has_fully_stopped(monkeypatch):
+    """sc stop の後、止まる途中（STOP_PENDING）では次へ進まず、STOPPED になるまで待つ"""
+    import core.service_status as service_status
+
+    states = iter([b"STATE : 3  STOP_PENDING", b"STATE : 3  STOP_PENDING", b"STATE : 1  STOPPED"])
+    queries = []
+
+    class Result:
+        def __init__(self, stdout=b""):
+            self.returncode, self.stdout = 0, stdout
+
+    def run(command, **kwargs):
+        if command[1] == "query":
+            queries.append(command)
+            return Result(next(states))
+        return Result()
+
+    monkeypatch.setattr(clamqtpie_ctl.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(clamqtpie_ctl, "find_system_tool", lambda name, system: f"C:/Windows/System32/{name}.exe")
+    monkeypatch.setattr(service_status, "find_system_tool", lambda name, system: f"C:/Windows/System32/{name}.exe")
+    monkeypatch.setattr(clamqtpie_ctl.subprocess, "run", run)
+    monkeypatch.setattr(service_status.subprocess, "run", run)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    clamqtpie_ctl._control_service("stop")
+    assert len(queries) == 3
+
+
+def test_service_stopped_reads_the_state(monkeypatch):
+    import core.service_status as service_status
+    from core.service_status import service_stopped
+
+    # Linux で動かしても sc があるものとして読む
+    monkeypatch.setattr(service_status, "find_system_tool", lambda name, system: f"C:/Windows/System32/{name}.exe")
+
+    def run_with(code, out):
+        return lambda *a, **k: type("R", (), {"returncode": code, "stdout": out})()
+
+    assert service_stopped("Windows", run_with(0, b"STATE : 1  STOPPED")) is True
+    assert service_stopped("Windows", run_with(0, b"STATE : 3  STOP_PENDING")) is False
+    assert service_stopped("Windows", run_with(0, b"STATE : 4  RUNNING")) is False
+    assert service_stopped("Windows", run_with(1060, b"")) is True  # 登録が無い

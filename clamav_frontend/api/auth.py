@@ -15,7 +15,8 @@ Web API の認証（サービス化・Web API設計書 3.1節・3.2節）
     セッションに結び付けた CSRF トークン（X-CSRF-Token）と Origin を確かめる。admin の操作（require_admin）は、
     再確認（POST /auth/reauth）から 5 分以内のセッションだけ（E8108）。PUT /web・PUT /web/credentials などは
     Bearer だけ（require_bearer_admin。WebUI からは 403）
-  - WebUI の接続元は、LAN からの接続（段階 12-5e）までループバックだけ
+  - WebUI の接続元はループバックだけ。LAN からの接続を許可して待ち受けているとき（web.scope。段階 12-5e2）は、
+    LAN のサブネットからも受け付け、Host にこのPC の名前・LAN のアドレスも使える
 """
 from __future__ import annotations
 
@@ -209,14 +210,20 @@ def check_request(request: Request) -> JSONResponse | None:
 
 
 def _check_web_request(request: Request) -> JSONResponse | None:
-    """WebUI に来た要求。接続元はループバックだけ（LAN は段階 12-5e）。状態を変える要求は Origin（無ければ
-    Referer）が必ず付いていて、Host と同じであること（ブラウザは fetch の POST などに Origin を付ける）"""
+    """WebUI に来た要求。接続元はループバック（LAN からの接続を許可して待ち受けているときは LAN のサブネットも）。
+    状態を変える要求は Origin（無ければ Referer）が必ず付いていて、Host と同じであること（ブラウザは fetch の POST などに
+    Origin を付ける）"""
     client = request.client.host if request.client else ""
-    if client not in _LOOPBACK_ADDRESSES:
-        return _reject(request, 403, "接続元がこのPC ではありません")
+    scope = getattr(getattr(request.app.state, "web", None), "scope", None)
+    if client not in _LOOPBACK_ADDRESSES and not (scope is not None and scope.allows_client(client)):
+        return _reject(request, 403, "接続元がこのPC・LAN ではありません" if scope else "接続元がこのPC ではありません")
     server_port = request.scope.get("server", (None, None))[1]
     host = request.headers.get("host", "").lower()
-    if host not in {f"{name}:{server_port}" for name in _LOOPBACK_HOSTNAMES}:
+    if scope is not None:
+        allowed = scope.allowed_hosts(server_port)
+    else:
+        allowed = {f"{name}:{server_port}" for name in _LOOPBACK_HOSTNAMES}
+    if host not in allowed:
         return _reject(request, 400, "Host が正しくありません")
     if request.method in _STATE_CHANGING_METHODS:
         origin = request.headers.get("origin")

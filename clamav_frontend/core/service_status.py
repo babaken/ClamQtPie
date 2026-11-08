@@ -40,6 +40,21 @@ def service_running(system: str | None = None, run=subprocess.run) -> bool:
         return False
 
 
+def service_stopped(system: str | None = None, run=None) -> bool:
+    """Windows: サービスが止まりきった（STOPPED。止まる途中の STOP_PENDING は含まない）か、登録が無ければ True。
+    確かめられないときは False（止まったとみなさない）"""
+    system = system or platform.system()
+    run = run or subprocess.run
+    try:
+        sc = find_system_tool("sc", system)
+        if sc is None:
+            return False
+        result = run([sc, "query", WINDOWS_SERVICE_NAME], capture_output=True, timeout=5, env=child_env(None, system))
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 1060 or (result.returncode == 0 and b"STOPPED" in (result.stdout or b""))
+
+
 #: systemd が起動の回数の上限で開始を断っているときの Result
 START_LIMIT_HIT = "start-limit-hit"
 

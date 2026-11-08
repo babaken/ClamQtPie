@@ -204,7 +204,10 @@ class ApiConfig:
     #: WebUI の HTTPS（段階 12-5e1）。"off"（HTTP）か "local_ca"（ClamQtPie のローカル CA で作った証明書。<データ>/tls/）。
     #: 利用者が用意した証明書（"custom"）は v0.10.0 では受け付けない
     web_tls: str = "off"
-    #: WebUI のセッションの有効期限（最後の操作からの分）
+    #: LAN からの接続を許可するか（段階 12-5e2。試験的）。HTTPS・二段階認証・12 文字以上のパスワードがそろったときだけ
+    #: true にでき、どれかが崩れたら false に戻す。WebUI を OFF にしても残す（ON にしたら LAN からも待ち受ける）
+    web_lan: bool = False
+    #: WebUI のセッションの有効期限（最後の操作からの分。LAN からの接続を許可している間は 15 分まで）
     session_timeout_min: int = 30
 
 
@@ -419,3 +422,11 @@ def _validate_web(api: ApiConfig, warn) -> None:
     if isinstance(timeout, bool) or not isinstance(timeout, int) or not (1 <= timeout <= 1440):
         warn(f"api.session_timeout_min が範囲外です ({timeout!r})。既定値30へ補正します。")
         api.session_timeout_min = 30
+    from core.web_lan import lan_problems
+
+    if not isinstance(api.web_lan, bool):
+        warn(f"api.web_lan が不正な値です ({api.web_lan!r})。false（LAN から接続しない）へ補正します。")
+        api.web_lan = False
+    if api.web_lan and lan_problems(api):
+        warn(f"api.web_lan の条件を満たしていません（{'、'.join(lan_problems(api))}）。false へ補正します。")
+        api.web_lan = False

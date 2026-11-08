@@ -129,7 +129,7 @@ def test_status_tells_when_the_webui_turns_off(env, monkeypatch):
     env.web.status = lambda: {"enabled": True, "off_at": "2026-11-04T09:00:00+00:00"}
     from api.routes.read import _web_status
 
-    assert _web_status(env.context) == {"enabled": True, "off_at": "2026-11-04T09:00:00+00:00"}
+    assert _web_status(env.context) == {"enabled": True, "off_at": "2026-11-04T09:00:00+00:00", "lan": False}
 
 
 # -- 画面のファイル（XSS・CSP） --------------------------------------------------------------------------

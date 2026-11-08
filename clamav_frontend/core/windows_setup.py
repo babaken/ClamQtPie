@@ -150,6 +150,9 @@ def setup_uninstall(data_dir: Path, purge: bool, out, runner=subprocess.run) -> 
     stop_service(runner)
     remove_service(runner)
     print("サービスの登録を消しました", file=out)
+    from core.web_lan import close_firewall
+
+    close_firewall(runner)  # WebUI の LAN からの接続の規則（サービスが止まるときにも消すが、残っていれば）
     if purge:
         if data_dir.exists() and not data_dir.is_symlink():
             shutil.rmtree(data_dir)

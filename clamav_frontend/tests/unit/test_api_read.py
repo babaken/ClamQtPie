@@ -112,7 +112,7 @@ def test_status(env):
     assert body["update"]["running"] is False and body["update"]["auto_update"] is True
     assert body["schedule"] == {"next_run": "2026-11-01T03:00:00+09:00", "next_job_name": "毎晩フルスキャン"}
     assert body["quarantine"] == {"count": 1}  # 復元済みは数えない
-    assert body["web"] == {"enabled": False, "off_at": None}
+    assert body["web"] == {"enabled": False, "off_at": None, "lan": False}
     assert isinstance(body["definitions"]["age_days"], int)
 
 

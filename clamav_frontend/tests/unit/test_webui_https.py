@@ -388,3 +388,28 @@ def test_ctl_web_tls_uses_the_url_the_service_returns(tmp_path, monkeypatch):
     out = io.StringIO()
     clamqtpie_ctl.main(["--data-dir", str(tmp_path / "svc"), "web", "tls", "on"], out=out)
     assert "URL: https://127.0.0.1:8766/web/login" in out.getvalue()
+def test_renewing_the_server_certificate_keeps_the_ca(env):
+    """サーバー証明書だけを作り直す（CA はそのまま。端末の CA の登録はやり直さなくてよい）"""
+    env.internal.put(f"{API_PREFIX}/web/tls", headers=env.admin, json={"mode": "local_ca"})
+    ca = env.web.ca
+    before_ca, before_server = ca.status().ca_fingerprint, ca.server_cert().serial_number
+    status = env.internal.post(f"{API_PREFIX}/web/tls/renew", headers=env.admin).json()
+    assert status["tls_info"]["ca_fingerprint"] == before_ca
+    assert ca.server_cert().serial_number != before_server and _Server.instances[-1].is_running
+    browser = _browser(env, HTTPS)
+    assert browser.post(f"{API_PREFIX}/web/tls/renew", headers={"Origin": HTTPS}).status_code in (401, 403)
+
+
+def test_ctl_web_tls_renew_while_the_service_is_stopped(tmp_path, monkeypatch):
+    import clamqtpie_ctl
+
+    monkeypatch.setattr(clamqtpie_ctl, "service_running", lambda *a, **k: False)
+    monkeypatch.setattr(clamqtpie_ctl, "_audit", lambda paths, message: None)
+    data = tmp_path / "svc"
+    ca = LocalCa(clamqtpie_ctl.ServicePaths.under(data).tls_dir)
+    ca.ensure(NAMES)
+    fingerprint = ca.status().ca_fingerprint
+    out = io.StringIO()
+    assert clamqtpie_ctl.main(["--data-dir", str(data), "web", "tls", "renew"], out=out) == 0
+    assert ca.server_cert() is None and ca.has_ca() and ca.status().ca_fingerprint == fingerprint
+    assert "作り直しました" in out.getvalue()

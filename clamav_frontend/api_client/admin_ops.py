@@ -199,9 +199,16 @@ def _web_timer_text(body: dict) -> str:
 def _describe_web(body: dict) -> list[str]:
     timer = "off_at" in body or "off_after_min" in body
     if body.get("enabled") is True:
+        if body.get("lan") is True:
+            return ["WebUI を ON にします（このPC のブラウザと、LAN からも接続できます。LAN からの接続は試験的）",
+                    f"  {_web_timer_text(body)}"]
         return ["WebUI を ON にします（このPC のブラウザから使えるようにします）", f"  {_web_timer_text(body)}"]
     if body.get("enabled") is False:
         return ["WebUI を OFF にします（ログイン中の WebUI はすべてログアウトします）"]
+    if body.get("lan") is True:
+        return ["WebUI の LAN からの接続を許可します（試験的）"]
+    if body.get("lan") is False:
+        return ["WebUI の LAN からの接続をやめます（このPC のブラウザだけにします）"]
     if timer:
         return [f"WebUI を OFF にする時刻を変えます: {_web_timer_text(body)}"]
     return ["WebUI の設定を変えます"]

@@ -200,6 +200,14 @@ class LocalCa:
         write_private_file(self.path(SERVER_CERT), _cert_pem(cert))
         return cert
 
+    def remove_server(self) -> None:
+        """サーバー証明書と鍵だけを消す（CA は残す。次の ensure で同じ CA から作り直す）"""
+        for name in (SERVER_CERT, SERVER_KEY):
+            try:
+                self.path(name).unlink()
+            except FileNotFoundError:
+                pass
+
     def remove(self) -> None:
         """CA とサーバー証明書を消す（CA の作り直し・HTTPS を使わなくなったとき）"""
         if self.directory.is_symlink():

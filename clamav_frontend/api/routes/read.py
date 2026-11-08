@@ -82,9 +82,10 @@ def get_status(request: Request) -> dict:
 def _web_status(ctx) -> dict:
     web = getattr(ctx, "web", None)
     if web is None:
-        return {"enabled": False, "off_at": None}
+        return {"enabled": False, "off_at": None, "lan": False}
     status = web.status()
-    return {"enabled": status["enabled"], "off_at": status["off_at"]}
+    # lan: LAN から待ち受けているか（WebUI の画面に出す。段階 12-5e2）
+    return {"enabled": status["enabled"], "off_at": status["off_at"], "lan": bool(status.get("lan_listening"))}
 
 
 # -- 6.3〜6.7 一覧 ---------------------------------------------------------------------

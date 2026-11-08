@@ -11,7 +11,8 @@ WebUI の設定とログインの API（サービス化・Web API設計書 6.11�
   していなければパスワード）
 - POST /web/totp・DELETE /web/totp（admin の Bearer だけ）: 二段階認証の設定・解除（段階 12-5d）。設定していれば、
   ログインにはパスワードに加えて確認コード（予備のコードも可）が要る。一度受け付けたコードは二度と受け付けない
-- PUT /web/tls・POST /web/tls/reset-ca（admin の Bearer だけ）: HTTPS の方式とローカル CA の作り直し（段階 12-5e1）。
+- PUT /web/tls・POST /web/tls/reset-ca・POST /web/tls/renew（admin の Bearer だけ）: HTTPS の方式、ローカル CA の作り直し
+  （段階 12-5e1）、サーバー証明書だけの作り直し（段階 12-5e2）。
   HTTPS のときは、セッションの Cookie を __Host-clamqtpie_session（Secure）にする
 - ログイン・ログアウト・失敗・ロック・再確認を、接続元付きでログに残す
 """
@@ -30,6 +31,8 @@ from core.logger import CATEGORY_SYSTEM, log_event
 from core.text_safety import visible_controls
 from core.web_password import usernames_match, verify_password
 from api.web_control import login_stopped
+from api.web_sessions import GLOBAL_MAX_FAILURES
+from core.web_lan import is_loopback, session_timeout_min
 
 logger = logging.getLogger("clamav_frontend")
 
@@ -123,6 +126,12 @@ async def web_tls(request: Request, body: TlsBody) -> dict:
     return await _ctx(request).invoker.run(_web(request).set_tls, body.mode)
 
 
+@web_router.post("/web/tls/renew", dependencies=[Depends(require_bearer_admin)])
+async def web_tls_renew(request: Request) -> dict:
+    """サーバー証明書だけを作り直す（CA はそのまま。端末に残った証明書の例外を使わせなくする）"""
+    return await _ctx(request).invoker.run(_web(request).renew_server)
+
+
 @web_router.post("/web/tls/reset-ca", dependencies=[Depends(require_bearer_admin)])
 async def web_tls_reset_ca(request: Request) -> dict:
     """ローカル CA を作り直す（全端末で登録のやり直しが要る）"""
@@ -145,18 +154,25 @@ def _check_login(entered_user: str, password: str, api) -> bool:
 
 def _raise_if_locked(request: Request) -> None:
     # 残りの時間は書かない（確認コードの間違いによる停止と、応答を同じにするため）
-    if _web(request).guard.locked_seconds(_client(request)):
+    client = _client(request)
+    guard = _web(request).guard
+    if guard.locked_seconds(client) or (not is_loopback(client) and guard.global_locked_seconds()):
         raise ApiLoginLockedError()
 
 
-def _count_failure(request: Request, what: str) -> None:
+async def _count_failure(request: Request, what: str) -> None:
     client = _client(request)
-    locked = _web(request).guard.failure(client)
+    web = _web(request)
+    locked = web.guard.failure(client)
     logger.warning(f"WebUI の{what}に失敗しました（接続元: {visible_controls(client)}）",
                    extra={"error_code": ApiAuthError.default_code})
     if locked:
         logger.warning(f"WebUI のログインの失敗が続いたため、この接続元を 5 分間ロックしました（接続元: "
                        f"{visible_controls(client)}）", extra={"error_code": ApiLoginLockedError.default_code})
+    if not is_loopback(client) and web.guard.lan_failure():
+        logger.error(f"LAN からの WebUI のログインの失敗が 1 時間に {GLOBAL_MAX_FAILURES} 回になったため、LAN からの"
+                     "ログインを 15 分間止めました", extra={"error_code": ApiLoginLockedError.default_code})
+        await _ctx(request).invoker.run(web.notify_global_lock)
 
 
 async def _second_factor(request: Request, code):
@@ -194,12 +210,12 @@ async def login(request: Request, body: LoginBody) -> JSONResponse:
         if stopped and not (ok and factor is not None and factor[0] == "recovery"):
             # 止めている間は、パスワード・確認コードの正否によらず、接続元ごとのロックと同じ応答にする
             # （止まったことから、パスワードが合っていたと見分けさせない）。予備のコードだけは受け付ける
-            _count_failure(request, "ログイン")
+            await _count_failure(request, "ログイン")
             raise ApiLoginLockedError()
         ok = ok and factor is not None and await _ctx(request).invoker.run(web.consume_second_factor, factor)
         used = factor[0] if ok else None
     if not ok:
-        _count_failure(request, "ログイン")
+        await _count_failure(request, "ログイン")
         if api.web_totp_enabled:
             raise ApiAuthError("ユーザー名・パスワード・確認コードのどれかが違います")
         raise ApiAuthError("ユーザー名またはパスワードが違います")
@@ -213,8 +229,9 @@ async def login(request: Request, body: LoginBody) -> JSONResponse:
         "csrf_token": session.csrf_token,
         "username": api.web_username,
         "off_at": api.web_off_at or None,
-        "session_timeout_min": api.session_timeout_min,
+        "session_timeout_min": session_timeout_min(api),
         "totp": bool(api.web_totp_enabled),
+        "lan": web.scope is not None,
         **_recovery_notice(request, used),
     })
     response.set_cookie(cookie, session.id, httponly=True, samesite="strict", path="/",
@@ -229,9 +246,9 @@ def current_session(request: Request, session=Depends(require_web_session)) -> d
     reauthenticated は再確認から 5 分以内か（画面が、パスワードを聞かない場合にも変更の一覧を見せるため）"""
     api = _ctx(request).config_service.current.api
     return {"csrf_token": session.csrf_token, "username": api.web_username, "off_at": api.web_off_at or None,
-            "session_timeout_min": api.session_timeout_min,
+            "session_timeout_min": session_timeout_min(api),
             "reauthenticated": _web(request).sessions.is_reauthenticated(session),
-            "totp": bool(api.web_totp_enabled)}
+            "totp": bool(api.web_totp_enabled), "lan": _web(request).scope is not None}
 
 
 @auth_router.delete("/auth/session")
@@ -257,7 +274,7 @@ async def reauth(request: Request, body: ReauthBody, session=Depends(require_web
     else:
         ok = await run_in_threadpool(verify_password, body.password or "", api.web_password_hash)
     if not ok:
-        _count_failure(request, "再確認")
+        await _count_failure(request, "再確認")
         if web.guard.locked_seconds(_client(request)):
             web.sessions.destroy(session.id)  # ロックされたらセッションも破棄する（3.3節）
         raise ApiReauthRequiredError("確認コードが違います" if api.web_totp_enabled else "パスワードが違います")

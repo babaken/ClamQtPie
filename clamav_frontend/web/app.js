@@ -296,7 +296,7 @@ function enterApp(session) {
   state.username = session.username;
   state.totp = Boolean(session.totp);
   $("user-name").textContent = session.username;
-  showOffBanner(session.off_at);
+  showOffBanner(session.off_at, session.lan);
   $("login-view").hidden = true;
   $("app-view").hidden = false;
   startEvents();
@@ -304,19 +304,21 @@ function enterApp(session) {
   showScreen(state.screen);
 }
 
-function showOffBanner(offAt) {
+function showOffBanner(offAt, lan) {
+  // OFF にする時刻と、LAN から待ち受けていること（段階 12-5e2。隠さず見せる）
   const banner = $("off-banner");
-  if (!offAt) {
-    banner.hidden = true;
-    return;
+  const parts = [];
+  if (offAt) {
+    const date = new Date(offAt);
+    const today = new Date().toDateString() === date.toDateString();
+    const text = today
+      ? date.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })
+      : date.toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    parts.push(`この WebUI は ${text} に OFF になります`);
   }
-  const date = new Date(offAt);
-  const today = new Date().toDateString() === date.toDateString();
-  const text = today
-    ? date.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })
-    : date.toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
-  banner.textContent = `この WebUI は ${text} に OFF になります`;
-  banner.hidden = false;
+  if (lan) parts.push("LAN からも接続できます（試験的）");
+  banner.textContent = parts.join("。");
+  banner.hidden = parts.length === 0;
 }
 
 /* -------- 画面の切り替え -------- */
@@ -370,7 +372,7 @@ async function loadHome() {
   $("home-cards").replaceChildren(...cards);
   state.realtime = s.realtime.running;
   $("home-realtime-button").textContent = s.realtime.running ? "リアルタイム保護を止める" : "リアルタイム保護を始める";
-  if (s.web) showOffBanner(s.web.off_at);
+  if (s.web) showOffBanner(s.web.off_at, s.web.lan);
 }
 
 async function quickScan() {
@@ -1128,7 +1130,7 @@ async function checkSession(reconnect = false) {
     const session = await api("/auth/session");
     if (reconnect) {
       state.csrf = session.csrf_token;
-      showOffBanner(session.off_at);
+      showOffBanner(session.off_at, session.lan);
       if (!state.events || state.events.readyState === EventSource.CLOSED) startEvents();
     } else {
       enterApp(session);

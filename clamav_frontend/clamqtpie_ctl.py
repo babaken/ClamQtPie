@@ -87,6 +87,7 @@ _WEB_COMMAND_FIELDS = {
     "api.web_recovery_code_hashes": "web totp setup",
     "api.web_totp_failures": "web unlock",
     "api.web_tls": "web tls on / web tls off",
+    "api.web_lan": "web lan on / web lan off",
 }
 
 
@@ -302,11 +303,14 @@ def _control_service(action: str) -> None:
         raise CtlError(f"サービスを開始できませんでした（{result.returncode}）。サービスは止まっています。"
                        f"原因は {where} とサービスのログで確かめてください")
     if system == "Windows" and action == "stop":
-        # sc stop は止まるのを待たずに戻るため、止まるまで待つ
+        # sc stop は止まるのを待たずに戻るため、止まりきる（STOPPED）まで待つ。止まる途中（STOP_PENDING）で
+        # 次へ進むと、止まる途中のサービスが設定を上書きしたり、開始が 1056（動いている）で失敗したりする
         import time
 
+        from core.service_status import service_stopped
+
         for _ in range(60):
-            if not service_running(system):
+            if service_stopped(system):
                 return
             time.sleep(1)
         raise CtlError("サービスが止まりませんでした")
@@ -539,7 +543,8 @@ def _web_offline_save(paths: ServicePaths, changes: dict, message: str, out) -> 
     print("サービスは止まっています。設定ファイルを変えました（次の開始から使われます）", file=out)
 
 
-def _web_update(paths: ServicePaths, body: dict, out) -> dict:
+def _web_update(paths: ServicePaths, body: dict, out, message: str | None = None) -> dict:
+    """PUT /web（サービスが止まっていれば設定ファイルを変える。message はそのときの監査ログの文）"""
     from api.web_control import web_changes, web_state_text
     from core.exceptions import ConfigValidationError
 
@@ -553,7 +558,7 @@ def _web_update(paths: ServicePaths, body: dict, out) -> dict:
         raise CtlError(exc.message) from None
     for name, value in changes.items():
         setattr(config.api, name, value)
-    _web_offline_save(paths, changes, f"WebUI を {web_state_text(config.api)} にしました", out)
+    _web_offline_save(paths, changes, message or f"WebUI を {web_state_text(config.api)} にしました", out)
     return _web_status_offline(config.api)
 
 
@@ -570,7 +575,8 @@ _STOPPED_TEXT = ("止めています（パスワードは合っていて確認�
 
 def _web_status_offline(api_config) -> dict:
     scheme = "https" if api_config.web_tls != "off" else "http"
-    return {"enabled": api_config.web_enabled, "running": False, "lan": False,
+    return {"enabled": api_config.web_enabled, "running": False, "lan": bool(api_config.web_lan),
+            "lan_listening": False, "lan_notes": [],
             "urls": [f"{scheme}://127.0.0.1:{api_config.web_port}/web/login"], "username": api_config.web_username,
             "password_set": bool(api_config.web_password_hash), "totp_set": bool(api_config.web_totp_enabled),
             "recovery_codes_left": len(api_config.web_recovery_code_hashes) if api_config.web_totp_enabled else 0,
@@ -604,7 +610,15 @@ def _print_web_status(status: dict, out) -> None:
     print(f"HTTPS: {'無効' if tls == 'off' else '有効（ClamQtPie のローカル CA。web tls status で詳しく）'}", file=out)
     for note in (status.get("tls_info") or {}).get("notes", []):
         print(f"  注意: {note}", file=out)
-    print(f"LAN からの接続: {'許可' if status.get('lan') else '許可しない（このPC のブラウザだけ）'}", file=out)
+    if not status.get("lan"):
+        print("LAN からの接続: 許可しない（このPC のブラウザだけ）", file=out)
+        return
+    if status.get("lan_listening"):
+        print("LAN からの接続: 許可（試験的。LAN の端末からも上の URL で開けます）", file=out)
+    else:
+        print("LAN からの接続: 許可（試験的。WebUI を ON にしてサービスが動いていると、LAN からも待ち受けます）", file=out)
+    for note in status.get("lan_notes") or []:
+        print(f"  注意: {note}", file=out)
 
 
 def _read_new_password(generate: bool, from_stdin: bool, out, ask_password, read_line) -> str:
@@ -669,6 +683,7 @@ def cmd_web_totp(paths: ServicePaths, args, out, ask=input) -> int:
             _audit(paths, "clamqtpie-ctl: WebUI の二段階認証を解除しました")
             print("サービスは止まっています。設定ファイルを変えました（次の開始から使われます）", file=out)
         print("WebUI の二段階認証を解除しました", file=out)
+        _print_lan_turned_off(paths, config.web_lan, out)
         return EXIT_OK
     if action == "setup":
         if config.web_totp_enabled and ask(
@@ -707,6 +722,26 @@ def cmd_web_totp(paths: ServicePaths, args, out, ask=input) -> int:
 _REGISTER_HINT = ("ブラウザを使う端末（この PC を含む）に CA 証明書を登録すると、警告なしで開けます。web tls export-ca で"
                   "書き出すか、WebUI のログイン画面からダウンロードし、フィンガープリントがこの表示と同じことを確かめてから"
                   "登録してください（手順は README）")
+
+
+def _print_lan_turned_off(paths: ServicePaths, lan_before: bool, out) -> None:
+    """操作（HTTPS の無効化・二段階認証の解除・短いパスワード）で LAN からの接続の許可が OFF になったら知らせる"""
+    if lan_before and not _config_service(paths).load().api.web_lan:
+        print("LAN からの接続の許可も OFF にしました（条件を満たさなくなったため）", file=out)
+
+
+def cmd_web_lan(paths: ServicePaths, allow: bool, out) -> int:
+    """web lan on|off（段階 12-5e2。試験的）。許可の条件（HTTPS・二段階認証・12 文字以上のパスワード）は
+    サービス（止まっていればここ）が確かめる"""
+    state = "許可しました（試験的）" if allow else "やめました"
+    status = _web_update(paths, {"lan": allow}, out, f"WebUI の LAN からの接続を{state}")
+    print(f"WebUI の LAN からの接続を{state}（ログイン中の WebUI はログアウトします）", file=out)
+    _print_web_status(status, out)
+    if allow:
+        print("LAN の端末では、WebUI のログイン画面から CA 証明書をダウンロードし、フィンガープリントが web tls status の"
+              "表示と同じことを確かめてから登録してください（手順は README）。LAN から待ち受けている間のセッションの"
+              "有効期限は 15 分です", file=out)
+    return EXIT_OK
 
 
 def _local_ca(paths: ServicePaths):
@@ -752,6 +787,7 @@ def cmd_web_tls(paths: ServicePaths, args, out, ask=input) -> int:
         return EXIT_OK
     if action in ("on", "off"):
         mode = "local_ca" if action == "on" else "off"
+        lan_before = _config_service(paths).load().api.web_lan
         try:
             changes = tls_changes(mode)
         except ConfigValidationError as exc:
@@ -764,6 +800,7 @@ def cmd_web_tls(paths: ServicePaths, args, out, ask=input) -> int:
             status = _web_status_offline(_config_service(paths).load().api)
         print(f"WebUI の HTTPS を{'有効' if mode != 'off' else '無効'}にしました（ログイン中の WebUI はログアウトします）",
               file=out)
+        _print_lan_turned_off(paths, lan_before, out)
         _print_tls_status(paths, mode, out)
         # http と https が入れ替わるので、開き直す URL を出す（WebUI が OFF のときはつながらないので出さない）
         if status.get("enabled"):
@@ -771,6 +808,21 @@ def cmd_web_tls(paths: ServicePaths, args, out, ask=input) -> int:
                 print(f"URL: {url}（開いている WebUI はこの URL で開き直してください）", file=out)
         if mode != "off":
             print(_REGISTER_HINT, file=out)
+        return EXIT_OK
+    if action == "renew":
+        api = _web_api(paths)
+        if api is not None:
+            _web_call(api, "POST", "/web/tls/renew")
+        else:
+            try:
+                _local_ca(paths).remove_server()
+            except OSError as exc:
+                raise CtlError(f"サーバー証明書を消せませんでした（{exc}）") from None
+            _audit(paths, "clamqtpie-ctl: WebUI の HTTPS のサーバー証明書を作り直しました（CA はそのまま）")
+            print("サービスは止まっています。サーバー証明書を消しました（HTTPS が有効なら、次の開始で作り直します）", file=out)
+        print("サーバー証明書を作り直しました（CA はそのままなので、端末への CA の登録はやり直さなくてかまいません。"
+              "警告を越えて例外を作った端末も、開き直すと CA で確かめられます）", file=out)
+        _print_tls_status(paths, _config_service(paths).load().api.web_tls, out)
         return EXIT_OK
     if action == "reset-ca":
         old = _local_ca(paths).status().ca_fingerprint
@@ -827,6 +879,8 @@ def cmd_web(paths: ServicePaths, args, out, ask_password=getpass.getpass, read_l
         return cmd_web_totp(paths, args, out, ask)
     if action == "tls":
         return cmd_web_tls(paths, args, out, ask)
+    if action == "lan":
+        return cmd_web_lan(paths, args.lan_action == "on", out)
     try:
         if action == "status":
             api = _web_api(paths)
@@ -869,7 +923,8 @@ def cmd_web(paths: ServicePaths, args, out, ask_password=getpass.getpass, read_l
         from api.web_control import credential_changes
         from core.exceptions import ConfigValidationError
 
-        username = args.username or _config_service(paths).load().api.web_username
+        before = _config_service(paths).load().api
+        username = args.username or before.web_username
         password = _read_new_password(args.generate, args.password_stdin, out, ask_password, read_line)
         api = _web_api(paths)
         if api is not None:
@@ -881,6 +936,7 @@ def cmd_web(paths: ServicePaths, args, out, ask_password=getpass.getpass, read_l
                 raise CtlError(exc.message) from None
             _web_offline_save(paths, changes, f"WebUI のログインを設定しました（ユーザー名: {username}）", out)
         print(f"WebUI のログインを設定しました（ユーザー名: {username}）", file=out)
+        _print_lan_turned_off(paths, before.web_lan, out)
         if args.generate:
             # 生成したパスワードは端末にだけ 1 回表示する（ログには残さない）
             print(f"生成したパスワード（この画面にだけ表示します。控えてください）: {password}", file=out)
@@ -951,6 +1007,10 @@ def build_parser() -> argparse.ArgumentParser:
     totp_actions.add_parser("status", help="二段階認証の状態を表示する")
     reset = totp_actions.add_parser("reset", help="二段階認証を解除する（スマートフォンをなくしたときなど）")
     reset.add_argument("--yes", action="store_true", help="確認を省く")
+    lan_parser = web.add_parser("lan", help="LAN からの接続（試験的。HTTPS・二段階認証・12 文字以上のパスワードが要る）")
+    lan_actions = lan_parser.add_subparsers(dest="lan_action", required=True)
+    lan_actions.add_parser("on", help="LAN からの接続を許可する")
+    lan_actions.add_parser("off", help="LAN からの接続をやめる（このPC のブラウザだけにする）")
     tls_parser = web.add_parser("tls", help="WebUI の HTTPS（ClamQtPie のローカル CA）")
     tls_actions = tls_parser.add_subparsers(dest="tls_action", required=True)
     tls_actions.add_parser("on", help="HTTPS を有効にする（初回はローカル CA を作る）")
@@ -958,6 +1018,7 @@ def build_parser() -> argparse.ArgumentParser:
     tls_actions.add_parser("status", help="CA とサーバー証明書の期限・名前・フィンガープリントを表示する")
     export = tls_actions.add_parser("export-ca", help="CA 証明書を書き出す（省略時は標準出力へ PEM）")
     export.add_argument("file", nargs="?", help="書き出すファイル")
+    tls_actions.add_parser("renew", help="サーバー証明書だけを作り直す（CA はそのまま。端末に残った証明書の例外を使わせなくする）")
     reset_ca = tls_actions.add_parser("reset-ca", help="ローカル CA を作り直す（全端末で登録のやり直しが要る）")
     reset_ca.add_argument("--yes", action="store_true", help="確認を省く")
     return parser

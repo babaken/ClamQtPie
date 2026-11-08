@@ -6,8 +6,9 @@ WebUI の Cookie セッションと総当たり対策（サービス化・Web AP
   上書きされても破られないように。12章 29）
 - 有効期限は最後の操作から api.session_timeout_min 分
 - admin の操作の前の再確認（POST /auth/reauth）に成功すると、そのセッションを 5 分間「確認済み」にする
-- 同じ接続元から 5 回続けて失敗したら、その接続元のログインを 5 分間受け付けない（E8106）。全体のロック
-  （LAN からのログインだけが対象）は LAN からの接続（段階 12-5e）とあわせて作る
+- 同じ接続元から 5 回続けて失敗したら、その接続元のログインを 5 分間受け付けない（E8106）
+- 全体のロック（段階 12-5e2）: LAN からのログイン・再確認の失敗が 1 時間に 30 回になったら、LAN からのログインを
+  15 分間受け付けない（接続元を変えながらの総当たりを防ぐ。このPC のブラウザからは使える）
 - 状態はメモリだけに持つ（サービスを再起動したら、ログインし直す）
 """
 from __future__ import annotations
@@ -23,6 +24,10 @@ REAUTH_SEC = 5 * 60
 #: 同じ接続元からの、続けての失敗の上限と、ロックする時間
 MAX_FAILURES = 5
 LOCK_SEC = 5 * 60
+#: 全体のロック（LAN からの失敗だけを数える）: 期間・回数・ロックする時間
+GLOBAL_WINDOW_SEC = 60 * 60
+GLOBAL_MAX_FAILURES = 30
+GLOBAL_LOCK_SEC = 15 * 60
 #: 同時に持つセッションの上限（ログインを繰り返してメモリを使わせない。古いものから捨てる）
 MAX_SESSIONS = 64
 
@@ -108,13 +113,33 @@ class WebSessions:
 
 
 class LoginGuard:
-    """接続元ごとの、続けての失敗の回数とロック"""
+    """接続元ごとの、続けての失敗の回数とロック。LAN からの失敗の全体のロック"""
 
     def __init__(self, clock=time.monotonic) -> None:
         self._clock = clock
         self._lock = threading.Lock()
         self._failures: dict[str, int] = {}
         self._locked_until: dict[str, float] = {}
+        self._lan_failures: list[float] = []
+        self._global_locked_until = 0.0
+
+    def global_locked_seconds(self) -> int:
+        """LAN からのログインの全体のロック中なら残りの秒数（0 ならロックしていない）"""
+        with self._lock:
+            remaining = self._global_locked_until - self._clock()
+            return int(remaining) + 1 if remaining > 0 else 0
+
+    def lan_failure(self) -> bool:
+        """LAN からの失敗を数える（接続元ごとの数え方とは別に）。この失敗で全体をロックしたら True"""
+        with self._lock:
+            now = self._clock()
+            self._lan_failures = [t for t in self._lan_failures if now - t < GLOBAL_WINDOW_SEC]
+            self._lan_failures.append(now)
+            if len(self._lan_failures) >= GLOBAL_MAX_FAILURES:
+                self._lan_failures.clear()
+                self._global_locked_until = now + GLOBAL_LOCK_SEC
+                return True
+            return False
 
     def locked_seconds(self, client: str) -> int:
         """ロック中なら残りの秒数（0 ならロックしていない）"""
