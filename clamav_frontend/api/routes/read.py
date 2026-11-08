@@ -146,6 +146,19 @@ def list_schedules(request: Request, limit: int = Limit, offset: int = Offset) -
     return _page(items, limit, offset)
 
 
+def freshclam_service_view(ctx) -> dict:
+    """OS の定義更新サービス（clamav-freshclam）の状態と、誰が定義を更新しているかの説明"""
+    from core.freshclam_service import FreshclamServiceState, summary_text
+
+    state = ctx.freshclam_service.status() if ctx.freshclam_service is not None else FreshclamServiceState()
+    return {**state.to_dict(), "summary": summary_text(state, ctx.config_service.current.update.auto_update)}
+
+
+@router.get("/updates/freshclam-service")
+def get_freshclam_service(request: Request) -> dict:
+    return freshclam_service_view(_ctx(request))
+
+
 @router.get("/updates/history")
 def list_update_history(request: Request, limit: int = Limit, offset: int = Offset) -> dict:
     items = [asdict(record) for record in _ctx(request).update_service.list_history()]

@@ -1646,3 +1646,11 @@ Windows の実機の確認（#46）で見つけた。グループのメンバー
 - `clamqtpie-ctl web lan on|off`。HTTPS の無効化・二段階認証の解除・短いパスワードで許可が OFF になったら、そのことも表示する。`api.web_lan` は `config set` では変えさせない
 - **`clamqtpie-ctl web tls renew`**（`POST /web/tls/renew`）: CA はそのままで、サーバー証明書だけを作り直す。Windows の実機の確認（Android の Firefox）で見つけた: 端末で警告を越えて証明書の例外を作ると、後で CA を登録しても、例外がある間は「接続が安全ではありません」と表示され続け、Android の Firefox には例外を消す画面が無い。例外はそのときのサーバー証明書に結び付くため、サーバー証明書を作り直すと使われなくなり、CA で確かめられる（実機で確かめた）。CA の登録はやり直さなくてよい
 - **`clamqtpie-ctl config set --restart` の止まるのを待つ処理**（Windows 実機の確認で見つけた不具合）: `sc stop` の後、`sc query` に RUNNING が無いことで止まったとみなしていたため、止まる途中（STOP_PENDING）で設定を書き換えて開始し、開始が 1056（動いている）で失敗していた（止まる途中のサービスが設定を上書きするおそれもある）。STOPPED（か登録が無い）になるまで待つ（`service_status.service_stopped`）
+## 83. OS の定義更新サービス（clamav-freshclam）の開始・停止（Linux）
+
+Linux の実機の確認で見つけた。clamav-freshclam が動いていると、ClamQtPie の自動更新は重ねて更新しないよう見送る（段階 12-3c）が、見送るたびに「実行しませんでした」をログに残していて、自動更新の間隔ごとに同じ行が並んでいた。また、ClamQtPie からは clamav-freshclam を止められず、ClamQtPie の自動更新に任せたくても端末で `systemctl` を使うしかなかった。
+
+- **定義更新の画面**（トレイGUI の「セキュリティ インテリジェンス」・WebUI の「定義更新」）に「OS の定義更新サービス (clamav-freshclam)」の欄を足した。状態（動いています／止まっています）、PC の起動時に自動で起動する（する／しない）、誰が定義を更新しているか（「定義の更新は OS のサービスが行っています」／「ClamQtPie が自動更新します」）を出し、開始・停止のボタンを置く。clamav-freshclam が無い OS（Windows・未導入・systemd が無い）では出さない
+- **停止は `systemctl disable --now`、開始は `systemctl enable --now`**（`core/freshclam_service.py`）。止めても次の起動でまた動くと、ClamQtPie の自動更新は見送ったままになるため、今の状態と PC の起動時の両方を揃える。片方だけ違う（端末で `stop` だけした等）ときは、どちらのボタンも押せる。状態は `systemctl show -p LoadState -p ActiveState -p UnitFileState` で読む
+- **API**: `GET /updates/freshclam-service`（user）、`PUT /updates/freshclam-service {"enabled": bool}`（admin。トレイGUI は昇格の確認画面、WebUI は再確認）。サービスは root で動くため `systemctl` をそのまま呼ぶ（root でなければ pkexec）。失敗は E8004
+- **見送りのログ**: 見送りが始まったときだけ記録し、OS のサービスが動いている間は記録しない。OS のサービスが止まったら覚えを消し、また動いて見送るときに記録する（サービスの起動ごとにも 1 回記録する）

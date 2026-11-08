@@ -817,6 +817,7 @@ async function loadUpdate() {
   $("update-last").textContent = status.update.last_executed_at ? localTime(status.update.last_executed_at) : "なし";
   $("update-auto").textContent = status.update.auto_update ? "自動更新: ON" : "自動更新: OFF";
   $("update-start").disabled = !!(current.job && current.job.state === "running");
+  showFreshclam(await api("/updates/freshclam-service"));
   const tbody = $("update-history");
   if (!history.items.length) {
     emptyRow(tbody, 4, "更新履歴はありません");
@@ -826,6 +827,30 @@ async function loadUpdate() {
     localTime(h.executed_at), UPDATE_RESULTS[h.result] || h.result, h.before_version, h.after_version,
   ])));
 }
+
+// OS の定義更新サービス（Linux の clamav-freshclam）。無い OS（Windows など）では出さない
+function showFreshclam(s) {
+  $("freshclam-card").hidden = !s.available;
+  if (!s.available) return;
+  $("freshclam-active").textContent = s.active ? "動いています" : "止まっています";
+  $("freshclam-enabled").textContent = s.enabled ? "する" : "しない";
+  $("freshclam-summary").textContent = s.summary || "";
+  $("freshclam-start").disabled = s.active && s.enabled;
+  $("freshclam-stop").disabled = !s.active && !s.enabled;
+}
+
+async function setFreshclam(running) {
+  const lines = running
+    ? ["OS の定義更新サービス（clamav-freshclam）を開始します（PC の起動時にも自動で起動します）"]
+    : ["OS の定義更新サービス（clamav-freshclam）を停止します（PC の起動時にも起動しません。定義の更新は ClamQtPie の自動更新が行います）"];
+  const result = await adminCall(lines, () => api("/updates/freshclam-service", "PUT", { enabled: running }), true);
+  if (!result) return;
+  showFreshclam(result);
+  toast(running ? "OS の定義更新サービスを開始しました。" : "OS の定義更新サービスを停止しました。");
+}
+
+const startFreshclam = () => setFreshclam(true);
+const stopFreshclam = () => setFreshclam(false);
 
 async function startUpdate() {
   const data = await api("/updates", "POST");
@@ -1148,7 +1173,7 @@ async function checkSession(reconnect = false) {
 const ACTIONS = {
   logout, toggleNotifications, ackAllNotifications, quickScan, startUpdate, toggleRealtime, startClamd, stopClamd,
   startScan, cancelScan, loadQuarantine, saveRealtimeAction, resetScheduleForm, clearLogs, testMail, runDiagnostics,
-  cancelReauth, copyDiagnostics,
+  cancelReauth, copyDiagnostics, startFreshclam, stopFreshclam,
 };
 
 document.addEventListener("click", (event) => {

@@ -29,6 +29,7 @@ from api.jobs import JobTracker
 from api.server import LOOPBACK_HOST, ApiServer
 from api.web_control import WebController
 from core.definitions import definitions_age_days
+from core.freshclam_service import FreshclamServiceController
 from core.logger import CATEGORY_SYSTEM, log_event, setup_logger
 from core.peer_identity import requester_home
 from core.runtime import Runtime
@@ -95,6 +96,7 @@ class ServiceApi:
             apply_config=self._apply_config, start_clamd=rt.clamd_starter.start,
             clamd_controller=rt.clamd_controller,
             on_clamd_stop_requested=lambda: None, on_clamd_stop_failed=lambda: None,
+            freshclam_service=FreshclamServiceController(),
             service_mode=True, requester_home=requester_home,
         )
         tokens = ApiTokens(rt.paths.api_dir)

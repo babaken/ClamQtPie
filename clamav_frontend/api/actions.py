@@ -42,6 +42,8 @@ CHANGED_CONFIG = "config"
 CHANGED_REALTIME = "realtime"
 CHANGED_LOGS = "logs"
 CHANGED_CLAMD = "clamd"
+#: OS の定義更新サービス（clamav-freshclam）の開始・停止
+CHANGED_FRESHCLAM = "freshclam"
 #: 画面以外（Web API）からスキャン・定義の更新を始めた（画面を「実行中」の表示にする）
 CHANGED_SCAN_STARTED = "scan_started"
 CHANGED_UPDATE_STARTED = "update_started"

@@ -261,7 +261,9 @@ class TrayApp:
 
         window.get_screen("schedule").bind_services(p.scheduler, p.api.batch, on_show_log=show_log_for)
         update_screen.bind_services(p.update_service, p.update, p.clamav, config_service=p.config,
-                                    on_open_settings=lambda: window.navigate_to("settings"))
+                                    on_open_settings=lambda: window.navigate_to("settings"),
+                                    # OS の定義更新サービス（clamav-freshclam）は Linux にだけある
+                                    freshclam_service=None if sys.platform == "win32" else p.freshclam_service)
         window.get_screen("settings").bind_services(
             p.config, p.notification, self.autostart,
             on_saved=lambda _config: (realtime_screen.sync_action_from_config(),

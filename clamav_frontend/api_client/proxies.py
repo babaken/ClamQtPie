@@ -255,6 +255,21 @@ class UpdateServiceProxy:
         return datetime.fromisoformat(value) if value else None
 
 
+class FreshclamServiceProxy:
+    """OS の定義更新サービス（core.freshclam_service.FreshclamServiceController の代わり）。状態と説明を dict で返す"""
+
+    def __init__(self, api: SyncCaller) -> None:
+        self._api = api
+
+    def status(self) -> dict:
+        return self._api.call("GET", "/updates/freshclam-service")
+
+    def set_running(self, running: bool) -> dict:
+        # admin の操作（昇格ヘルパーに頼む。結果は状態を読み直して確かめる）
+        self._api.call("PUT", "/updates/freshclam-service", {"enabled": running})
+        return self.status()
+
+
 class ClamAVProxy:
     """ClamAVService の代わり（状態の参照だけ。検査はサービスが行う）"""
 
@@ -513,6 +528,7 @@ class ServiceProxies:
         self.watch_targets = WatchTargetProxy(api)
         self.scheduler = SchedulerProxy(api)
         self.update_service = UpdateServiceProxy(api, self.status)
+        self.freshclam_service = FreshclamServiceProxy(api)
         self.clamav = ClamAVProxy(self.status)
         self.log_reader = LogReaderProxy(api)
         self.notification = NotificationProxy(api)

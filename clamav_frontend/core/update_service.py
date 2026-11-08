@@ -102,6 +102,8 @@ class UpdateService:
         self._which = which
         self._runner = runner
         self._validate_exec = validate_exec
+        #: OS のサービスが更新しているため見送ったことを記録したか（見送りが続く間、毎回は記録しない）
+        self._skip_logged = False
 
     def update_now(
         self, on_output: Callable[[str], None] | None = None, interactive: bool = True
@@ -129,7 +131,10 @@ class UpdateService:
                 return self._fail(before_version, f"{_FRESHCLAM_NOT_FOUND_MESSAGE} ({self.freshclam_path})")
             if reason == "service":
                 message = f"定義DBの更新はOSの{_FRESHCLAM_SERVICE}サービスが行っているため、実行しませんでした"
-                log_event(CATEGORY_UPDATE, message)
+                if not self._skip_logged:
+                    # 見送りが始まったときだけ記録する（自動更新の間隔ごとに同じ記録が並ばないように）
+                    log_event(CATEGORY_UPDATE, message + "（OS のサービスが動いている間は、以後も記録せずに見送ります）")
+                    self._skip_logged = True
                 return UpdateHistoryRecord(
                     0, _now_iso(), "skipped", before_version, before_version, detail=message
                 )
@@ -213,6 +218,8 @@ class UpdateService:
             # アプリは管理者権限で動くため、管理者だけが書き込める場所にあるfreshclamだけを実行する
             return [self._validate_exec(freshclam, ("freshclam",), self._system)], ""
         service_active = self._freshclam_service_active()
+        if not service_active:
+            self._skip_logged = False  # 見送りが終わった（OS のサービスがまた動いて見送るときは、また記録する）
         if not interactive and service_active:
             # 無人実行（自動・スケジュール）は、OS のサービスが更新しているなら行わない。root で動くサービスでも
             # 同じ（行うと、OS のサービスと重ねて更新することになる。段階 12-3c）

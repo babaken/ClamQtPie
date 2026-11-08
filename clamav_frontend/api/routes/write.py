@@ -18,10 +18,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from api import actions
 from api.auth import require_admin
-from api.routes.read import exclude_item
+from api.routes.read import exclude_item, freshclam_service_view
 from core.diagnostics_service import masked_report_text
-from core.exceptions import ApiConflictError, AppError
-from core.logger import CATEGORY_SYSTEM
+from core.exceptions import ApiConflictError, ApiNotFoundError, AppError
+from core.logger import CATEGORY_SYSTEM, CATEGORY_UPDATE
 
 logger = logging.getLogger("clamav_frontend")
 
@@ -102,6 +102,21 @@ async def stop_clamd(request: Request) -> Response:
     if ctx.notify_changed is not None:
         await ctx.invoker.run(ctx.notify_changed, actions.CHANGED_CLAMD)
     return _no_content()
+
+
+@router.put("/updates/freshclam-service")
+async def set_freshclam_service(body: EnabledBody, request: Request) -> dict:
+    """OS の定義更新サービス（clamav-freshclam）を開始（enable --now）・停止（disable --now）する"""
+    ctx = _ctx(request)
+    if ctx.freshclam_service is None:
+        raise ApiNotFoundError("OS の定義更新サービスがありません")
+    await run_in_threadpool(ctx.freshclam_service.set_running, body.enabled)
+    actions.audit(CATEGORY_UPDATE, "OS の定義更新サービス（clamav-freshclam）を" +
+                  ("開始し、PC の起動時に自動で起動するようにしました" if body.enabled
+                   else "停止し、PC の起動時に自動で起動しないようにしました"))
+    if ctx.notify_changed is not None:
+        await ctx.invoker.run(ctx.notify_changed, actions.CHANGED_FRESHCLAM)
+    return await run_in_threadpool(freshclam_service_view, ctx)
 
 
 @router.post("/diagnostics")

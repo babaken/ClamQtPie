@@ -246,6 +246,19 @@
             </div>
             <pre id="update-log" class="log-box"></pre>
           </div>
+          <div class="card" id="freshclam-card" hidden>
+            <h3>OS の定義更新サービス (clamav-freshclam)</h3>
+            <div class="row">
+              <span>状態: <strong id="freshclam-active">-</strong></span>
+              <span>PC の起動時に自動で起動する: <strong id="freshclam-enabled">-</strong></span>
+            </div>
+            <p class="muted" id="freshclam-summary"></p>
+            <div class="row">
+              <button data-action="startFreshclam" id="freshclam-start">開始</button>
+              <button data-action="stopFreshclam" id="freshclam-stop">停止</button>
+            </div>
+            <p class="muted">停止すると、PC の起動時にも起動しなくなり、定義の更新は ClamQtPie の自動更新が行います。開始すると、PC の起動時にも自動で起動し、定義の更新は OS のサービスが行います。</p>
+          </div>
           <div class="card">
             <h3>更新履歴</h3>
             <table>

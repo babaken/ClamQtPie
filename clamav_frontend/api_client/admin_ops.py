@@ -22,6 +22,8 @@ ADMIN_ROUTES: tuple[tuple[str, re.Pattern], ...] = tuple((m, re.compile(f"^{p}$"
     ("POST", "/clamd/start"),
     ("POST", "/clamd/stop"),
     ("POST", "/diagnostics"),
+    # OS の定義更新サービス（clamav-freshclam）の開始・停止（Linux）
+    ("PUT", "/updates/freshclam-service"),
     ("POST", f"/quarantine/{_ID}/restore"),
     ("DELETE", f"/quarantine/{_ID}"),
     ("POST", "/excludes"),
@@ -225,6 +227,12 @@ def describe(op: Operation, lookup: Lookup | None = None) -> list[str]:
         return ["clamd（ClamAV のサービス）を起動します"]
     if (m, p) == ("POST", "/clamd/stop"):
         return ["clamd（ClamAV のサービス）を停止します（停止中はスキャン・リアルタイム監視ができません）"]
+    if (m, p) == ("PUT", "/updates/freshclam-service"):
+        if body.get("enabled"):
+            return ["OS の定義更新サービス（clamav-freshclam）を開始します",
+                    "  PC の起動時にも自動で起動します。ClamQtPie の自動更新は行わなくなります"]
+        return ["OS の定義更新サービス（clamav-freshclam）を停止します",
+                "  PC の起動時にも起動しません。定義の更新は ClamQtPie の自動更新が行います"]
     if (m, p) == ("POST", "/diagnostics"):
         return ["ヘルスチェック（診断レポートの作成）を行います"]
     if m == "POST" and p.endswith("/restore") and p.startswith("/quarantine/"):
