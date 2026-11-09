@@ -21,7 +21,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core.exec_path import child_env, find_system_tool
+from core.exec_path import child_env, find_system_tool, no_window_kwargs
 from core.version import APP_NAME, APP_SLUG
 
 logger = logging.getLogger("clamav_frontend")
@@ -146,7 +146,8 @@ def wake_timer_policy(system: str | None = None, run=subprocess.run) -> str:
             return "確認できません（powercfg が見つかりません）"
         try:
             result = run([powercfg, "/query", "SCHEME_CURRENT", "SUB_SLEEP", "RTCWAKE"], capture_output=True,
-                         timeout=10, env=child_env(None, system), **console_text_kwargs(system))
+                         timeout=10, env=child_env(None, system), **console_text_kwargs(system),
+                         **no_window_kwargs(system))
         except (OSError, subprocess.SubprocessError) as exc:
             return f"確認できません ({exc})"
         values = parse_rtcwake(result.stdout or "")

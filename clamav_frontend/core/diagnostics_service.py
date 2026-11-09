@@ -32,9 +32,9 @@ from pathlib import Path
 from typing import Callable
 
 from core.clamd_conf import DEFAULT_CLAMD_CONF_CANDIDATES, find_clamd_conf, load_clamd_conf
-from core.clamd_process import ClamdServiceController, console_text_kwargs, is_valid_service_name, no_window_kwargs
+from core.clamd_process import ClamdServiceController, console_text_kwargs, is_valid_service_name
 from core.config_model import ConfigModel
-from core.exec_path import child_env, system_tool
+from core.exec_path import child_env, no_window_kwargs, system_tool
 from core.version import APP_NAME, APP_VERSION
 
 REPORT_TITLE = f"{APP_NAME} 診断レポート"

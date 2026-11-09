@@ -49,7 +49,9 @@ reify_concurrent_futures()
 from core.config_model import GUI_SECTIONS, ConfigModel, validate_and_fix  # noqa: E402
 from core.config_service import ConfigService  # noqa: E402
 from core.exceptions import AppError, ServiceUnavailableError  # noqa: E402
-from core.exec_path import child_env, find_system_tool, validate_executable, validate_trusted_file  # noqa: E402
+from core.exec_path import (  # noqa: E402
+    child_env, find_system_tool, no_window_kwargs, validate_executable, validate_trusted_file,
+)
 from core.secret_store import FileSecretStore  # noqa: E402
 from core.service_endpoint import read_endpoint, verify_service_listener  # noqa: E402
 from core.service_paths import ServicePaths, UnsafeDataDirectoryError, prepare_directories  # noqa: E402
@@ -295,7 +297,8 @@ def _control_service(action: str) -> None:
             # 手で行う開始も起動の回数の上限（StartLimitBurst）に数えられるため、数え直してから開始する
             subprocess.run([systemctl, "reset-failed", SYSTEMD_UNIT], capture_output=True, timeout=60,
                            env=child_env(None, system))
-    result = subprocess.run(command, capture_output=True, timeout=120, env=child_env(None, system))
+    result = subprocess.run(command, capture_output=True, timeout=120, env=child_env(None, system),
+                            **no_window_kwargs(system))
     if result.returncode != 0:
         if action == "stop":
             raise CtlError(f"サービスを止められませんでした（{result.returncode}）")

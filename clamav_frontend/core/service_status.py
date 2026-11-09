@@ -10,7 +10,7 @@ from __future__ import annotations
 import platform
 import subprocess
 
-from core.exec_path import child_env, find_system_tool
+from core.exec_path import child_env, find_system_tool, no_window_kwargs
 from core.version import APP_ID, APP_SLUG
 
 #: Windows のサービス名・Linux の unit の名前
@@ -28,7 +28,7 @@ def service_running(system: str | None = None, run=subprocess.run) -> bool:
                 return False
             # 出力は OS の言語の文字コード（日本語なら CP932）。状態の RUNNING は英字で出るため、バイト列のまま探す
             result = run([sc, "query", WINDOWS_SERVICE_NAME], capture_output=True, timeout=5,
-                         env=child_env(None, system))
+                         env=child_env(None, system), **no_window_kwargs(system))
             return result.returncode == 0 and b"RUNNING" in (result.stdout or b"")
         systemctl = find_system_tool("systemctl", system)
         if systemctl is None:
@@ -49,7 +49,8 @@ def service_stopped(system: str | None = None, run=None) -> bool:
         sc = find_system_tool("sc", system)
         if sc is None:
             return False
-        result = run([sc, "query", WINDOWS_SERVICE_NAME], capture_output=True, timeout=5, env=child_env(None, system))
+        result = run([sc, "query", WINDOWS_SERVICE_NAME], capture_output=True, timeout=5, env=child_env(None, system),
+                     **no_window_kwargs(system))
     except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 1060 or (result.returncode == 0 and b"STOPPED" in (result.stdout or b""))

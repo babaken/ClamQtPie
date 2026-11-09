@@ -31,6 +31,7 @@ from core.exec_path import (
     child_env,
     find_program,
     find_system_tool,
+    no_window_kwargs,
     system_tool,
     validate_executable,
     windows_clamav_dirs,
@@ -153,6 +154,7 @@ class UpdateService:
                 bufsize=1,
                 # Windowsでは管理者権限のfreshclamに、利用者が変えられる環境変数を引き継がない
                 env=child_env(system=self._system),
+                **no_window_kwargs(self._system),
             )
         except OSError as exc:
             return self._fail(before_version, f"{_FRESHCLAM_NOT_FOUND_MESSAGE} ({exc})")

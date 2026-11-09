@@ -17,7 +17,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from core.exec_path import child_env, system_tool
+from core.exec_path import child_env, no_window_kwargs, system_tool
 
 SERVICE_NAME = "ClamQtPie"
 SERVICE_EXE = "ClamQtPieService.exe"
@@ -34,7 +34,7 @@ def _run(cmd: list[str], runner=subprocess.run) -> subprocess.CompletedProcess:
 
     try:
         return runner(cmd, capture_output=True, timeout=120, env=child_env(None, "Windows"),
-                      **console_text_kwargs("Windows"))
+                      **console_text_kwargs("Windows"), **no_window_kwargs("Windows"))
     except (OSError, subprocess.SubprocessError) as exc:
         raise SetupError(f"{Path(cmd[0]).name} を実行できません ({exc})") from exc
 

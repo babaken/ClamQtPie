@@ -22,7 +22,7 @@ from core.config_model import ConfigModel
 from core.config_service import ConfigService
 from core.detection_aggregator import DetectionAggregator, DetectionEvent
 from core.exceptions import DesktopNotifyError, KeyringUnavailableError, MailSendError
-from core.exec_path import child_env, find_system_tool, system_tool
+from core.exec_path import child_env, find_system_tool, no_window_kwargs, system_tool
 from core.text_safety import visible_controls
 from core.version import APP_ID, APP_NAME
 
@@ -361,6 +361,7 @@ def _run_powershell(script: str, extra_env: dict[str, str]) -> None:
             capture_output=True,
             timeout=10,
             env=env,
+            **no_window_kwargs("Windows"),
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise DesktopNotifyError(detail=str(exc)) from exc

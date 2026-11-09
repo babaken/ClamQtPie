@@ -22,7 +22,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from core.exec_path import child_env, system_tool
+from core.exec_path import child_env, no_window_kwargs, system_tool
 
 logger = logging.getLogger("clamav_frontend")
 
@@ -118,7 +118,7 @@ def _run(cmd: list[str], runner=subprocess.run) -> subprocess.CompletedProcess:
     if _IS_WINDOWS:
         from core.clamd_process import console_text_kwargs
 
-        kwargs.update(console_text_kwargs("Windows"), env=child_env(None, "Windows"))
+        kwargs.update(console_text_kwargs("Windows"), env=child_env(None, "Windows"), **no_window_kwargs("Windows"))
     else:
         kwargs.update(text=True, errors="replace")
     try:

@@ -1654,3 +1654,9 @@ Linux の実機の確認で見つけた。clamav-freshclam が動いていると
 - **停止は `systemctl disable --now`、開始は `systemctl enable --now`**（`core/freshclam_service.py`）。止めても次の起動でまた動くと、ClamQtPie の自動更新は見送ったままになるため、今の状態と PC の起動時の両方を揃える。片方だけ違う（端末で `stop` だけした等）ときは、どちらのボタンも押せる。状態は `systemctl show -p LoadState -p ActiveState -p UnitFileState` で読む
 - **API**: `GET /updates/freshclam-service`（user）、`PUT /updates/freshclam-service {"enabled": bool}`（admin。トレイGUI は昇格の確認画面、WebUI は再確認）。サービスは root で動くため `systemctl` をそのまま呼ぶ（root でなければ pkexec）。失敗は E8004
 - **見送りのログ**: 見送りが始まったときだけ記録し、OS のサービスが動いている間は記録しない。OS のサービスが止まったら覚えを消し、また動いて見送るときに記録する（サービスの起動ごとにも 1 回記録する）
+## 84. コンソールのウィンドウが一瞬見える（Windows）
+
+Windows の実機の確認（インストーラで入れたとき）で見つけた。ウィンドウを持たないプロセス（トレイGUI など）がコンソールのコマンドをそのまま起動すると、子プロセスごとに新しいコンソールが開き、一瞬見える。Windows 11 で既定の端末が Windows Terminal（「Windows に任せる」を含む）だと、Windows Terminal のウィンドウが開く（この PC で、ウィンドウを持たない Python から確かめた。`SW_HIDE` を付けて起動する Inno Setup の `Exec` と、`CREATE_NO_WINDOW` では開かず、指定なしでは開いた）。
+
+- 指定が無かったのは、トレイGUI が通知（Toast）を出す・消す PowerShell、サインインし直しの判定の `net localgroup`、診断の `powercfg`、サービスの状態の `sc query`、`clamqtpie-ctl` の `setup`（`sc`・`icacls` など）とサービスの開始・停止、Windows の freshclam。インストールの直後にトレイGUI が起動して未読の通知を出すときなどに見えていた
+- Windows でコンソールのコマンドを起動するところには、すべて `core/exec_path.no_window_kwargs`（`CREATE_NO_WINDOW`）を付ける（`clamd_process` にあったものを移した。ctl・サービスの状態の確認から PySide6 を読み込まないように）。新しく起動するところを足すときも付ける
