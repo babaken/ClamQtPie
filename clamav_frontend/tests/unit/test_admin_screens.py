@@ -92,6 +92,32 @@ def test_realtime_changes_are_saved_in_one_elevation(qtbot, monkeypatch):
     manager.add_target.assert_not_called()  # 監視への反映はサービスが行う
 
 
+def test_folder_to_be_removed_is_shown_with_the_buttons_wording(qtbot, monkeypatch):
+    """外す予定の行は「外す（保存前）」と出し、選んでいる間はボタンが［外すのをやめる］になる"""
+    import gui.screens.realtime as realtime_module
+
+    screen, _manager, _targets, _excludes = _realtime(qtbot, _Batch(), monkeypatch)
+    assert screen.remove_target_button.text() == "フォルダを外す"
+    screen.target_table.selectRow(0)
+    screen.remove_target_button.click()
+    assert screen.target_table.item(0, 1).text() == "外す（保存前）"
+    assert screen.remove_target_button.text() == "フォルダを外す"  # 一覧を作り直すと選択が外れる
+    screen.target_table.selectRow(0)
+    assert screen.remove_target_button.text() == "外すのをやめる"
+    screen.remove_target_button.click()
+    assert screen.target_table.item(0, 1).text() == "有効" and not screen.has_unsaved_changes()
+
+    monkeypatch.setattr(realtime_module.QFileDialog, "getExistingDirectory", lambda *a, **k: "/home/u/b")
+    screen.add_target_button.click()
+    screen.target_table.selectRow(1)
+    assert screen.remove_target_button.text() == "追加をやめる"
+    # 除外の一覧は今までどおり「削除」
+    screen.exclude_tabs.setCurrentIndex(2)
+    screen._exclude_tables["extension"].selectRow(0)
+    screen.remove_exclude_button.click()
+    assert screen._exclude_tables["extension"].item(0, 1).text() == "削除（保存前）"
+
+
 def test_cancelled_save_keeps_the_changes(qtbot, monkeypatch):
     import gui.screens.realtime as realtime_module
 

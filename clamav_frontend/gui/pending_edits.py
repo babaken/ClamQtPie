@@ -66,12 +66,12 @@ class PendingEdits:
         else:
             self.updated[key] = values
 
-    def state_text(self, key: int, saved_enabled: bool) -> str:
-        """一覧の「有効」の列の表示"""
+    def state_text(self, key: int, saved_enabled: bool, removed_label: str = "削除") -> str:
+        """一覧の「有効」の列の表示（removed_label: 削除の予定の行の呼び方。監視するフォルダは「外す」）"""
         if key < 0:
             return "追加" + MARK_UNSAVED
         if key in self.removed:
-            return "削除" + MARK_UNSAVED
+            return removed_label + MARK_UNSAVED
         enabled = self.enabled.get(key, saved_enabled)
         text = "有効" if enabled else "無効"
         return text + MARK_UNSAVED if key in self.enabled or key in self.updated else text

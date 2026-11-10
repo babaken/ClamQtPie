@@ -150,7 +150,7 @@ def _exclude_name(lookup: Lookup, eid: int) -> str:
 
 def _target_name(lookup: Lookup, tid: int) -> str:
     item = lookup.targets.get(tid)
-    return f"監視対象「{_short(item.get('path', ''))}」" if item else f"監視対象（ID {tid}）"
+    return f"監視するフォルダ「{_short(item.get('path', ''))}」" if item else f"監視するフォルダ（ID {tid}）"
 
 
 def _schedule_name(lookup: Lookup, sid: int) -> str:
@@ -252,11 +252,11 @@ def describe(op: Operation, lookup: Lookup | None = None) -> list[str]:
     if (m, p) == ("PUT", "/realtime"):
         return ["リアルタイム監視を開始します" if body.get("enabled") else "リアルタイム監視を停止します"]
     if (m, p) == ("POST", "/realtime/targets"):
-        return [f"監視対象を追加します: 「{_short(body.get('path', ''))}」"]
+        return [f"監視するフォルダを追加します: 「{_short(body.get('path', ''))}」"]
     if m == "PATCH" and p.startswith("/realtime/targets/"):
         return [f"{_target_name(lookup, ident)}を{_onoff(body.get('enabled'))}にします"]
     if m == "DELETE" and p.startswith("/realtime/targets/"):
-        return [f"{_target_name(lookup, ident)}を削除します"]
+        return [f"{_target_name(lookup, ident)}を外します"]
     if (m, p) == ("POST", "/schedules"):
         return [f"スケジュールを追加します: {_schedule_text(body)}"]
     if m == "PUT" and p.startswith("/schedules/"):

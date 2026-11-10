@@ -155,12 +155,12 @@ class HomeScreen(BaseScreen):
         self.realtime_settings_button.clicked.connect(lambda: self._navigate("realtime"))
         self.engine_button.clicked.connect(lambda: self._navigate("engine"))
         cards = [
-            ("scan", "ウイルス スキャン", "ファイル・フォルダーを ClamAV で検査します。クイック スキャンは"
+            ("scan", "ウイルス スキャン", "ファイル・フォルダを ClamAV で検査します。クイック スキャンは"
              "デスクトップ・ダウンロード・ドキュメント等を対象にします。",
              (self.scan_now_button, self.custom_scan_button)),
             ("update", "ウイルス定義", "freshclam で最新のウイルス定義データベースを取得します。",
              (self.update_now_button,)),
-            ("realtime", "リアルタイム ファイル監視", "監視対象のフォルダーで作成・変更されたファイルを自動でスキャンします。",
+            ("realtime", "リアルタイム ファイル監視", "監視するフォルダで作成・変更されたファイルを自動でスキャンします。",
              (self.toggle_realtime_button, self.realtime_settings_button)),
             ("engine", "ClamAV エンジン サービス", "検査を行う常駐サービス clamd の状態確認と起動・停止を行います。",
              (self.engine_button,)),

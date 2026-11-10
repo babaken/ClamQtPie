@@ -255,7 +255,7 @@ class RealtimeManager(QObject):
     def _schedule_path(self, path: str, handler: _EventHandler) -> None:
         target_path = Path(path)
         if not target_path.exists():
-            log_event(CATEGORY_REALTIME, f"監視対象フォルダが見つからないため監視を停止しました: {path}", level=logging.WARNING, error_code="E2001")
+            log_event(CATEGORY_REALTIME, f"監視するフォルダが見つからないため監視を停止しました: {path}", level=logging.WARNING, error_code="E2001")
             self.watch_target_lost.emit(path)
             self._watch_target_service.disable_by_path(path)
             return
@@ -263,7 +263,7 @@ class RealtimeManager(QObject):
             watch = self._observer.schedule(handler, path, recursive=True)
             self._scheduled_watches[path] = watch
         except OSError:
-            log_event(CATEGORY_REALTIME, f"監視対象フォルダが見つからないため監視を停止しました: {path}", level=logging.WARNING, error_code="E2001")
+            log_event(CATEGORY_REALTIME, f"監視するフォルダが見つからないため監視を停止しました: {path}", level=logging.WARNING, error_code="E2001")
             self.watch_target_lost.emit(path)
             self._watch_target_service.disable_by_path(path)
 

@@ -78,7 +78,7 @@ class ScanScreen(BaseScreen):
     screen_title = "ウイルス スキャン"
     #: 結果の行の、検査したファイルのパスそのもの（表示の文字は見える形に変えているため、隔離・無視にはこちらを使う）
     _row_paths: list[str]
-    screen_subtitle = "ClamAV のスキャン エンジンで、ファイル・フォルダー・ドライブを検査します。"
+    screen_subtitle = "ClamAV のスキャン エンジンで、ファイル・フォルダ・ドライブを検査します。"
 
     def build_content(self) -> None:
         self._row_paths = []

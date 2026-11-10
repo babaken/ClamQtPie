@@ -51,7 +51,7 @@ def format_size(size: int) -> str:
 
 
 class QuarantineScreen(BaseScreen):
-    screen_title = "隔離フォルダー"
+    screen_title = "隔離フォルダ"
     screen_subtitle = "隔離した不正なファイルを SHA-256 による整合性検証付きで管理します。"
 
     def build_content(self) -> None:

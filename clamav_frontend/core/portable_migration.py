@@ -329,7 +329,7 @@ def ensure_target_empty(db) -> None:
     with db.session() as session:
         for table in _USER_TABLES:
             if session.execute(text(f'SELECT COUNT(*) FROM "{table}"')).scalar():
-                raise MigrationError("移行先に既にデータ（隔離・スケジュール・除外・監視対象・スキャンの履歴）があるため、"
+                raise MigrationError("移行先に既にデータ（隔離・スケジュール・除外・監視するフォルダ・スキャンの履歴）があるため、"
                                      "移行しません")
 
 

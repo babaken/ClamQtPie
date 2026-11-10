@@ -431,7 +431,7 @@ def _migrate(paths, source_text, yes, restart, strict, out, ask, ask_password, s
     except OSError as exc:
         notes.append(f"移行済みの印（{pm.MARKER_NAME}）を置けませんでした: {exc}")
     _audit(paths, f"clamqtpie-ctl: 旧版のデータを移しました: {source}（隔離 {len(data.quarantine)} 件、"
-                  f"スケジュール {len(data.schedules)} 件、除外 {len(data.excludes)} 件、監視対象 {len(data.watch_targets)} 件）")
+                  f"スケジュール {len(data.schedules)} 件、除外 {len(data.excludes)} 件、監視するフォルダ {len(data.watch_targets)} 件）")
     print("移行しました", file=out)
     if notes:
         print("移さなかったもの・注意:", file=out)
@@ -452,7 +452,7 @@ def _print_plan(source: Path, data, changed: list[str], out) -> None:
     print(f"除外: {len(data.excludes)} 件", file=out)
     for row in data.excludes:
         print(f"  - [{row['type']}] {row['value']}{'' if row.get('enabled') else '（無効）'}", file=out)
-    print(f"監視対象: {len(data.watch_targets)} 件", file=out)
+    print(f"監視するフォルダ: {len(data.watch_targets)} 件", file=out)
     for row in data.watch_targets:
         print(f"  - {row['path']}{'' if row.get('enabled') else '（無効）'}", file=out)
     print(f"スケジュール: {len(data.schedules)} 件", file=out)

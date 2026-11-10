@@ -31,6 +31,13 @@ from gui.screens.base import BaseScreen, configure_table, wrap_layout
 
 _ID_ROLE = 0x0102
 
+#: 監視するフォルダの一覧で、外す予定の行の表示（ボタン・確認画面の「外す」とそろえる）
+_REMOVED_LABEL = "外す"
+#: ［フォルダを外す］の表示（選んだ行が外す予定・保存前の追加のときは、押すと何が起きるかを示す）
+_REMOVE_TARGET_TEXT = "フォルダを外す"
+_UNDO_REMOVE_TARGET_TEXT = "外すのをやめる"
+_CANCEL_ADD_TARGET_TEXT = "追加をやめる"
+
 #: 除外タブの表示ラベルとExcludeService上のtype値の対応(画面設計書3章)
 _EXCLUDE_TYPES = [
     ("ファイル", "file"),
@@ -42,11 +49,11 @@ _EXCLUDE_TYPES = [
 
 class RealtimeScreen(BaseScreen):
     screen_title = "リアルタイム ファイル保護"
-    screen_subtitle = "監視対象フォルダー内でファイルが作成・変更されるとスキャンします。"
+    screen_subtitle = "監視するフォルダの中でファイルが作成・変更されるとスキャンします。"
 
     def build_content(self) -> None:
         # 1. 監視状態トグル
-        self.begin_card("リアルタイム フォルダー監視", "指定したフォルダーを監視し、作成・変更されたファイルをバックグラウンドでスキャンします。")
+        self.begin_card("リアルタイム フォルダ監視", "指定したフォルダを監視し、作成・変更されたファイルをバックグラウンドでスキャンします。")
         toggle_layout = QHBoxLayout()
         self.toggle_button = QPushButton("監視を開始する")
         self.toggle_button.setCheckable(True)
@@ -57,23 +64,24 @@ class RealtimeScreen(BaseScreen):
         self._add_hlayout(toggle_layout)
 
         # 2. 監視対象パス一覧
-        self.begin_card("監視対象フォルダー")
+        self.begin_card("監視するフォルダ")
         self.target_table = QTableWidget(0, 2)
         self.target_table.setHorizontalHeaderLabels(["パス", "有効"])
         self.add_layout_widget(self.target_table)
         target_action_layout = QHBoxLayout()
-        self.add_target_button = QPushButton("監視対象を追加")
-        self.remove_target_button = QPushButton("監視対象を削除")
+        self.add_target_button = QPushButton("フォルダを追加")
+        self.remove_target_button = QPushButton(_REMOVE_TARGET_TEXT)
         self.add_target_button.clicked.connect(self._on_add_target_clicked)
         self.remove_target_button.clicked.connect(self._on_remove_target_clicked)
-        self.toggle_target_button = QPushButton("監視対象の有効/無効を切替")
+        self.toggle_target_button = QPushButton("有効/無効を切替")
         self.toggle_target_button.clicked.connect(self._on_toggle_target_clicked)
+        self.target_table.itemSelectionChanged.connect(self._update_remove_target_button)
         target_action_layout.addWidget(self.add_target_button)
         target_action_layout.addWidget(self.remove_target_button)
         target_action_layout.addWidget(self.toggle_target_button)
         self._add_hlayout(target_action_layout)
         self.no_target_hint_label = QLabel(
-            "監視対象が設定されていません。「監視対象を追加」から監視対象フォルダを設定してください。"
+            "監視するフォルダがありません。「フォルダを追加」から監視するフォルダを追加してください。"
         )
         self.no_target_hint_label.setObjectName("cardText")
         self.add_layout_widget(self.no_target_hint_label)
@@ -171,7 +179,7 @@ class RealtimeScreen(BaseScreen):
             return
         records = self._watch_target_service.list_all()
         pending = self._pending_targets
-        rows = [(r.id, r.path, pending.state_text(r.id, r.enabled)) for r in records]
+        rows = [(r.id, r.path, pending.state_text(r.id, r.enabled, _REMOVED_LABEL)) for r in records]
         rows += [(-(i + 1), item["path"], pending.state_text(-(i + 1), True)) for i, item in enumerate(pending.added)]
         self.target_table.setRowCount(0)
         for key, path, state in rows:
@@ -182,13 +190,14 @@ class RealtimeScreen(BaseScreen):
             self.target_table.setItem(row, 0, path_item)
             self.target_table.setItem(row, 1, QTableWidgetItem(state))
         self.no_target_hint_label.setVisible(len(rows) == 0)
+        self._update_remove_target_button()
         self._show_pending_count()
         # Windowsリアルタイム監視詳細設計書3.1節: 対象0件の間はON操作自体を無効化し、ツールチップで理由を表示
         has_enabled = any(r.enabled for r in records)
         running = self._realtime_manager is not None and self._realtime_manager.is_running
         self.toggle_button.setEnabled(has_enabled or running)
         self.toggle_button.setToolTip(
-            "" if has_enabled or running else "監視対象フォルダを追加（有効化）すると開始できます"
+            "" if has_enabled or running else "監視するフォルダを追加する（有効にする）と開始できます"
         )
 
     def sync_toggle_state(self, running: bool) -> None:
@@ -224,19 +233,34 @@ class RealtimeScreen(BaseScreen):
     def _on_add_target_clicked(self) -> None:
         if self._watch_target_service is None:
             return
-        path = QFileDialog.getExistingDirectory(self, "監視対象フォルダを選択")
+        path = QFileDialog.getExistingDirectory(self, "監視するフォルダを選択")
         if not path:
             return
         self._pending_targets.add({"path": path})
         self.reload_targets()
 
+    def _selected_target_id(self) -> int | None:
+        rows = {idx.row() for idx in self.target_table.selectedIndexes()}
+        return self.target_table.item(next(iter(rows)), 0).data(_ID_ROLE) if rows else None
+
+    def _update_remove_target_button(self) -> None:
+        """選んだ行が外す予定なら［外すのをやめる］、保存前の追加なら［追加をやめる］と出す"""
+        key = self._selected_target_id()
+        if key is not None and key < 0:
+            text = _CANCEL_ADD_TARGET_TEXT
+        elif key is not None and key in self._pending_targets.removed:
+            text = _UNDO_REMOVE_TARGET_TEXT
+        else:
+            text = _REMOVE_TARGET_TEXT
+        self.remove_target_button.setText(text)
+
     def _on_remove_target_clicked(self) -> None:
         if self._watch_target_service is None:
             return
-        selected_rows = {idx.row() for idx in self.target_table.selectedIndexes()}
-        if not selected_rows:
+        key = self._selected_target_id()
+        if key is None:
             return
-        self._pending_targets.remove(self.target_table.item(next(iter(selected_rows)), 0).data(_ID_ROLE))
+        self._pending_targets.remove(key)
         self.reload_targets()
 
     # -- 除外設定 -----------------------------------------------------
@@ -456,8 +480,8 @@ def _ask_add_target_now(parent) -> bool:
     box.setIcon(QMessageBox.Icon.Information)
     box.setWindowTitle("リアルタイム監視")
     box.setText(
-        "リアルタイム監視の対象フォルダが設定されていません。"
-        "監視を開始するには対象フォルダを追加してください。"
+        "監視するフォルダがありません。"
+        "監視を開始するには、監視するフォルダを追加してください。"
     )
     add_button = box.addButton("今すぐ追加", QMessageBox.ButtonRole.AcceptRole)
     box.addButton("後で設定する", QMessageBox.ButtonRole.RejectRole)
@@ -471,5 +495,5 @@ def show_no_target_warning(parent) -> None:
     QMessageBox.warning(
         parent,
         "監視を開始できません",
-        "監視するフォルダがありません。先に「追加」から監視するフォルダを追加してください。",
+        "監視するフォルダがありません。先に、リアルタイム保護の画面の「フォルダを追加」から監視するフォルダを追加してください。",
     )

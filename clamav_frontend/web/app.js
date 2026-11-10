@@ -655,7 +655,7 @@ async function loadRealtime() {
         });
         if (done) await loadRealtime();
       })),
-      button("削除", guarded(async () => {
+      button("外す", guarded(async () => {
         if (!confirm(`監視するフォルダから外しますか？\n${t.path}`)) return;
         const done = await adminCall([`監視するフォルダから外します: ${t.path}`], async () => {
           await api(`/realtime/targets/${t.id}`, "DELETE");
@@ -668,9 +668,19 @@ async function loadRealtime() {
   }));
 }
 
+async function hasEnabledTarget() {
+  const targets = await api("/realtime/targets?limit=1000");
+  return targets.items.some((t) => t.enabled);
+}
+
 async function toggleRealtime() {
   const enable = !state.realtime;
   if (!enable && !confirm("リアルタイム保護を止めますか？")) return;
+  // 監視するフォルダが無ければ、パスワードの再確認の前に案内する（サービスに送っても断られるため）
+  if (enable && !(await hasEnabledTarget())) {
+    alert("監視するフォルダがありません。先に、リアルタイム保護の画面の「追加」から監視するフォルダを追加してください。");
+    return;
+  }
   const result = await adminCall([`リアルタイム保護を${enable ? "始め" : "止め"}ます`], () => api("/realtime", "PUT", { enabled: enable }));
   if (result) {
     toast(result.running ? "リアルタイム保護を始めました。" : "リアルタイム保護を止めました。");

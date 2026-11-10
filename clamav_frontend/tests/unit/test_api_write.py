@@ -356,6 +356,25 @@ def test_watch_targets(env):
                                   ("remove_target", str(folder))]
 
 
+def test_same_folder_written_differently_is_not_added_twice(env):
+    """末尾の区切り・「.」の違い（Windows は大文字と小文字の違いも）では、同じフォルダを 2 回登録しない"""
+    import os
+
+    folder = env.tmp / "Watch"
+    folder.mkdir()
+    response = _call(env, "POST", "/realtime/targets", {"path": str(folder) + os.sep})
+    assert response.status_code == 201
+    assert response.json()["path"] == str(folder)  # 書き方をそろえて保存する
+    variants = [str(folder) + os.sep, os.path.join(str(folder), ".")]
+    if os.name == "nt":
+        variants.append(str(folder).upper())
+    for variant in variants:
+        refused = _call(env, "POST", "/realtime/targets", {"path": variant})
+        assert refused.status_code == 400
+        assert "すでに監視するフォルダにあります" in refused.json()["error"]["message"]
+    assert len(_call(env, "GET", "/realtime/targets").json()["items"]) == 1
+
+
 @pytest.mark.parametrize("path", ["relative", "/no/such/folder/for/clamqtpie"])
 def test_watch_target_must_be_an_existing_absolute_folder(env, path):
     assert _call(env, "POST", "/realtime/targets", {"path": path}).status_code == 400

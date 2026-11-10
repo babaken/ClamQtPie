@@ -171,14 +171,22 @@ def _find_target(ctx: ApiContext, target_id: int):
     return record
 
 
+def _same_folder_key(path: str) -> str:
+    """同じフォルダかを比べるための形（末尾の区切り・「.」などの書き方の違い、Windows は大文字と小文字の違いをそろえる）"""
+    return os.path.normcase(os.path.normpath(path))
+
+
 def add_watch_target(ctx: ApiContext, path: str):
     path = path.strip()
     if not os.path.isabs(path) or not os.path.isdir(path):
         raise ValueError("存在するフォルダを絶対パスで指定してください")
-    if any(r.path == path for r in ctx.watch_target_service.list_all()):
-        raise ValueError("同じ監視対象が既にあります")
+    # 書き方をそろえて保存する（すでにある書き方の違う行は消さず、比べるときにそろえる）
+    path = os.path.normpath(path)
+    key = _same_folder_key(path)
+    if any(_same_folder_key(r.path) == key for r in ctx.watch_target_service.list_all()):
+        raise ValueError("このフォルダは、すでに監視するフォルダにあります")
     record = ctx.watch_target_service.add(path)
-    audit(CATEGORY_REALTIME, f"監視対象を追加しました: {path}")
+    audit(CATEGORY_REALTIME, f"監視するフォルダを追加しました: {path}")
     if ctx.realtime_manager.is_running:
         ctx.realtime_manager.add_target(path)
     _notify(ctx, CHANGED_TARGETS)
@@ -188,7 +196,7 @@ def add_watch_target(ctx: ApiContext, path: str):
 def set_watch_target_enabled(ctx: ApiContext, target_id: int, enabled: bool) -> None:
     record = _find_target(ctx, target_id)
     ctx.watch_target_service.set_enabled(target_id, enabled)
-    audit(CATEGORY_REALTIME, f"監視対象を{_state(enabled)}にしました: {record.path}")
+    audit(CATEGORY_REALTIME, f"監視するフォルダを{_state(enabled)}にしました: {record.path}")
     # 監視中は差分だけ反映する（watchdog: そのパスだけ / clamonacc: 再起動）
     if ctx.realtime_manager.is_running and enabled != record.enabled:
         if enabled:
@@ -201,7 +209,7 @@ def set_watch_target_enabled(ctx: ApiContext, target_id: int, enabled: bool) -> 
 def remove_watch_target(ctx: ApiContext, target_id: int) -> None:
     record = _find_target(ctx, target_id)
     ctx.watch_target_service.remove(target_id)
-    audit(CATEGORY_REALTIME, f"監視対象を削除しました: {record.path}")
+    audit(CATEGORY_REALTIME, f"監視するフォルダから外しました: {record.path}")
     if ctx.realtime_manager.is_running:
         ctx.realtime_manager.remove_target(record.path)
     _notify(ctx, CHANGED_TARGETS)

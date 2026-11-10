@@ -71,7 +71,7 @@ class RealtimeError(AppError):
 
 class WatchTargetLostError(RealtimeError):
     default_code = "E2001"
-    default_message = "監視対象フォルダが見つかりません"
+    default_message = "監視するフォルダが見つかりません"
 
 
 class WatchBufferOverflowError(RealtimeError):
@@ -183,7 +183,8 @@ class ConfigError(AppError):
 
 class ConfigWriteError(ConfigError):
     default_code = "E6001"
-    default_message = "設定を保存できませんでした。実行ファイルの配置場所の書き込み権限を確認してください"
+    #: 設定はサービスが保存する（段階 12。置き場所はプログラムのフォルダではない）
+    default_message = "設定を保存できませんでした。設定ファイルの置き場所の空き容量と書き込み権限を確認してください"
 
 
 class ConfigValidationError(ConfigError):
