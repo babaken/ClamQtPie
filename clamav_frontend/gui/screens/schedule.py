@@ -159,6 +159,7 @@ class ScheduleScreen(BaseScreen):
             return
         records = self._scheduler_service.list_all()
         pending = self._pending
+        pending.prune({r.id for r in records})
         rows = []
         for record in records:
             shown = pending.updated.get(record.id, {})

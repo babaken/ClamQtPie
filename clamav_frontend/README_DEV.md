@@ -1686,3 +1686,12 @@ Windows の実機の確認（インストーラで入れたとき）で見つけ
 - **README・README_en**: サービス化した形に書き直した（構成・置き場所、インストーラと `install.sh` での導入、ポータブル版からの移行、管理者の操作と保護された設定、定義更新と clamav-freshclam、WebUI・二段階認証・HTTPS（CA の登録の手順。Windows のストアの選び方、Firefox 系と Windows の中間証明機関、Android と Android の Firefox）・LAN からの接続（試験的）、困ったとき（E8105・起動の回数の上限・E8110・WebUI）、開発の手順）。冒頭で導入の方法が変わったことと移行の手順を目立たせた
 - **CA 証明書の取り出し方**: `/web/ca.crt` も HTTPS で配るため、別の端末で開くと警告を越えることになる。README では、PC で `web tls export-ca` で書き出してファイルで渡す方法（警告を越えない）を先に書き、ブラウザでダウンロードする方法には、登録した後に `web tls renew` で証明書の例外を使われなくする手順を添えた
 - **設計書**: `docs/インストーラ_パッケージング設計書.md` に 10 章、`docs/エラーコード一覧_例外設計書.md` に 8 章（段階 12 改訂）を足した。ほかの設計書（基本設計・詳細設計・画面設計・タスクトレイ常駐アプリプロセス設計・テスト仕様）の改訂は v0.10.0 の後に行う
+
+## 87. WebUI・ほかのトレイGUI で変えた一覧が、トレイGUI の画面に出ない
+
+#52 の Linux 実機の確認で見つかった（`dev` からあった）。WebUI で監視するフォルダを足しても、トレイGUI の「リアルタイム保護」の画面には、トレイGUI を起動し直すまで出なかった。
+
+- 原因: `api/actions.py` は変えた後に `ApiContext.notify_changed` を呼ぶが、サービス（`api/service_api.py`）はこれを渡しておらず、何も知らせていなかった（1 プロセスの形のときは `app.py` が画面を読み直していた。12-4e で `app.py` を除いたときに抜けた）。除外・スケジュール・隔離・ログ・clamd の停止・clamav-freshclam の開始・停止も同じだった
+- 直し方: サービスは `notify_changed` に `api/events.py` の `data_changed_publisher` を渡し、変えた対象を `data.changed`（`{"what": "targets"}` など。対象は `DATA_CHANGED_TARGETS`）で知らせる。設定は `config.changed`、スキャン・定義の更新の開始は `scan.started`・`update.started`、監視の開始・停止は `status` で知らせているため重ねない
+- トレイGUI は `data.changed` で、その一覧を読み直す（`tray_main.reload_changed_screens`）。保存していない変更は残す。サービスに無くなった行（ほかで消した行）への保存していない変更は捨てる（`PendingEdits.prune`。保存すると E8109 になるため）。イベントを受けられなかった間（つなぎ直しの途中など）の変更も出るよう、「リアルタイム保護」「スケジュール」の画面を開いたときにも読み直す
+- WebUI も、開いている画面が対象なら読み直す（`web/app.js` の `DATA_CHANGED_SCREENS`）。トレイGUI で変えたものが、開いている WebUI に出なかったのも同じ原因だった

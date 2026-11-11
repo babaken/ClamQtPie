@@ -66,6 +66,13 @@ class PendingEdits:
         else:
             self.updated[key] = values
 
+    def prune(self, existing: set[int]) -> None:
+        """サービスに無くなった行（WebUI・ほかのトレイGUI が消した）への変更を捨てる（保存すると E8109 になるため）"""
+        self.removed &= existing
+        for changes in (self.enabled, self.updated):
+            for key in [k for k in changes if k not in existing]:
+                del changes[key]
+
     def state_text(self, key: int, saved_enabled: bool, removed_label: str = "削除") -> str:
         """一覧の「有効」の列の表示（removed_label: 削除の予定の行の呼び方。監視するフォルダは「外す」）"""
         if key < 0:

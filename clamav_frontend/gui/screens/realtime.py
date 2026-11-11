@@ -179,6 +179,7 @@ class RealtimeScreen(BaseScreen):
             return
         records = self._watch_target_service.list_all()
         pending = self._pending_targets
+        pending.prune({r.id for r in records})
         rows = [(r.id, r.path, pending.state_text(r.id, r.enabled, _REMOVED_LABEL)) for r in records]
         rows += [(-(i + 1), item["path"], pending.state_text(-(i + 1), True)) for i, item in enumerate(pending.added)]
         self.target_table.setRowCount(0)
@@ -269,6 +270,7 @@ class RealtimeScreen(BaseScreen):
             return
         all_rules = self._exclude_service.list_all()
         pending = self._pending_excludes
+        pending.prune({r.id for r in all_rules})
         for type_key, table in self._exclude_tables.items():
             rows = [(r.id, r.value, pending.state_text(r.id, r.enabled)) for r in all_rules if r.type == type_key]
             rows += [(-(i + 1), item["value"], pending.state_text(-(i + 1), True))

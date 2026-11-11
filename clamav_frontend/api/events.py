@@ -6,6 +6,7 @@
 - config.changed: 設定を保存したとき（画面・Web API のどちらで保存しても。サービスの本体から呼ぶ）
 - schedule.finished: スケジュールのジョブの最終実行結果を記録したとき（段階 12-3c）
 - notification・notification.acked: 通知を保存したとき・既読にしたとき（サービスのみ。段階 12-3c）
+- data.changed: Web API で一覧などを変えたとき（{"what": 変えた対象}。トレイGUI・WebUI が開いている画面を読み直す）
 
 リアルタイム監視のシグナルは監視のスレッドから出るため、EventHub.publish（任意のスレッドから呼べる）に直接つなぐ。
 """
@@ -97,3 +98,16 @@ class StatusPublisher:
 
 def publish_config_changed(events: EventHub) -> None:
     events.publish("config.changed", {})
+
+
+#: data.changed で知らせる対象（api/actions.py の CHANGED_*）。設定は config.changed、スキャン・定義の更新の開始は
+#: scan.started・update.started、監視の開始・停止は status で知らせるため、ここには入れない
+DATA_CHANGED_TARGETS = frozenset({"excludes", "targets", "quarantine", "schedules", "logs", "clamd", "freshclam"})
+
+
+def data_changed_publisher(events: EventHub):
+    """ApiContext.notify_changed に渡す（サービスの中には画面がないため、変えた対象をトレイGUI・WebUI に知らせる）"""
+    def publish(what: str) -> None:
+        if what in DATA_CHANGED_TARGETS:
+            events.publish("data.changed", {"what": what})
+    return publish

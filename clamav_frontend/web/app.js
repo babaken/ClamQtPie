@@ -336,6 +336,17 @@ const LOADERS = {
   diagnostics: () => Promise.resolve(),
 };
 
+//: data.changed の対象（api/events.py の DATA_CHANGED_TARGETS）と、読み直す画面
+const DATA_CHANGED_SCREENS = {
+  targets: ["realtime", "home"],
+  excludes: ["excludes"],
+  schedules: ["schedule"],
+  quarantine: ["quarantine", "home"],
+  logs: ["logs"],
+  clamd: ["home", "update"],
+  freshclam: ["update"],
+};
+
 function showScreen(name) {
   if (!LOADERS[name]) name = "home";
   state.screen = name;
@@ -1126,6 +1137,11 @@ const EVENT_HANDLERS = {
   },
   "config.changed": () => {
     if (state.screen === "settings") loadSettings().catch(() => {});
+  },
+  "data.changed": (d) => {
+    // トレイGUI・ほかのブラウザ・ctl が変えたもの。開いている画面が対象なら読み直す
+    const screens = DATA_CHANGED_SCREENS[d.what] || [];
+    if (screens.includes(state.screen)) LOADERS[state.screen]().catch(() => {});
   },
   "realtime.target_lost": (d) => toast(`監視するフォルダが見つかりません: ${d.path}`, "error"),
   "realtime.error": (d) => toast(`リアルタイム保護でエラーが起きました: ${d.message || d.code}`, "error"),

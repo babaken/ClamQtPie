@@ -97,6 +97,25 @@ class DiagnosticsProxy:
         return report
 
 
+def reload_changed_screens(window, what: str) -> None:
+    """data.changed（WebUI・ほかのトレイGUI が変えたもの）で、その一覧を読み直す（保存していない変更は残す）"""
+    if what == "targets":
+        window.get_screen("realtime").reload_targets()
+    elif what == "excludes":
+        window.get_screen("realtime").reload_excludes()
+    elif what == "schedules":
+        window.get_screen("schedule").reload()
+    elif what == "quarantine":
+        window.get_screen("quarantine").reload()
+        window.get_screen("home").refresh_status(check_clamd=False)
+    elif what == "logs":
+        window.get_screen("log").reload()
+    elif what == "clamd":
+        window.get_screen("home").refresh_status()
+    elif what == "freshclam":
+        window.get_screen("update").reload_freshclam_service()
+
+
 class TrayApp:
     def __init__(self, app: QApplication, paths: ServicePaths) -> None:
         self.app = app
@@ -346,6 +365,8 @@ class TrayApp:
             elif name == "schedule.finished":
                 window.get_screen("schedule").reload()
                 scan_screen.reload_history()
+            elif name == "data.changed":
+                reload_changed_screens(window, str((_data or {}).get("what", "")))
 
         p.events.event.connect(on_event)
 
@@ -360,6 +381,12 @@ class TrayApp:
                 window.get_screen("log").on_shown()
             elif key == "scan":
                 scan_screen.reload_history()
+            elif key == "realtime":
+                # イベントを受けられなかった間（サービスにつなぎ直している間など）の変更も、画面を開けば出す
+                realtime_screen.reload_targets()
+                realtime_screen.reload_excludes()
+            elif key == "schedule":
+                window.get_screen("schedule").reload()
             elif key == "diagnostics":
                 window.get_screen("diagnostics").refresh_service_info()
 

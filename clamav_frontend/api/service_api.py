@@ -23,6 +23,7 @@ from api.events import (
     connect_notifications,
     connect_realtime,
     connect_scheduler,
+    data_changed_publisher,
     publish_config_changed,
 )
 from api.jobs import JobTracker
@@ -98,6 +99,7 @@ class ServiceApi:
             on_clamd_stop_requested=lambda: None, on_clamd_stop_failed=lambda: None,
             freshclam_service=FreshclamServiceController(),
             service_mode=True, requester_home=requester_home,
+            notify_changed=data_changed_publisher(self.events),
         )
         tokens = ApiTokens(rt.paths.api_dir)
         context.web = self.web = WebController(context, tokens, tls_dir=rt.paths.tls_dir)
