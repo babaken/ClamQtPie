@@ -148,7 +148,9 @@ def test_service_answers_on_the_api_and_refuses_a_second_instance(tmp_path):
         # 起動の完了の前に API が待ち受けを始めていること（ログの順番）
         log = (data_dir / "logs" / "app.log").read_text(encoding="utf-8")
         assert log.index("Web API の待ち受けを開始しました") < log.index("サービスを開始しました")
-        assert "ClamQtPie 0.9" in log  # 起動の行に版を出す
+        from core.version import APP_VERSION
+
+        assert f"ClamQtPie {APP_VERSION}" in log  # 起動の行に版を出す
         second = subprocess.run([sys.executable, "service_main.py", "--console", "--data-dir", str(data_dir)],
                                 cwd=_PROJECT, capture_output=True, text=True, timeout=60)
         assert second.returncode == 4

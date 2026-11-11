@@ -1707,3 +1707,11 @@ Windows の実機の確認（インストーラで入れたとき）で見つけ
   - フォルダを作れない・書けないときは、これまでどおり矢印なしのまま動く
 - `tests/unit/test_notification_service.py` の `test_smtp_ssl_rejects_untrusted_certificate` は、試しの証明書を `tempfile.mkdtemp()` に作って消していなかった。`tmp_path` を使う
 - 以前に溜まった `/tmp/ClamQtPie-*`・`/tmp/tmp*` は消さない（OS の一時フォルダの片付けに任せる）
+
+## 89. v0.10.0 の公開
+
+段階 12（サービス化・WebUI。§55〜§88）を v0.10.0（ベータ）として公開する。`core/version.py` の `APP_VERSION`、`version_info.txt`、`build_release.py` のビルド例を 0.10.0 にそろえた。
+
+- 導入の方法が変わる（ポータブル版をやめ、Windows はインストーラ、Linux は `install.sh`）。v0.9.x のデータは `clamqtpie-ctl migrate`（Windows はインストーラが尋ねる）で移す
+- DB は起動時に 0007 まで上がる
+- 12-6 のうち、基本設計・詳細設計・画面設計・タスクトレイ常駐アプリプロセス設計・テスト仕様の改訂は v0.10.0 の後に行う（§86）

@@ -4,7 +4,7 @@ build_release.py — PyInstallerビルド＋配布物の作成
 参照: インストーラ/パッケージング設計書2章、サービス化・Web API設計書 11章（段階 12-4d）
 
 使い方:
-    python build_release.py [--version 0.9.3] [--no-installer]
+    python build_release.py [--version 0.10.0] [--no-installer]
 
 実行後、dist/ に次のものができる（それぞれ SHA-256 の .sha256 を添える）。
 - Windows: ClamQtPie-<version>-setup.exe（Inno Setup のインストーラ。packaging/windows/ClamQtPie.iss）。
