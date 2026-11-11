@@ -747,7 +747,7 @@ FILDES対応後（同上）: 324 passed, 6 skipped（実clamdの結合テスト`
 - 抑止は停止を要求した時点で始める（`EngineScreen.bind_services`の`on_stop_requested`、app.pyの`_on_clamd_stop_requested`）。停止に失敗した場合（または別の操作の実行中で停止を始められなかった場合）は`on_stop_failed`で要求前の状態に戻す。当初は停止の成功後に抑止していたため、停止処理中（Linuxの`systemctl stop`がclamdの終了を待つ間、Windowsの`STOP_PENDING`中）に60秒ごとの定期確認のPINGが失敗すると自動起動が走り、pkexecの認証画面が再表示されるか停止直後にclamdが起動し直していた（コードレビューで指摘）
 - Debian/Ubuntuで`clamav-daemon.socket`が有効だと、停止後もソケットへの接続でsystemdがclamdを起動し直すことがある（OS側の設定のためアプリでは制御しない）
 - `sc stop`の1062（ERROR_SERVICE_NOT_ACTIVE）は成功扱い。起動の1056判定はWindowsのときだけに限定した
-- 数値・日付の入力欄（QSpinBox / QDoubleSpinBox / QDateEdit / QTimeEdit）の上下ボタンが暗い背景に埋もれて見えにくかった（利用者の確認で指摘）。入力欄の背景・枠線をスタイルシートで指定したため、上下ボタンが小さな暗い四角になり、矢印も描かれていなかった。上下ボタンの背景・区切り線・ホバー/押下の色を指定し、矢印はQPainterで描いた三角形の画像（`gui/theme.py`の`_spin_arrow_rules()`）を`image: url(...)`で指定する。上下ボタンをスタイルシートで指定するとQtは矢印を描かず、枠線で三角形を作る指定も四角形になるため画像にした。画像はアイコンと同じく同梱せず、起動時に一時フォルダ（QTemporaryDir。終了時に削除）へ書く。無効時は灰色の矢印。プルダウン（QComboBox）の矢印は見えているため変えていない
+- 数値・日付の入力欄（QSpinBox / QDoubleSpinBox / QDateEdit / QTimeEdit）の上下ボタンが暗い背景に埋もれて見えにくかった（利用者の確認で指摘）。入力欄の背景・枠線をスタイルシートで指定したため、上下ボタンが小さな暗い四角になり、矢印も描かれていなかった。上下ボタンの背景・区切り線・ホバー/押下の色を指定し、矢印はQPainterで描いた三角形の画像（`gui/theme.py`の`_spin_arrow_rules()`）を`image: url(...)`で指定する。上下ボタンをスタイルシートで指定するとQtは矢印を描かず、枠線で三角形を作る指定も四角形になるため画像にした。画像はアイコンと同じく同梱せず、起動時にユーザー単位のキャッシュのフォルダ（`gui/theme.py`の`arrow_image_dir()`）へ上書きで書く（一時フォルダに書いていたときは消えずに溜まった。§88）。無効時は灰色の矢印。プルダウン（QComboBox）の矢印は見えているため変えていない
 
 未対応（要判断）:
 - メールの件名・本文（`core/notification_service.py`）、exeのバージョン情報（`version_info.txt`）、Linuxの自動起動`.desktop`の名前、配布物名`ClamAVFrontend_v*.zip`は「ClamAVフロントエンド / ClamAV Frontend」のまま
@@ -1695,3 +1695,15 @@ Windows の実機の確認（インストーラで入れたとき）で見つけ
 - 直し方: サービスは `notify_changed` に `api/events.py` の `data_changed_publisher` を渡し、変えた対象を `data.changed`（`{"what": "targets"}` など。対象は `DATA_CHANGED_TARGETS`）で知らせる。設定は `config.changed`、スキャン・定義の更新の開始は `scan.started`・`update.started`、監視の開始・停止は `status` で知らせているため重ねない
 - トレイGUI は `data.changed` で、その一覧を読み直す（`tray_main.reload_changed_screens`）。保存していない変更は残す。サービスに無くなった行（ほかで消した行）への保存していない変更は捨てる（`PendingEdits.prune`。保存すると E8109 になるため）。イベントを受けられなかった間（つなぎ直しの途中など）の変更も出るよう、「リアルタイム保護」「スケジュール」の画面を開いたときにも読み直す
 - WebUI も、開いている画面が対象なら読み直す（`web/app.js` の `DATA_CHANGED_SCREENS`）。トレイGUI で変えたものが、開いている WebUI に出なかったのも同じ原因だった
+
+## 88. トレイGUI とテストが一時フォルダを消さずに溜める（#55）
+
+#54 の Linux 実機の確認で見つかった。
+
+- トレイGUI・確認画面（`elevate_main.py`）は、数値・日付の入力欄の矢印の画像を、起動のたびに新しい一時フォルダ（`QTemporaryDir`、`/tmp/ClamQtPie-XXXXXX`）に書いていた。モジュールの変数に持たせていただけで、Python の終了のときに PySide6 のオブジェクトが壊される保証がないため、［終了］で閉じても消えずに残った。ログアウト・kill で終わったときも残る
+  - 直し方: 決まった場所（ユーザー単位のキャッシュ。Windows は `%LOCALAPPDATA%\clamqtpie\theme`、Linux は `$XDG_CACHE_HOME/clamqtpie/theme`（無ければ `~/.cache/clamqtpie/theme`））に、起動のたびに上書きで書く。終わり方によらず溜まらないため、終了時の削除は要らない
+  - トレイGUI と確認画面が同時に書いても壊れた画像を読まないよう、別の名前で書いてから `os.replace` で置き換える
+  - pkexec の後の確認画面（root）は root のホームの下に書くため、ユーザーのフォルダに root のファイルはできない
+  - フォルダを作れない・書けないときは、これまでどおり矢印なしのまま動く
+- `tests/unit/test_notification_service.py` の `test_smtp_ssl_rejects_untrusted_certificate` は、試しの証明書を `tempfile.mkdtemp()` に作って消していなかった。`tmp_path` を使う
+- 以前に溜まった `/tmp/ClamQtPie-*`・`/tmp/tmp*` は消さない（OS の一時フォルダの片付けに任せる）

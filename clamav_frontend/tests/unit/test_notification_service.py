@@ -283,12 +283,11 @@ def test_smtp_ssl_rejects_untrusted_certificate(tmp_path):
     import socket
     import ssl
     import subprocess
-    import tempfile
     import threading
 
     import pytest
 
-    d = tempfile.mkdtemp()
+    d = tmp_path  # tempfile.mkdtemp() だと消えずに溜まった（#55）
     cert, key = f"{d}/c.pem", f"{d}/k.pem"
     try:
         subprocess.run(

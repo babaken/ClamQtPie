@@ -8,7 +8,12 @@
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QDir, QPointF, Qt, QTemporaryDir
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+from PySide6.QtCore import QDir, QPointF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPolygonF
 from PySide6.QtWidgets import QApplication, QPushButton, QStyleFactory, QWidget
 
@@ -161,34 +166,63 @@ def apply_theme(app: QApplication) -> None:
     app.setStyleSheet(STYLE_SHEET + _spin_arrow_rules())
 
 
-#: 上下ボタンの矢印の画像を置く一時フォルダ（アプリの終了まで保持し、終了時に削除される）
-_arrow_dir: QTemporaryDir | None = None
 #: 矢印の表示サイズ（論理ピクセル）。画像は高DPIでもぼやけないよう2倍の大きさで描く
 _ARROW_WIDTH, _ARROW_HEIGHT = 9, 5
 
 
-def _spin_arrow_rules() -> str:
+def arrow_image_dir() -> Path:
+    """上下ボタンの矢印の画像を置くフォルダ（ユーザー単位のキャッシュ。起動のたびに上書きする）
+
+    以前は起動のたびに一時フォルダ（QTemporaryDir）を作っていたが、終了時に消えずに溜まった（#55）。
+    決まった場所に上書きで書けば、終わり方（ログアウト・kill など）によらず溜まらない。
+    pkexec の後の確認画面（root）は root のホームの下を使うため、ユーザーのフォルダに root のファイルはできない。
+    """
+    from core.version import APP_SLUG
+
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    else:
+        base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(base) / APP_SLUG / "theme"
+
+
+def _save_arrow(image: QImage, path: Path) -> bool:
+    """別の名前で書いてから置き換える（トレイGUI と確認画面が同時に書いても、壊れた画像を読まない）"""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".png", dir=path.parent)
+    os.close(fd)
+    try:
+        if not image.save(tmp, "PNG"):
+            return False
+        os.replace(tmp, path)
+        return True
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def _spin_arrow_rules(directory: Path | None = None) -> str:
     """数値・日付の上下ボタンの矢印を指定するスタイル
 
     上下ボタンの背景をスタイルシートで指定すると、Qtは矢印を描かなくなる（枠線で三角形を作る指定も
-    四角形になる）。そのため三角形をQPainterで描いた画像を一時フォルダに書き、image: url(...) で指定する
+    四角形になる）。そのため三角形をQPainterで描いた画像を書き、image: url(...) で指定する
     （アイコンと同じく画像ファイルは同梱しない）。画像を書けない場合は空文字（矢印なしのまま動作は続ける）。
     """
-    global _arrow_dir
-    _arrow_dir = QTemporaryDir()
-    if not _arrow_dir.isValid():
-        return ""
+    directory = directory or arrow_image_dir()
     paths = {}
-    for name, color, up in (
-        ("up", COLOR_TEXT, True),
-        ("down", COLOR_TEXT, False),
-        ("up_disabled", "#666666", True),
-        ("down_disabled", "#666666", False),
-    ):
-        path = _arrow_dir.filePath(f"{name}.png")
-        if not _draw_arrow(color, up).save(path, "PNG"):
-            return ""
-        paths[name] = QDir.fromNativeSeparators(path)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        for name, color, up in (
+            ("up", COLOR_TEXT, True),
+            ("down", COLOR_TEXT, False),
+            ("up_disabled", "#666666", True),
+            ("down_disabled", "#666666", False),
+        ):
+            path = directory / f"{name}.png"
+            if not _save_arrow(_draw_arrow(color, up), path):
+                return ""
+            paths[name] = QDir.fromNativeSeparators(str(path))
+    except OSError:
+        return ""
     widgets = ("QSpinBox", "QDoubleSpinBox", "QDateEdit", "QTimeEdit")
 
     def rule(sub: str, image: str, states: tuple[str, ...] = ("",)) -> str:
