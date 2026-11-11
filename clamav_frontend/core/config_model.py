@@ -5,9 +5,14 @@ config.json データモデル
 """
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field, asdict
 
-SCHEMA_VERSION = 1
+#: 2: サービスの設定（段階 12-3b）。利用者ごとの GUI の設定（general）を gui.json（core/gui_config.py）に分けた
+SCHEMA_VERSION = 2
+#: サービスの設定に含めない部分（利用者ごとの GUI の設定）
+GUI_SECTIONS = ("general",)
 
 _ALLOWED_RETENTION_DAYS = (30, 60, 90, 180, 365)
 _ALLOWED_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -15,6 +20,40 @@ _ALLOWED_SMTP_ENCRYPTION = ("none", "ssl", "starttls")
 _ALLOWED_CONNECTION_TYPES = ("auto", "unix", "tcp")
 _ALLOWED_REALTIME_ACTIONS = ("quarantine", "notify_only")
 _ALLOWED_LINUX_BACKENDS = ("clamonacc", "watchdog")
+
+
+#: Web API で変えられる項目。設定画面で変えられるもの（と、定義の古さの日数）に限る。それ以外は読み取りだけ。
+#: 次のものは特に、Web API から変えられると権限を越えた操作に使えるため含めない（12章 25）:
+#: - 実行ファイル・設定ファイルの場所（update.freshclam_path、realtime.clamonacc_path・clamonacc_config_file）:
+#:   任意のプログラムを動かせる
+#: - clamd の接続先（clamd.connection_type・tcp_host・tcp_port・unix_socket_path）: 偽の clamd に検査するファイルの中身を
+#:   送らせ、常に「検知なし」と返させられる（ポートだけでも、このPC の一般の利用者が待ち受けたポートに向けられる）
+#: - clamd.service_name: 任意のサービスを起動・停止させられる
+#: - general（自動起動・最小化など）: 利用者ごとの GUI の設定（gui.json）
+#: 変えるときは clamqtpie-ctl config set を使う。旧版のデータの移行（clamqtpie-ctl migrate）でも、移すのはこの項目だけ
+WRITABLE_FIELDS = (
+    "clamd.auto_start",
+    "logging.level",
+    "logging.retention_days",
+    "notification.on_detect_desktop",
+    "notification.on_detect_mail",
+    "notification.on_job_fail",
+    "notification.on_update_fail",
+    "realtime.default_action",
+    "realtime.default_enabled",
+    "smtp.encryption",
+    "smtp.from_address",
+    "smtp.host",
+    "smtp.port",
+    "smtp.to_address",
+    "smtp.user",
+    "scan.quick_targets",
+    "update.auto_update",
+    "update.interval_hours",
+    "update.stale_days",
+)
+#: 読み込み時の検証（validate_and_fix）に無い範囲（設定画面の入力欄と同じ）
+WRITABLE_RANGES = {"update.interval_hours": (1, 24)}
 
 
 @dataclass
@@ -93,12 +132,83 @@ class LoggingConfig:
     level: str = "INFO"
 
 
+#: scan.quick_targets の数・長さの上限
+MAX_QUICK_TARGETS = 100
+_MAX_PATH = 4096
+
+
+@dataclass
+class ScanConfig:
+    """サービスのクイックスキャンの対象（サービス化・Web API設計書 6.2節。段階 12-3d）
+
+    サービスは SYSTEM・root で動くため、利用者のフォルダ（ダウンロード等）が分からない。Web API で対象を
+    指定しないクイックスキャン（ブラウザ・clamqtpie-ctl）は、ここに利用者が指定した場所だけを使う。
+    空の間は受け付けない。トレイGUI は利用者の権限で対象を求めて送るため、この設定を使わない
+    """
+
+    quick_targets: list[str] = field(default_factory=list)
+
+
+def quick_targets_problem(value) -> str | None:
+    """scan.quick_targets として正しくなければ、その理由"""
+    if not isinstance(value, list) or len(value) > MAX_QUICK_TARGETS:
+        return f"{MAX_QUICK_TARGETS} 件までのパスの一覧で指定してください"
+    for target in value:
+        if not isinstance(target, str) or not target or len(target) > _MAX_PATH:
+            return "パスは空でない文字列で指定してください"
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in target):
+            return "パスに制御文字は使えません"
+        if not os.path.isabs(target):
+            return f"パスは絶対パスで指定してください: {target}"
+    return None
+
+
+@dataclass
+class ScheduleConfig:
+    """スケジュールの取りこぼし対策（サービス化・Web API設計書 9章）"""
+
+    #: 予定の時刻を過ぎても実行する猶予（秒。60〜86400）。重なった回は1回にまとめる
+    misfire_grace_sec: int = 3600
+
+
+#: api.web_tls に使える値
+WEB_TLS_MODES = ("off", "local_ca")
+
+
 @dataclass
 class ApiConfig:
     """Web API（サービス化・Web API設計書3.1節の内部API）。段階12-3までは従来のアプリの中で動かすため既定はOFF"""
 
     enabled: bool = False
     port: int = 8765  # 待ち受けるのは127.0.0.1だけ（変更不可）
+    # WebUI（3.1節・3.3節。段階 12-5）。api はすべて保護された項目（Web API の PUT /config では変えられない）。
+    # ON/OFF・ログインの設定は PUT /web・PUT /web/credentials（admin の Bearer だけ）か clamqtpie-ctl web で変える
+    web_enabled: bool = False
+    web_port: int = 8766
+    web_username: str = "admin"
+    #: scrypt のハッシュ（core/web_password.py）。空なら未設定（未設定の間は WebUI を ON にできない）
+    web_password_hash: str = ""
+    #: 設定したパスワードの長さ（LAN 許可のときの 12 文字以上の確認用。ハッシュからは分からないため）
+    web_password_length: int = 0
+    #: WebUI を自動で OFF にする日時（UTC の ISO 8601）。空なら期限なし
+    web_off_at: str = ""
+    #: 二段階認証（TOTP。段階 12-5d）を設定済みか。秘密鍵は設定ファイルに入れず、秘密の保存先に置く
+    web_totp_enabled: bool = False
+    #: 最後に受け付けたコードのステップ番号（これ以前のコードは受け付けない。使い回しの防止）
+    web_totp_last_step: int = 0
+    #: 予備のコードの scrypt のハッシュ（使ったものは消す）
+    web_recovery_code_hashes: list[str] = field(default_factory=list)
+    #: 「パスワードは合っていて確認コードだけが違う」ログインの回数。core.totp.STOP_FAILURES になったら、パスワードと
+    #: 確認コードでのログインを止める。0 に戻すのは管理者の操作（ログインの停止を解く・パスワードの変更）だけ
+    web_totp_failures: int = 0
+    #: WebUI の HTTPS（段階 12-5e1）。"off"（HTTP）か "local_ca"（ClamQtPie のローカル CA で作った証明書。<データ>/tls/）。
+    #: 利用者が用意した証明書（"custom"）は v0.10.0 では受け付けない
+    web_tls: str = "off"
+    #: LAN からの接続を許可するか（段階 12-5e2。試験的）。HTTPS・二段階認証・12 文字以上のパスワードがそろったときだけ
+    #: true にでき、どれかが崩れたら false に戻す。WebUI を OFF にしても残す（ON にしたら LAN からも待ち受ける）
+    web_lan: bool = False
+    #: WebUI のセッションの有効期限（最後の操作からの分。LAN からの接続を許可している間は 15 分まで）
+    session_timeout_min: int = 30
 
 
 @dataclass
@@ -111,6 +221,8 @@ class ConfigModel:
     notification: NotificationConfig = field(default_factory=NotificationConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    scan: ScanConfig = field(default_factory=ScanConfig)
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
 
     def to_dict(self) -> dict:
@@ -129,6 +241,8 @@ class ConfigModel:
         notification = NotificationConfig(**_filtered(data.get("notification", {}), NotificationConfig))
         update = UpdateConfig(**_filtered(data.get("update", {}), UpdateConfig))
         logging_cfg = LoggingConfig(**_filtered(data.get("logging", {}), LoggingConfig))
+        scan = ScanConfig(**_filtered(data.get("scan", {}), ScanConfig))
+        schedule = ScheduleConfig(**_filtered(data.get("schedule", {}), ScheduleConfig))
         api = ApiConfig(**_filtered(data.get("api", {}), ApiConfig))
 
         model = cls(
@@ -140,6 +254,8 @@ class ConfigModel:
             notification=notification,
             update=update,
             logging=logging_cfg,
+            scan=scan,
+            schedule=schedule,
             api=api,
         )
         return model
@@ -220,6 +336,16 @@ def validate_and_fix(model: ConfigModel, warn) -> ConfigModel:
         )
         model.realtime.windows_debounce_sec = 2.0
 
+    problem = quick_targets_problem(model.scan.quick_targets)
+    if problem is not None:
+        warn(f"scan.quick_targets が不正な値です（{problem}）。空へ補正します。")
+        model.scan.quick_targets = []
+
+    grace = model.schedule.misfire_grace_sec
+    if isinstance(grace, bool) or not isinstance(grace, int) or not (60 <= grace <= 86400):
+        warn(f"schedule.misfire_grace_sec が範囲外です ({grace!r})。既定値3600へ補正します。")
+        model.schedule.misfire_grace_sec = 3600
+
     if not isinstance(model.api.enabled, bool):
         warn(f"api.enabled が不正な値です ({model.api.enabled!r})。falseへ自動補正します。")
         model.api.enabled = False
@@ -229,4 +355,78 @@ def validate_and_fix(model: ConfigModel, warn) -> ConfigModel:
         warn(f"api.port が範囲外です ({model.api.port!r})。既定値8765へ補正します。")
         model.api.port = 8765
 
+    _validate_web(model.api, warn)
     return model
+
+
+_WEB_USERNAME = re.compile(r"^[A-Za-z0-9_.\-]{1,32}$")
+
+
+def _validate_web(api: ApiConfig, warn) -> None:
+    """WebUI の設定（段階 12-5a）。パスワードが未設定・壊れていれば WebUI を OFF にする"""
+    from core.duration_text import parse_off_at
+    from core.web_password import is_valid_hash
+
+    if not isinstance(api.web_enabled, bool):
+        warn(f"api.web_enabled が不正な値です ({api.web_enabled!r})。falseへ自動補正します。")
+        api.web_enabled = False
+    port = api.web_port
+    if isinstance(port, bool) or not isinstance(port, int) or not (1024 <= port <= 65535) or port == api.port:
+        fallback = 8766 if api.port != 8766 else 8767
+        warn(f"api.web_port が範囲外か、内部 API のポートと同じです ({port!r})。{fallback}へ補正します。")
+        api.web_port = fallback
+    if not isinstance(api.web_username, str) or not _WEB_USERNAME.match(api.web_username):
+        warn(f"api.web_username が不正な値です ({api.web_username!r})。adminへ補正します。")
+        api.web_username = "admin"
+    if not isinstance(api.web_password_hash, str) or (api.web_password_hash and not is_valid_hash(api.web_password_hash)):
+        warn("api.web_password_hash が正しくありません。パスワードを未設定にします。")
+        api.web_password_hash = ""
+    length = api.web_password_length
+    if isinstance(length, bool) or not isinstance(length, int) or not (0 <= length <= 1024):
+        api.web_password_length = 0
+    if not api.web_password_hash:
+        api.web_password_length = 0
+        if api.web_enabled:
+            warn("WebUI のパスワードが未設定のため、WebUI を OFF にします。")
+            api.web_enabled = False
+    if not isinstance(api.web_totp_enabled, bool):
+        # 壊れていても二段階認証を外さない（外すのは clamqtpie-ctl web totp reset だけ）
+        warn(f"api.web_totp_enabled が不正な値です ({api.web_totp_enabled!r})。設定済みとして扱います。")
+        api.web_totp_enabled = True
+    step = api.web_totp_last_step
+    if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+        api.web_totp_last_step = 0
+    hashes = api.web_recovery_code_hashes
+    if not isinstance(hashes, list) or not all(isinstance(h, str) and is_valid_hash(h) for h in hashes):
+        warn("api.web_recovery_code_hashes が正しくありません。正しくない予備のコードを除きます。")
+        api.web_recovery_code_hashes = [h for h in (hashes if isinstance(hashes, list) else [])
+                                        if isinstance(h, str) and is_valid_hash(h)][:20]
+    failures = api.web_totp_failures
+    if isinstance(failures, bool) or not isinstance(failures, int) or failures < 0:
+        from core.totp import STOP_FAILURES
+
+        # 壊れていたら止めた側に倒す（管理者が「ログインの停止を解く」で戻せる）
+        warn(f"api.web_totp_failures が不正な値です ({failures!r})。WebUI のログインを止めた状態として扱います。")
+        api.web_totp_failures = STOP_FAILURES
+    if not api.web_totp_enabled:
+        api.web_totp_last_step = 0
+        api.web_recovery_code_hashes = []
+        api.web_totp_failures = 0
+    if api.web_tls not in WEB_TLS_MODES:
+        warn(f"api.web_tls が不正な値です ({api.web_tls!r})。off へ補正します。")
+        api.web_tls = "off"
+    if not isinstance(api.web_off_at, str) or (api.web_off_at and parse_off_at(api.web_off_at) is None):
+        warn(f"api.web_off_at が不正な値です ({api.web_off_at!r})。期限なしにします。")
+        api.web_off_at = ""
+    timeout = api.session_timeout_min
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or not (1 <= timeout <= 1440):
+        warn(f"api.session_timeout_min が範囲外です ({timeout!r})。既定値30へ補正します。")
+        api.session_timeout_min = 30
+    from core.web_lan import lan_problems
+
+    if not isinstance(api.web_lan, bool):
+        warn(f"api.web_lan が不正な値です ({api.web_lan!r})。false（LAN から接続しない）へ補正します。")
+        api.web_lan = False
+    if api.web_lan and lan_problems(api):
+        warn(f"api.web_lan の条件を満たしていません（{'、'.join(lan_problems(api))}）。false へ補正します。")
+        api.web_lan = False

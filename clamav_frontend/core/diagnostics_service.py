@@ -32,9 +32,9 @@ from pathlib import Path
 from typing import Callable
 
 from core.clamd_conf import DEFAULT_CLAMD_CONF_CANDIDATES, find_clamd_conf, load_clamd_conf
-from core.clamd_process import ClamdServiceController, console_text_kwargs, is_valid_service_name, no_window_kwargs
+from core.clamd_process import ClamdServiceController, console_text_kwargs, is_valid_service_name
 from core.config_model import ConfigModel
-from core.exec_path import child_env, system_tool
+from core.exec_path import child_env, no_window_kwargs, system_tool
 from core.version import APP_NAME, APP_VERSION
 
 REPORT_TITLE = f"{APP_NAME} 診断レポート"
@@ -102,6 +102,19 @@ class DiagnosticsReport:
         for check in self.checks:
             lines.append(f"[{check.level}] {check.message}")
         return "\n".join(lines) + "\n"
+
+
+#: 伏せ字の版の先頭に添える、伏せたもの・伏せていないものの説明（読み手に基準が分かるように。段階 12-5c）
+MASK_NOTE = (
+    "（伏せ字の版: ホームフォルダ・ユーザー名・コンピューター名、アプリのフォルダ、clamd のソケット・ホスト、"
+    "設定ファイル（clamd.conf・freshclam.conf）と clamonacc の場所を伏せています。"
+    "ClamAV の実行ファイルと定義のフォルダは、多くの環境で同じ場所のため伏せていません）"
+)
+
+
+def masked_report_text(text: str, sensitive: dict[str, str] | None = None) -> str:
+    """問い合わせ等に貼る版（説明＋伏せ字にしたレポート）"""
+    return f"{MASK_NOTE}\n\n{mask_report(text, extra=sensitive)}"
 
 
 def mask_report(

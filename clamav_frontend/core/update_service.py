@@ -31,6 +31,7 @@ from core.exec_path import (
     child_env,
     find_program,
     find_system_tool,
+    no_window_kwargs,
     system_tool,
     validate_executable,
     windows_clamav_dirs,
@@ -102,6 +103,8 @@ class UpdateService:
         self._which = which
         self._runner = runner
         self._validate_exec = validate_exec
+        #: OS のサービスが更新しているため見送ったことを記録したか（見送りが続く間、毎回は記録しない）
+        self._skip_logged = False
 
     def update_now(
         self, on_output: Callable[[str], None] | None = None, interactive: bool = True
@@ -128,8 +131,11 @@ class UpdateService:
             if reason == "not_found":
                 return self._fail(before_version, f"{_FRESHCLAM_NOT_FOUND_MESSAGE} ({self.freshclam_path})")
             if reason == "service":
-                message = f"定義DBの更新はOSの{_FRESHCLAM_SERVICE}サービスが行っているため、アプリからの自動更新は行いません"
-                log_event(CATEGORY_UPDATE, message)
+                message = f"定義DBの更新はOSの{_FRESHCLAM_SERVICE}サービスが行っているため、実行しませんでした"
+                if not self._skip_logged:
+                    # 見送りが始まったときだけ記録する（自動更新の間隔ごとに同じ記録が並ばないように）
+                    log_event(CATEGORY_UPDATE, message + "（OS のサービスが動いている間は、以後も記録せずに見送ります）")
+                    self._skip_logged = True
                 return UpdateHistoryRecord(
                     0, _now_iso(), "skipped", before_version, before_version, detail=message
                 )
@@ -148,6 +154,7 @@ class UpdateService:
                 bufsize=1,
                 # Windowsでは管理者権限のfreshclamに、利用者が変えられる環境変数を引き継がない
                 env=child_env(system=self._system),
+                **no_window_kwargs(self._system),
             )
         except OSError as exc:
             return self._fail(before_version, f"{_FRESHCLAM_NOT_FOUND_MESSAGE} ({exc})")
@@ -213,8 +220,14 @@ class UpdateService:
             # アプリは管理者権限で動くため、管理者だけが書き込める場所にあるfreshclamだけを実行する
             return [self._validate_exec(freshclam, ("freshclam",), self._system)], ""
         service_active = self._freshclam_service_active()
+        if not service_active:
+            self._skip_logged = False  # 見送りが終わった（OS のサービスがまた動いて見送るときは、また記録する）
+        if not interactive and service_active:
+            # 無人実行（自動・スケジュール）は、OS のサービスが更新しているなら行わない。root で動くサービスでも
+            # 同じ（行うと、OS のサービスと重ねて更新することになる。段階 12-3c）
+            return None, "service"
         if self._is_linux_user() and not interactive:
-            return None, "service" if service_active else "no_permission"
+            return None, "no_permission"
         # clamav-freshclamサービス（freshclam -d）がログファイルをロックしているため、
         # 同じログファイルでは「Failed to lock the log file」で失敗する（Arch Linux実機で発見）。
         # ログは別ファイルにする（出力はアプリのログ・画面に残る）

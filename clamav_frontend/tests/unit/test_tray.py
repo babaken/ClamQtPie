@@ -9,9 +9,11 @@ def test_menu_has_5_items(qtbot, tmp_path):
     qtbot.addWidget(tray.contextMenu())
 
     actions = tray.contextMenu().actions()
-    # セパレータを含め6項目（メイン画面/スキャン/更新/監視トグル/セパレータ/終了）
-    labels = [a.text() for a in actions if not a.isSeparator()]
+    # セパレータを含め6項目（メイン画面/スキャン/更新/監視トグル/セパレータ/終了）。
+    # 「未読の通知」はトレイGUI（tray_main.py）だけが表示する
+    labels = [a.text() for a in actions if not a.isSeparator() and a.isVisible()]
     assert labels == ["メイン画面を開く", "今すぐスキャン", "定義更新", "リアルタイム監視 ON/OFF", "終了"]
+    assert tray.notifications_action in actions and not tray.notifications_action.isVisible()
 
 
 def test_fallback_icon_is_not_null_when_assets_missing(qtbot, tmp_path):

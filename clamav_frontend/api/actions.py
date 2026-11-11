@@ -12,7 +12,10 @@ import os
 from dataclasses import fields
 
 from api.context import ApiContext
-from core.config_model import ConfigModel, validate_and_fix
+from core.config_model import GUI_SECTIONS, ConfigModel, validate_and_fix
+from core.config_model import WRITABLE_FIELDS as CONFIG_WRITABLE_FIELDS
+from core.config_model import quick_targets_problem
+from core.config_model import WRITABLE_RANGES
 from core import scan_targets
 from core.exceptions import (
     ApiConflictError,
@@ -39,6 +42,8 @@ CHANGED_CONFIG = "config"
 CHANGED_REALTIME = "realtime"
 CHANGED_LOGS = "logs"
 CHANGED_CLAMD = "clamd"
+#: OS の定義更新サービス（clamav-freshclam）の開始・停止
+CHANGED_FRESHCLAM = "freshclam"
 #: 画面以外（Web API）からスキャン・定義の更新を始めた（画面を「実行中」の表示にする）
 CHANGED_SCAN_STARTED = "scan_started"
 CHANGED_UPDATE_STARTED = "update_started"
@@ -59,6 +64,17 @@ def _state(enabled: bool) -> str:
 
 
 # -- 6.3 隔離 -------------------------------------------------------------------------
+def quarantine_file(ctx: ApiContext, path: str, virus_name: str) -> dict:
+    """スキャン画面の「隔離」（検知したファイルを手で隔離する。段階 12-4b）"""
+    if not os.path.isabs(path) or not os.path.isfile(path):
+        raise ValueError("隔離するファイルは、存在するファイルを絶対パスで指定してください")
+    audit(CATEGORY_QUARANTINE, f"ファイルの隔離を要求しました: {path}（{virus_name}）")
+    row = ctx.quarantine_service.quarantine(path, virus_name)
+    _notify(ctx, CHANGED_QUARANTINE)
+    return {"id": row.id, "original_path": row.original_path, "virus_name": row.virus_name,
+            "sha256": row.sha256, "size": row.size, "detected_at": row.detected_at, "status": "quarantined"}
+
+
 def restore_quarantine(ctx: ApiContext, quarantine_id: int, overwrite: bool) -> None:
     """元の場所にだけ復元する（12章 25。復元先を指定させない）"""
     row = ctx.quarantine_service.get(quarantine_id)
@@ -139,7 +155,8 @@ def set_realtime(ctx: ApiContext, enabled: bool) -> bool:
     if enabled:
         if not manager.is_running and not manager.start():
             if not ctx.watch_target_service.list_enabled_paths():
-                raise ValueError("有効な監視対象がありません")
+                # 新しく導入した直後はこの状態から始まるため、次に何をすればよいかを書く
+                raise ValueError("監視するフォルダがありません。先に監視するフォルダを追加してください")
             raise RealtimeError(detail="リアルタイム監視を開始できませんでした")
     elif manager.is_running:
         manager.stop()
@@ -154,14 +171,22 @@ def _find_target(ctx: ApiContext, target_id: int):
     return record
 
 
+def _same_folder_key(path: str) -> str:
+    """同じフォルダかを比べるための形（末尾の区切り・「.」などの書き方の違い、Windows は大文字と小文字の違いをそろえる）"""
+    return os.path.normcase(os.path.normpath(path))
+
+
 def add_watch_target(ctx: ApiContext, path: str):
     path = path.strip()
     if not os.path.isabs(path) or not os.path.isdir(path):
         raise ValueError("存在するフォルダを絶対パスで指定してください")
-    if any(r.path == path for r in ctx.watch_target_service.list_all()):
-        raise ValueError("同じ監視対象が既にあります")
+    # 書き方をそろえて保存する（すでにある書き方の違う行は消さず、比べるときにそろえる）
+    path = os.path.normpath(path)
+    key = _same_folder_key(path)
+    if any(_same_folder_key(r.path) == key for r in ctx.watch_target_service.list_all()):
+        raise ValueError("このフォルダは、すでに監視するフォルダにあります")
     record = ctx.watch_target_service.add(path)
-    audit(CATEGORY_REALTIME, f"監視対象を追加しました: {path}")
+    audit(CATEGORY_REALTIME, f"監視するフォルダを追加しました: {path}")
     if ctx.realtime_manager.is_running:
         ctx.realtime_manager.add_target(path)
     _notify(ctx, CHANGED_TARGETS)
@@ -171,7 +196,7 @@ def add_watch_target(ctx: ApiContext, path: str):
 def set_watch_target_enabled(ctx: ApiContext, target_id: int, enabled: bool) -> None:
     record = _find_target(ctx, target_id)
     ctx.watch_target_service.set_enabled(target_id, enabled)
-    audit(CATEGORY_REALTIME, f"監視対象を{_state(enabled)}にしました: {record.path}")
+    audit(CATEGORY_REALTIME, f"監視するフォルダを{_state(enabled)}にしました: {record.path}")
     # 監視中は差分だけ反映する（watchdog: そのパスだけ / clamonacc: 再起動）
     if ctx.realtime_manager.is_running and enabled != record.enabled:
         if enabled:
@@ -184,7 +209,7 @@ def set_watch_target_enabled(ctx: ApiContext, target_id: int, enabled: bool) -> 
 def remove_watch_target(ctx: ApiContext, target_id: int) -> None:
     record = _find_target(ctx, target_id)
     ctx.watch_target_service.remove(target_id)
-    audit(CATEGORY_REALTIME, f"監視対象を削除しました: {record.path}")
+    audit(CATEGORY_REALTIME, f"監視するフォルダから外しました: {record.path}")
     if ctx.realtime_manager.is_running:
         ctx.realtime_manager.remove_target(record.path)
     _notify(ctx, CHANGED_TARGETS)
@@ -202,19 +227,24 @@ def _check_schedule_target(scan_type: str, target: str) -> None:
         raise ValueError("スキャンの対象は絶対パスで指定してください")
 
 
-def add_schedule(ctx: ApiContext, name: str, scan_type: str, cron: str, target: str):
+def _wake_text(wake: bool) -> str:
+    return "、スリープから起こす" if wake else ""
+
+
+def add_schedule(ctx: ApiContext, name: str, scan_type: str, cron: str, target: str, wake: bool = False):
     _check_schedule_target(scan_type, target)
-    record = ctx.scheduler_service.add_job(name, scan_type, cron, target)  # 内容が正しくなければ E4001・E4002
-    audit(CATEGORY_SCAN, f"スケジュールを追加しました: id={record.id} {name}（{scan_type}、{cron}、{target}）")
+    record = ctx.scheduler_service.add_job(name, scan_type, cron, target, wake=wake)  # 内容が正しくなければ E4001・E4002
+    audit(CATEGORY_SCAN, f"スケジュールを追加しました: id={record.id} {name}（{scan_type}、{cron}、{target}{_wake_text(wake)}）")
     _notify(ctx, CHANGED_SCHEDULES)
     return record
 
 
-def update_schedule(ctx: ApiContext, job_id: int, name: str, scan_type: str, cron: str, target: str):
+def update_schedule(ctx: ApiContext, job_id: int, name: str, scan_type: str, cron: str, target: str,
+                    wake: bool = False):
     _ensure_schedule(ctx, job_id)
     _check_schedule_target(scan_type, target)
-    record = ctx.scheduler_service.update_job(job_id, name, scan_type, cron, target)
-    audit(CATEGORY_SCAN, f"スケジュールを変更しました: id={job_id} {name}（{scan_type}、{cron}、{target}）")
+    record = ctx.scheduler_service.update_job(job_id, name, scan_type, cron, target, wake=wake)
+    audit(CATEGORY_SCAN, f"スケジュールを変更しました: id={job_id} {name}（{scan_type}、{cron}、{target}{_wake_text(wake)}）")
     _notify(ctx, CHANGED_SCHEDULES)
     return record
 
@@ -242,39 +272,11 @@ def check_schedule_runnable(ctx: ApiContext, job_id: int) -> None:
 
 
 # -- 6.8 設定 -------------------------------------------------------------------------
-#: Web API で変えられる項目。設定画面で変えられるもの（と、定義の古さの日数）に限る。それ以外は読み取りだけ。
-#: 次のものは特に、Web API から変えられると権限を越えた操作に使えるため含めない（12章 25）:
-#: - 実行ファイル・設定ファイルの場所（update.freshclam_path、realtime.clamonacc_path・clamonacc_config_file）:
-#:   任意のプログラムを動かせる
-#: - clamd の接続先（clamd.connection_type・tcp_host・tcp_port・unix_socket_path）: 偽の clamd に検査するファイルの中身を
-#:   送らせ、常に「検知なし」と返させられる（ポートだけでも、このPC の一般の利用者が待ち受けたポートに向けられる）
-#: - clamd.service_name: 任意のサービスを起動・停止させられる
-#: - general（自動起動・最小化など）: 画面ごとの設定。段階 12-3 で利用者ごとの GUI の設定に移す
-#: 変えるときは設定ファイルを直接直す（段階 12-3 からは clamqtpie-ctl config set）
-WRITABLE_FIELDS = (
-    "clamd.auto_start",
-    "logging.level",
-    "logging.retention_days",
-    "notification.on_detect_desktop",
-    "notification.on_detect_mail",
-    "notification.on_job_fail",
-    "notification.on_update_fail",
-    "realtime.default_action",
-    "realtime.default_enabled",
-    "smtp.encryption",
-    "smtp.from_address",
-    "smtp.host",
-    "smtp.port",
-    "smtp.to_address",
-    "smtp.user",
-    "update.auto_update",
-    "update.interval_hours",
-    "update.stale_days",
-)
-#: 読み込み時の検証（validate_and_fix）に無い範囲（設定画面の入力欄と同じ）
-_RANGES = {"update.interval_hours": (1, 24)}
-#: GET /config に含めず、PUT /config でも受け付けない部分（API 自身の設定）
-HIDDEN_SECTIONS = ("api",)
+#: Web API で変えられる項目（core/config_model.py）。それ以外はすべて読み取りだけ
+WRITABLE_FIELDS = CONFIG_WRITABLE_FIELDS
+_RANGES = WRITABLE_RANGES
+#: GET /config に含めず、PUT /config でも受け付けない部分（API 自身の設定と、利用者ごとの GUI の設定）
+HIDDEN_SECTIONS = ("api", *GUI_SECTIONS)
 #: 変えたら保存している SMTP のパスワードを消す項目（送信先を差し替えてパスワードを送らせないため）
 SMTP_CREDENTIAL_FIELDS = ("smtp.host", "smtp.port", "smtp.user", "smtp.encryption")
 
@@ -317,6 +319,9 @@ def _checked_value(name: str, current, value):
     elif isinstance(current, float):
         ok = isinstance(value, (int, float)) and not isinstance(value, bool)
         value = float(value) if ok else value
+    elif isinstance(current, list):
+        ok = quick_targets_problem(value) is None  # 一覧の項目は scan.quick_targets だけ
+        value = list(value) if ok else value
     else:
         ok = isinstance(value, str)
     if not ok:
@@ -432,13 +437,19 @@ def clear_logs(ctx: ApiContext) -> int:
 SCAN_LABELS = {"quick": "クイックスキャン", "full": "フルスキャン", "custom": "カスタムスキャン"}
 
 
-def _scan_targets(scan_type: str, targets: list[str] | None) -> tuple[list[str], tuple[str, ...]]:
+def _scan_targets(ctx: ApiContext, scan_type: str,
+                  targets: list[str] | None) -> tuple[list[str], tuple[str, ...]]:
     if scan_type == "full":
         return scan_targets.full_scan_targets(), scan_targets.full_scan_skip_dirs()
     if scan_type == "quick" and not targets:
-        # 段階 12-2 まではアプリが利用者の権限で動くため、画面と同じ場所（ダウンロード等）を使う。
-        # サービス化（12-3）の後は、利用者が設定で指定した場所（scan.quick_targets）だけにする
-        return scan_targets.quick_scan_targets(), ()
+        if not ctx.service_mode:
+            # 従来のアプリは利用者の権限で動くため、画面と同じ場所（ダウンロード等）を使う
+            return scan_targets.quick_scan_targets(), ()
+        # サービス（SYSTEM・root）は利用者のフォルダが分からないため、利用者が設定で指定した場所だけを使う（6.2節）
+        quick = [t for t in ctx.config_service.current.scan.quick_targets if os.path.exists(t)]
+        if not quick:
+            raise ValueError("クイックスキャンの対象が設定されていません（設定の scan.quick_targets）")
+        return quick, ()
     if not targets:
         raise ValueError("スキャンの対象を指定してください")
     missing = [t for t in targets if not os.path.isabs(t) or not os.path.exists(t)]
@@ -448,19 +459,19 @@ def _scan_targets(scan_type: str, targets: list[str] | None) -> tuple[list[str],
 
 
 def start_scan(ctx: ApiContext, scan_type: str, targets: list[str] | None, include_subfolders: bool,
-               apply_exclude: bool) -> dict:
+               apply_exclude: bool, source: str = "api") -> dict:
     if scan_type not in SCAN_LABELS:
         raise ValueError("スキャンの種類が正しくありません")
     if ctx.scan_dispatcher.is_running:
         raise ApiConflictError(detail="スキャンを実行中です")
-    paths, skip_dirs = _scan_targets(scan_type, targets)
+    paths, skip_dirs = _scan_targets(ctx, scan_type, targets)
     if not paths:
         raise ValueError("スキャンの対象がありません")
     label = SCAN_LABELS[scan_type]
     audit(CATEGORY_SCAN, f"{label}を開始しました: {', '.join(paths)}")
-    ctx.jobs.expect_source("scan", "api")
+    ctx.jobs.expect_source("scan", source)
     ctx.scan_dispatcher.start(paths, include_subfolders=include_subfolders, apply_exclude=apply_exclude,
-                              label=label, skip_dirs=skip_dirs, source="api", scan_type=scan_type)
+                              label=label, skip_dirs=skip_dirs, source=source, scan_type=scan_type)
     _notify(ctx, CHANGED_SCAN_STARTED)
     return ctx.jobs.current("scan")
 

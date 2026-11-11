@@ -1,77 +1,12 @@
 """
 製品名の変更（ClamAVフロントエンド → ClamQtPie）で、旧名の登録を引き継ぐ処理（core/legacy_migration.py）のテスト
 
-実レジストリ・実キーリングには触れない（winreg・keyringはモックに差し替える）。
+実レジストリには触れない（winregはモックに差し替える）。
 """
 from unittest.mock import MagicMock, patch
 
 from core.autostart_service import AutostartService
-from core.config_service import ConfigService
-from core.legacy_migration import migrate_legacy_names, remove_legacy_protocol, remove_legacy_state_dir
-
-
-class _FakeKeyring:
-    def __init__(self, store=None):
-        self.store = dict(store or {})
-
-    def get_password(self, service, account):
-        return self.store.get((service, account))
-
-    def set_password(self, service, account, password):
-        self.store[(service, account)] = password
-
-    def delete_password(self, service, account):
-        self.store.pop((service, account))
-
-
-def _config_service(tmp_path) -> ConfigService:
-    service = ConfigService(tmp_path / "config.json")
-    service.load()
-    return service
-
-
-# -- SMTPパスワード（キーリング） --------------------------------------------
-def test_smtp_password_moves_to_new_service_name(tmp_path):
-    config_service = _config_service(tmp_path)
-    account = config_service.current.smtp.keyring_account
-    keyring = _FakeKeyring({("ClamAVFrontend", account): "secret"})
-
-    with patch.dict("sys.modules", {"keyring": keyring}):
-        assert config_service.migrate_legacy_smtp_password() is True
-        assert config_service.get_smtp_password() == "secret"
-
-    assert ("ClamAVFrontend", account) not in keyring.store
-    assert keyring.store[("ClamQtPie", account)] == "secret"
-
-
-def test_smtp_password_does_not_overwrite_new_one(tmp_path):
-    config_service = _config_service(tmp_path)
-    account = config_service.current.smtp.keyring_account
-    keyring = _FakeKeyring({("ClamAVFrontend", account): "old", ("ClamQtPie", account): "new"})
-
-    with patch.dict("sys.modules", {"keyring": keyring}):
-        assert config_service.migrate_legacy_smtp_password() is True
-
-    assert keyring.store == {("ClamQtPie", account): "new"}
-
-
-def test_smtp_password_without_legacy_does_nothing(tmp_path):
-    config_service = _config_service(tmp_path)
-    keyring = _FakeKeyring()
-
-    with patch.dict("sys.modules", {"keyring": keyring}):
-        assert config_service.migrate_legacy_smtp_password() is False
-
-    assert keyring.store == {}
-
-
-def test_smtp_password_keyring_error_does_not_raise(tmp_path):
-    config_service = _config_service(tmp_path)
-    keyring = MagicMock()
-    keyring.get_password.side_effect = RuntimeError("no backend")
-
-    with patch.dict("sys.modules", {"keyring": keyring}):
-        assert config_service.migrate_legacy_smtp_password() is False
+from core.legacy_migration import remove_legacy_protocol, remove_legacy_state_dir
 
 
 # -- 自動起動 ------------------------------------------------------------------
@@ -199,29 +134,3 @@ def test_legacy_state_dir_with_other_files_is_kept(tmp_path):
 
     assert remove_legacy_state_dir(legacy) is False
     assert (legacy / "user-file.txt").exists()
-
-
-# -- まとめて（app.pyと同じ呼び方） ---------------------------------------------
-def test_migrate_legacy_names_as_app_calls_it(tmp_path, monkeypatch):
-    # app.pyのmain()と同じく、ConfigServiceとAutostartServiceを渡して呼ぶ
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "local"))
-    config_service = _config_service(tmp_path)
-    account = config_service.current.smtp.keyring_account
-    keyring = _FakeKeyring({("ClamAVFrontend", account): "secret"})
-    autostart = _linux_autostart(tmp_path, monkeypatch)
-    (tmp_path / "local" / "clamav-frontend").mkdir(parents=True)
-
-    with patch.dict("sys.modules", {"keyring": keyring}), patch(
-        "core.legacy_migration.remove_legacy_protocol", return_value=False
-    ):
-        migrated = migrate_legacy_names(config_service, autostart)
-
-    assert "SMTPパスワード" in migrated
-    assert any("clamav-frontend" in m for m in migrated)
-    assert not (tmp_path / "local" / "clamav-frontend").exists()
-    # 何も無い2回目は何もしない
-    with patch.dict("sys.modules", {"keyring": keyring}), patch(
-        "core.legacy_migration.remove_legacy_protocol", return_value=False
-    ):
-        assert migrate_legacy_names(config_service, autostart) == []

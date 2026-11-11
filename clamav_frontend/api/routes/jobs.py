@@ -12,13 +12,15 @@ import asyncio
 import json
 
 from fastapi import APIRouter, Depends, Header, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from api import actions
-from api.auth import require_user
+from api.auth import ROLE_ADMIN, is_web_request, require_admin, require_user
 from api.bridge import END
-from core.exceptions import ApiConflictError
+from core.exceptions import ApiConflictError, ApiForbiddenError
+from core.peer_identity import is_inside
 
 router = APIRouter(dependencies=[Depends(require_user)])
 
@@ -31,6 +33,13 @@ KEEPALIVE_SEC = 15.0
 MAX_SUBSCRIBERS = 16
 
 
+class QuarantineBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    path: str = Field(min_length=1, max_length=_MAX_PATH)
+    virus_name: str = Field(min_length=1, max_length=200)
+
+
 class ScanBody(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -38,6 +47,8 @@ class ScanBody(BaseModel):
     targets: list[str] | None = Field(None, max_length=_MAX_TARGETS)
     include_subfolders: bool = True
     apply_exclude: bool = True
+    #: スキャン履歴の実行元。トレイGUI の画面から頼んだものは gui（段階 12-4b。表示の区別だけに使う）
+    source: str = Field("api", pattern="^(api|gui)$")
 
 
 def _ctx(request: Request):
@@ -50,12 +61,52 @@ async def _on_main(request: Request, fn, *args):
 
 
 # -- 6.2 スキャン -----------------------------------------------------------------------
+def check_user_scan(request: Request, body: ScanBody) -> None:
+    """サービスで、user のトークンのスキャンを、頼んだ利用者のプロファイル・ホームの中に限る（12章 R-9）。
+    サービスは全員のファイルを読めるため、ほかの利用者のフォルダのファイル名・検知の有無を知られないように。
+    設定 scan.quick_targets（管理者が決めた場所）のクイックスキャンはそのまま。フルスキャン・ほかの場所は admin"""
+    if body.type == "full":
+        raise ApiForbiddenError(detail="フルスキャンには管理者の権限が要ります")
+    if not body.targets:
+        return  # 管理者が決めた場所（scan.quick_targets）か、対象が無い（400）
+    _check_inside_requester(request, body.targets, "利用者のフォルダの外をスキャンするには管理者の権限が要ります")
+
+
+@router.post("/quarantine", status_code=201)
+async def quarantine_file(request: Request, body: QuarantineBody, role: str = Depends(require_user)) -> dict:
+    """検知したファイルを手で隔離する（スキャン画面の「隔離」）。サービスで user のトークンなら、
+    頼んだ利用者のフォルダの中のファイルだけ（12章 R-9 と同じ判断。ほかの利用者のファイルを動かさせない）。
+    WebUI のセッションは admin として扱い、どこのファイルでも動かせるため、隔離ファイルの削除・復元と同じく
+    再確認から 5 分以内に限る（段階 12-5b）"""
+    ctx = _ctx(request)
+    if is_web_request(request):
+        require_admin(request)
+    elif ctx.service_mode and role != ROLE_ADMIN:
+        await run_in_threadpool(_check_inside_requester, request, [body.path],
+                                "利用者のフォルダの外のファイルを隔離するには管理者の権限が要ります")
+    return await _on_main(request, actions.quarantine_file, body.path, body.virus_name)
+
+
+def _check_inside_requester(request: Request, paths: list[str], message: str) -> None:
+    ctx = _ctx(request)
+    client, server = request.client, request.scope.get("server")
+    home = None
+    if ctx.requester_home is not None and client is not None and server:
+        home = ctx.requester_home((client.host, client.port), (server[0], server[1]))
+    if not home:
+        raise ApiForbiddenError(detail="頼んだ利用者を確かめられないため、管理者の権限が要ります")
+    if any(not is_inside(p, home) for p in paths):
+        raise ApiForbiddenError(detail=message)
+
+
 @router.post("/scans", status_code=202)
-async def start_scan(request: Request, body: ScanBody) -> dict:
+async def start_scan(request: Request, body: ScanBody, role: str = Depends(require_user)) -> dict:
     if body.targets is not None and any(len(t) > _MAX_PATH for t in body.targets):
         raise ValueError("パスが長すぎます")
+    if _ctx(request).service_mode and role != ROLE_ADMIN:
+        await run_in_threadpool(check_user_scan, request, body)
     job = await _on_main(request, actions.start_scan, body.type, body.targets, body.include_subfolders,
-                         body.apply_exclude)
+                         body.apply_exclude, body.source)
     return {"job": job}
 
 
@@ -103,7 +154,7 @@ async def events(request: Request, last_event_id: str | None = Header(None, max_
     if hub.subscriber_count >= MAX_SUBSCRIBERS:
         raise ApiConflictError("イベントの購読の数が上限に達しています")
     # 先に購読してから再送分を読む（その間に出たイベントを取りこぼさないように。重なった分は id で除く）
-    subscription = hub.subscribe()
+    subscription = hub.subscribe(getattr(request.app.state, "listener", "internal"))
     last_id = _parse_last_id(last_event_id)
     backlog = hub.events_since(last_id) if last_id is not None else []
 

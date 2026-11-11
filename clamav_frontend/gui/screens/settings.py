@@ -6,11 +6,19 @@ Phase7: SMTPテスト送信ボタンをNotificationServiceと結線、
         保存/読込をConfigServiceと結線
 コードレビュー後: 「ClamAV エンジン」タブ（8-7。clamdの接続・サービス、clamonaccの場所）を追加。
         接続の設定はアプリの再起動後に反映し、「接続テスト」で保存前の入力値を試せる
+段階 12-4c（トレイGUI）:
+        保護された項目（Web API で変えられない項目。GET /config の protected）は読み取り専用にし、
+        clamqtpie-ctl config set を案内する。「スキャン」タブにクイックスキャンの対象（scan.quick_targets）。
+        サービスの設定と SMTP のパスワードは 1 回の昇格で保存し、保存できなければ画面の値を元に戻す。
+        保存の結果を表示する。定義が古いとみなす日数（update.stale_days）を加えた
+段階 12-4e: 従来のアプリ（ConfigService を直接使う）の経路を除いた
 """
 from __future__ import annotations
 
+import copy
 import dataclasses
 import sys
+from datetime import datetime
 
 from PySide6.QtCore import QDir
 from PySide6.QtWidgets import (
@@ -21,6 +29,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -30,7 +39,7 @@ from PySide6.QtWidgets import (
 
 from core.background_task import BackgroundTask
 from core.config_model import ClamdConfig, RealtimeConfig
-from core.exceptions import AppError
+from core.exceptions import AppError, ElevationCancelledError
 from gui.error_dialog import show_error_dialog
 from gui.screens.base import BaseScreen, wrap_layout
 from gui.theme import COLOR_NG, COLOR_OK, set_variant
@@ -40,6 +49,16 @@ _IS_WINDOWS = sys.platform == "win32"
 #: 空欄で保存したときに戻す既定値
 _DEFAULT_CLAMD = ClamdConfig()
 _DEFAULT_CLAMONACC_PATH = RealtimeConfig().clamonacc_path
+#: 保護された項目（サービスの設定のうち Web API で変えられない項目）と、その入力欄（属性名）
+_PROTECTED_WIDGETS = {
+    "clamd.connection_type": ("connection_type_combo",),
+    "clamd.tcp_host": ("tcp_host_edit",),
+    "clamd.tcp_port": ("tcp_port_spin",),
+    "clamd.unix_socket_path": ("unix_socket_edit",),
+    "clamd.service_name": ("service_name_edit",),
+    "realtime.clamonacc_path": ("clamonacc_path_edit",),
+    "update.freshclam_path": ("freshclam_path_edit", "freshclam_browse_button"),
+}
 
 
 class SettingsScreen(BaseScreen):
@@ -55,14 +74,17 @@ class SettingsScreen(BaseScreen):
         self.tabs.addTab(self._build_realtime_tab(), "リアルタイム監視")
         self.tabs.addTab(self._build_update_tab(), "定義更新")
         self.tabs.addTab(self._build_logging_tab(), "ログ")
+        self._scan_tab = self._build_scan_tab()
         self.add_layout_widget(self.tabs)
 
         save_layout = QHBoxLayout()
+        self.save_status_label = plain(QLabel(""))
+        self.save_status_label.setWordWrap(True)
+        save_layout.addWidget(self.save_status_label, 1)
         self.save_button = set_variant(QPushButton("保存"), "primary")
         self.cancel_button = QPushButton("キャンセル")
         self.save_button.clicked.connect(self._on_save_clicked)
         self.cancel_button.clicked.connect(self._on_cancel_clicked)
-        save_layout.addStretch(1)
         save_layout.addWidget(self.cancel_button)
         save_layout.addWidget(self.save_button)
         from PySide6.QtWidgets import QFrame
@@ -89,10 +111,13 @@ class SettingsScreen(BaseScreen):
         on_saved=None,
         connection_tester=None,
     ) -> None:
-        """on_saved(config): 保存直後に呼ばれる。ログ設定・自動更新ジョブ等の即時反映をapp.py側で行う
-        （画面設計書8章「即時反映が必要な項目は保存直後に該当サービスへ再読込を通知する」）
+        """config_service: サービスの設定を API で読み書きする（api_client の ConfigProxy。保護された項目は
+            読み取り専用）
+        on_saved(config): 保存直後に呼ばれる。ほかの画面の表示を合わせる（トレイGUI）
         connection_tester(ClamdConfig) -> str: 「接続テスト」の実処理（core.clamd_client.check_connection）。
             成功時は表示する文字列を返し、失敗時は例外を送出する。バックグラウンドで呼ぶ"""
+        if self.tabs.indexOf(self._scan_tab) < 0:
+            self.tabs.insertTab(1, self._scan_tab, "スキャン")
         self._config_service = config_service
         self._notification_service = notification_service
         self._autostart_service = autostart_service
@@ -142,13 +167,35 @@ class SettingsScreen(BaseScreen):
         self.update_interval_spin.setValue(config.update.interval_hours)
         self.freshclam_path_edit.setText(config.update.freshclam_path)
 
+        self.stale_days_spin.setValue(config.update.stale_days)
+
         self.retention_days_combo.setCurrentText(str(config.logging.retention_days))
         self.log_level_combo.setCurrentText(config.logging.level)
+
+        self.quick_targets_list.clear()
+        self.quick_targets_list.addItems(list(config.scan.quick_targets))
+        self._apply_protected(getattr(self._config_service, "protected", []))
+
+    def _apply_protected(self, protected: list[str]) -> None:
+        """保護された項目の入力欄を読み取り専用にし、変え方を案内する"""
+        self._update_engine_fields()  # ホスト・ポート・UNIX ソケットは、接続方式で使う欄だけを有効にする
+        for key, names in _PROTECTED_WIDGETS.items():
+            for name in names:
+                widget = getattr(self, name)
+                if key in protected:
+                    widget.setEnabled(False)
+                    widget.setToolTip("保護された項目です。変えるには、管理者が次のコマンドを実行します:\n"
+                                      f"clamqtpie-ctl config set {key} <値>")
+                elif name not in ("tcp_host_edit", "tcp_port_spin", "unix_socket_edit"):
+                    widget.setEnabled(True)
+        self.protected_note.setVisible(bool(protected))
+        self.connection_test_button.setEnabled(not protected)
 
     def _on_save_clicked(self) -> None:
         if self._config_service is None:
             return
-        config = self._config_service.current
+        # 保存できなかったときに元の値に戻せるよう、写しを変える
+        config = copy.deepcopy(self._config_service.current)
 
         previous_autostart = config.general.autostart
         config.general.autostart = self.autostart_check.isChecked()
@@ -156,8 +203,8 @@ class SettingsScreen(BaseScreen):
         # （チェックONで「未表示」に戻し、次回の×ボタン時に再び案内する）
         config.general.show_tray_hint_shown = not self.tray_hint_check.isChecked()
 
-        # ClamAV エンジン: 接続の設定はアプリの再起動後に反映（app.pyのClamAVServiceは起動時の値の写しを使う）。
-        # サービス名・自動起動は保存直後から使う。空欄は既定値に戻す
+        # ClamAV エンジン: 接続の設定はサービスの再起動後に反映（サービスの ClamAVService は起動時の値の写しを使う）。
+        # 空欄は既定値に戻す
         entered = self._entered_clamd_config(config.clamd)
         config.clamd.connection_type = entered.connection_type
         config.clamd.tcp_host = entered.tcp_host
@@ -192,18 +239,27 @@ class SettingsScreen(BaseScreen):
         config.update.freshclam_path = self.freshclam_path_edit.text().strip() or "freshclam"
         self.freshclam_path_edit.setText(config.update.freshclam_path)
 
+        config.update.stale_days = self.stale_days_spin.value()
+
         config.logging.retention_days = int(self.retention_days_combo.currentText())
         config.logging.level = self.log_level_combo.currentText()
+        config.scan.quick_targets = [self.quick_targets_list.item(i).text()
+                                     for i in range(self.quick_targets_list.count())]
 
         try:
-            self._config_service.save(config)
-            password = self.smtp_password_edit.text()
-            if password:
-                self._config_service.set_smtp_password(password)
-                self.smtp_password_edit.clear()
+            # サービスの設定と SMTP のパスワードを、1 回の昇格で保存する
+            self._config_service.save(config, smtp_password=self.smtp_password_edit.text() or None)
+            self.smtp_password_edit.clear()
         except AppError as exc:
+            if isinstance(exc, ElevationCancelledError):
+                self._show_save_status("保存を取り消しました（入力した値はそのままです）。", ok=False)
+                return
+            self._config_service.invalidate()
+            self.reload_from_config()  # サービスの今の設定に戻す（保存できなかった値を残さない）
+            self._show_save_status("保存できませんでした。画面の値をサービスの今の設定に戻しました。", ok=False)
             show_error_dialog(self, exc)
             return
+        self._show_save_status(f"保存しました（{datetime.now():%H:%M:%S}）。", ok=True)
 
         try:
             self._apply_autostart(config.general.autostart)
@@ -235,6 +291,11 @@ class SettingsScreen(BaseScreen):
 
     def _on_cancel_clicked(self) -> None:
         self.reload_from_config()
+        self._show_save_status("", ok=True)
+
+    def _show_save_status(self, text: str, ok: bool) -> None:
+        self.save_status_label.setText(text)
+        self.save_status_label.setStyleSheet(f"color: {COLOR_OK if ok else COLOR_NG};" if text else "")
 
     def _on_test_send_clicked(self) -> None:
         if self._notification_service is None:
@@ -307,6 +368,12 @@ class SettingsScreen(BaseScreen):
         layout.addRow("停止を検知したら自動で起動", self.clamd_auto_start_check)
         layout.addRow("clamonacc の場所", self.clamonacc_path_edit)
         layout.addRow("", clamonacc_note)
+        self.protected_note = plain(QLabel(
+            "接続の設定・サービス名・clamonacc と freshclam の場所は、サービスの安全のため画面からは変えられません。"
+            "変えるには、管理者が clamqtpie-ctl config set を実行します（入力欄にマウスを置くとコマンドを表示します）。"))
+        self.protected_note.setWordWrap(True)
+        self.protected_note.setVisible(False)
+        layout.addRow("", self.protected_note)
         if _IS_WINDOWS:  # UNIXソケット・clamonaccはLinux専用
             for widget in (self.unix_socket_edit, self.clamonacc_path_edit, clamonacc_note):
                 layout.setRowVisible(widget, False)
@@ -434,7 +501,43 @@ class SettingsScreen(BaseScreen):
         path_layout.addWidget(self.freshclam_path_edit, 1)
         path_layout.addWidget(self.freshclam_browse_button)
         layout.addRow("freshclam の場所", wrap_layout(path_layout))
+        self.stale_days_spin = QSpinBox()
+        self.stale_days_spin.setRange(1, 365)
+        self.stale_days_spin.setValue(3)
+        self.stale_days_spin.setToolTip("定義がこの日数より古くなったら、ホーム画面とトレイで知らせます")
+        layout.addRow("定義が古いとみなす日数", self.stale_days_spin)
         return tab
+
+    def _build_scan_tab(self) -> QWidget:
+        """スキャン（トレイGUI だけ）。クイックスキャンの対象（scan.quick_targets）"""
+        tab = QWidget()
+        layout = QFormLayout(tab)
+        self.quick_targets_list = QListWidget()
+        buttons = QHBoxLayout()
+        self.quick_target_add_button = QPushButton("フォルダ追加")
+        self.quick_target_remove_button = QPushButton("削除")
+        self.quick_target_add_button.clicked.connect(self._on_add_quick_target)
+        self.quick_target_remove_button.clicked.connect(
+            lambda: [self.quick_targets_list.takeItem(self.quick_targets_list.row(item))
+                     for item in self.quick_targets_list.selectedItems()])
+        buttons.addWidget(self.quick_target_add_button)
+        buttons.addWidget(self.quick_target_remove_button)
+        buttons.addStretch(1)
+        note = QLabel(
+            "Web API・WebUI・clamqtpie-ctl から、対象を指定せずにクイックスキャンを頼んだときにスキャンする場所です"
+            "（サービスは利用者のフォルダが分からないため）。トレイGUI のクイックスキャンは、使っている利用者の"
+            "デスクトップ・ダウンロード等をスキャンします。")
+        note.setWordWrap(True)
+        layout.addRow("クイックスキャンの対象", self.quick_targets_list)
+        layout.addRow("", wrap_layout(buttons))
+        layout.addRow("", note)
+        return tab
+
+    def _on_add_quick_target(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "クイックスキャンの対象を選択")
+        existing = {self.quick_targets_list.item(i).text() for i in range(self.quick_targets_list.count())}
+        if path and QDir.toNativeSeparators(path) not in existing:
+            self.quick_targets_list.addItem(QDir.toNativeSeparators(path))
 
     def _on_browse_freshclam(self) -> None:
         name_filter = "実行ファイル (*.exe)" if sys.platform == "win32" else ""

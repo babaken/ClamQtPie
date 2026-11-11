@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ClamQtPie
+Comment=ClamAV を使ったウイルス対策（トレイGUI）
+Exec=/opt/clamqtpie/clamqtpie
+Icon=/opt/clamqtpie/_internal/icons/app.png
+Terminal=false
+Categories=Utility;Security;

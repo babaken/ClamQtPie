@@ -747,7 +747,7 @@ FILDES対応後（同上）: 324 passed, 6 skipped（実clamdの結合テスト`
 - 抑止は停止を要求した時点で始める（`EngineScreen.bind_services`の`on_stop_requested`、app.pyの`_on_clamd_stop_requested`）。停止に失敗した場合（または別の操作の実行中で停止を始められなかった場合）は`on_stop_failed`で要求前の状態に戻す。当初は停止の成功後に抑止していたため、停止処理中（Linuxの`systemctl stop`がclamdの終了を待つ間、Windowsの`STOP_PENDING`中）に60秒ごとの定期確認のPINGが失敗すると自動起動が走り、pkexecの認証画面が再表示されるか停止直後にclamdが起動し直していた（コードレビューで指摘）
 - Debian/Ubuntuで`clamav-daemon.socket`が有効だと、停止後もソケットへの接続でsystemdがclamdを起動し直すことがある（OS側の設定のためアプリでは制御しない）
 - `sc stop`の1062（ERROR_SERVICE_NOT_ACTIVE）は成功扱い。起動の1056判定はWindowsのときだけに限定した
-- 数値・日付の入力欄（QSpinBox / QDoubleSpinBox / QDateEdit / QTimeEdit）の上下ボタンが暗い背景に埋もれて見えにくかった（利用者の確認で指摘）。入力欄の背景・枠線をスタイルシートで指定したため、上下ボタンが小さな暗い四角になり、矢印も描かれていなかった。上下ボタンの背景・区切り線・ホバー/押下の色を指定し、矢印はQPainterで描いた三角形の画像（`gui/theme.py`の`_spin_arrow_rules()`）を`image: url(...)`で指定する。上下ボタンをスタイルシートで指定するとQtは矢印を描かず、枠線で三角形を作る指定も四角形になるため画像にした。画像はアイコンと同じく同梱せず、起動時に一時フォルダ（QTemporaryDir。終了時に削除）へ書く。無効時は灰色の矢印。プルダウン（QComboBox）の矢印は見えているため変えていない
+- 数値・日付の入力欄（QSpinBox / QDoubleSpinBox / QDateEdit / QTimeEdit）の上下ボタンが暗い背景に埋もれて見えにくかった（利用者の確認で指摘）。入力欄の背景・枠線をスタイルシートで指定したため、上下ボタンが小さな暗い四角になり、矢印も描かれていなかった。上下ボタンの背景・区切り線・ホバー/押下の色を指定し、矢印はQPainterで描いた三角形の画像（`gui/theme.py`の`_spin_arrow_rules()`）を`image: url(...)`で指定する。上下ボタンをスタイルシートで指定するとQtは矢印を描かず、枠線で三角形を作る指定も四角形になるため画像にした。画像はアイコンと同じく同梱せず、起動時にユーザー単位のキャッシュのフォルダ（`gui/theme.py`の`arrow_image_dir()`）へ上書きで書く（一時フォルダに書いていたときは消えずに溜まった。§88）。無効時は灰色の矢印。プルダウン（QComboBox）の矢印は見えているため変えていない
 
 未対応（要判断）:
 - メールの件名・本文（`core/notification_service.py`）、exeのバージョン情報（`version_info.txt`）、Linuxの自動起動`.desktop`の名前、配布物名`ClamAVFrontend_v*.zip`は「ClamAVフロントエンド / ClamAV Frontend」のまま
@@ -1143,3 +1143,575 @@ v0.9.2 の後の修正（§49〜§53 のうち、Web API に関わらないも�
 
 隔離の形式（§53）を変えたため、v0.9.3 で隔離したファイルは v0.9.2 以前では復元できない（以前の版で隔離したファイルは v0.9.3 でそのまま復元できる）。DB は起動時に 0005 まで上がる。
 
+## 55. 段階 12-3a: サービスの本体
+
+サービス化・Web API設計書 9章。画面を持たず、監視・スキャン・スケジュール・定義の更新・隔離と内部 API を動かすサービスを作った。12-3 は 4 つに分ける（12-3a: サービスの本体、12-3b: 管理用コマンドと設定、12-3c: スケジュールと通知、12-3d: 接続先の確認と残り）。
+
+構成:
+- `service_main.py`: `--console [--data-dir DIR]`（前面で動かす。開発中の確認用で登録は要らない）、`--systemd`（Linux。unit は `Type=notify`）、`install`・`remove`・`start`・`stop`（Windows サービスの登録・操作。pywin32 の `HandleCommandLine`）。配布版が SCM から起動されたときは `StartServiceCtrlDispatcher`
+- `core/runtime.py`: 画面に関わらないサービス一式を組み立てる（従来の `app.py` の起動の順番から画面に関わるものを除いたもの）。従来の `app.py` は、画面がサービスのクライアントになる 12-4 まで自分で組み立てる
+- `api/service_api.py`: サービスの内部 API。`config.api.enabled` に関係なく待ち受け、待ち受けられなければ起動を失敗にする（終了コード 3）。稼働状態のイベント（status）は 2 秒ごと、clamd への問い合わせは別のスレッドで 60 秒ごと
+- `core/service_paths.py`: データの置き場所（Windows `%ProgramData%\ClamQtPie\`、Linux 設定 `/etc/clamqtpie/`・データ `/var/lib/clamqtpie/`・ログ `/var/log/clamqtpie/`）。無ければ本人・SYSTEM・Administrators／root だけが使える権限で作る。サービスとして動くときは起動のたびに所有者と権限を確かめ、一般の利用者が書き込めるフォルダ・リンクがあれば起動しない（終了コード 2。`C:\ProgramData` の直下を先に作られた場合も含む）。`--console` では警告だけ
+- `core/systemd_notify.py`: 内部 API が待ち受けを始めてから `READY=1`、止めるときに `STOPPING=1`（libsystemd を使わず `NOTIFY_SOCKET` に送る）。Windows は待ち受けの後に `SERVICE_RUNNING` を報告する
+- SIGTERM・SIGINT で終了の処理を通って止まる（トークンファイルも消える）。`--console` はデータの置き場所のロック（`service.lock`）で二重起動を防ぐ（終了コード 4）。サービスとしての二重起動の防止は SCM・systemd に任せる
+- 起動の行に版を出す（`サービスの起動シーケンス開始（ClamQtPie 0.9.3）`）
+- `core/service_status.py`・`app.py`: 従来のアプリは、サービスが動いていれば警告を出して起動しない（監視・スケジュールが二重に動かないように。12-4 までの扱い）
+- `scripts/install_service.sh`・`uninstall_service.sh`（`sudo` で systemd に登録・削除。`--purge` で設定・データ・ログも消す）、`scripts/install_service.bat`・`uninstall_service.bat`（UAC で昇格して Windows サービスに登録・削除）。開発中の確認用で、配布物には入れない。サービスは SYSTEM・root で、開発中のソースのフォルダのコードを実行するため、確認が終わったら必ず削除する
+
+設計書と異なる点・決めた点:
+- トークンファイルは置き場所の `api/` に、SYSTEM・Administrators／root だけが読める権限で置く。`user.token` を `ClamQtPie Users` グループに読ませるのは、グループを作るインストーラ（12-4）とあわせて行う
+- サービスはデスクトップに通知を出せない（Windows はセッション 0）。メールの通知は従来どおり送る。画面に知らせる仕組み（通知の保存）は 12-3c
+- `status` イベントの定義の古さは、サービスでは 12-3d で出す（今は `null`）
+
+確認: 全テスト（Windows・WSL）成功。Windows・WSL で `--console` で動かし、API に応答すること、二重起動を防ぐこと、WSL で SIGTERM で止まりトークンファイルが消えることを確認した。Windows サービス・systemd としての登録は、管理者・root の権限が要るため、利用者に scripts のスクリプトで確かめてもらう。
+
+## 56. 段階 12-3b（前半）: 管理用コマンドと秘密の保存先
+
+サービス化・Web API設計書 3.4節・6.8節。12-3b は「コマンドと設定」（この節）と「移行」（`migrate`、設定の分割）に分ける。
+
+- `clamqtpie_ctl.py`（`clamqtpie-ctl`。root・管理者で実行）:
+  - `status`: サービス・内部 API・clamd の状態、置き場所
+  - `config show`、`config set KEY VALUE [--yes] [--restart]`: Web API からは変えられない項目（実行ファイルの場所、clamd の接続先、`api.port` など）を含めて変える。変更の前後の値を表示して確認を求める。値は今の値の型で読み、範囲外は受け付けない。実行ファイル・設定ファイルの場所は、設定するときにも確かめる（絶対パス、管理者・root だけが書き込める場所、想定どおりの名前）。サービスが動いている間は変えない（サービスが設定を保存するときに上書きされるため）。`--restart` でサービスを止めて変え、また開始する。変えた内容はサービスのログに残す
+  - `quarantine restore ID --to PATH [--overwrite]`: 元の場所以外へ復元する（Web API では元の場所にだけ復元できる、6.3節）
+  - `--data-dir DIR`: 開発中の確認用（サービスの `--console --data-dir` と同じ置き場所。root でなくてよい）
+- `core/secret_store.py`（`FileSecretStore`）: サービスの SMTP パスワードの保存先。SYSTEM・root では keyring を使えないため、置き場所の `secrets/` にファイルで保存する（Windows は DPAPI の PC 単位の鍵で暗号化、Linux は 0600）。従来のアプリは keyring のまま（`ConfigService(secret_store=None)`）
+- `core/private_files.py`: 本人・SYSTEM・Administrators／root だけが使えるフォルダ・ファイルの作成（API のトークン・サービスの置き場所・秘密の保存先で共有。`api/auth.py` から移した）
+- `scripts/install_service.sh` の unit に `RestartPreventExitStatus=2 3`（置き場所の権限・API のポートの失敗は、起動し直しても直らないため。PR #23 の確認で指摘）
+
+PR #24 の Linux 実機の確認で直したもの:
+- `--restart` を続けて使うと、3 回目の開始が systemd の起動の回数の上限（`StartLimitBurst=3`、1 日。設計書 9.4 の回復動作）に掛かり、変更は保存されたのにサービスが止まったままになった。ctl は開始する前に `systemctl reset-failed` で数え直す。開始に失敗したときは、変更は保存済みでサービスが止まっていることと、原因を確かめる場所を表示する
+- 実行ファイルの場所（`update.freshclam_path`・`realtime.clamonacc_path`）を、空または既定の名前で「PATH から探す」既定に戻せなかった（空の `clamonacc_path` はそのまま保存されていた）。空なら既定の名前を保存し、既定の名前は設定するときの確認を省く（実行の直前に PATH から探して確かめる）
+- 確認の問いで標準入力が閉じていると例外の表示になった。「いいえ」として扱う
+- サービスのログに残す行が端末にも表示されていた（`setup_logger(console=False)`）。「開始しられませんでした」の誤字
+
+後の段階に回すもの: `web ...`（WebUI の設定）は 12-5、`users add|remove`（トレイGUI を使える利用者のグループ）はグループを作るインストーラとあわせて 12-4、`migrate` と設定の分割（`gui.json`・`schema_version` 2）は 12-3b の後半。
+
+確認: 全テスト（Windows・WSL）成功。
+
+## 57. 段階 12-3b（後半）: 旧版のデータの移行と設定の分割
+
+サービス化・Web API設計書 6.8節「設定の分割」・9.2節。
+
+- 設定の分割:
+  - サービスの設定（`ConfigService(gui_settings=False)`）は `schema_version` 2。利用者ごとの GUI の設定（`general`）を含めない。12-3a で作った `general` 入りの設定は、読み込んだときに 2 へ変える
+  - 従来のアプリ（ポータブル）は、これまでどおり `schema_version` 1 で `general` を含む。トレイGUI が `gui.json` を使うようになる 12-4 まで残す
+  - `core/gui_config.py`: 利用者ごとの GUI の設定 `gui.json`（Windows は `%APPDATA%\ClamQtPie\`、Linux は `~/.config/clamqtpie/`）。12-3b では移行が書き出すだけ
+  - Web API の `GET /config` に `general` を含めず、`PUT /config` でも受け付けない（`HIDDEN_SECTIONS`）。`clamqtpie-ctl config` も扱わない
+  - Web API で変えられる項目の一覧（`WRITABLE_FIELDS`）と範囲を `core/config_model.py` に移した（移行でも同じ一覧を使うため）
+- `clamqtpie-ctl migrate --from DIR [--yes] [--restart]`（`core/portable_migration.py`）: 旧版のフォルダの設定・DB・隔離ファイル・ログを、サービスの置き場所へ移す。旧版のフォルダは一般の利用者が書き換えられる場所にあるため、中身を信頼しない:
+  - ファイルはリンクをたどらずに開き（`safe_fs.open_regular_file`）、リンク・通常でないファイルは移さない
+  - 設定は Web API で変えられる項目だけを、型と範囲を確かめて移す。保護された項目は移さず、旧版の値が既定値と違えば最後に一覧を表示する
+  - DB はファイルごと置き換えず、旧版の DB の写しから決まった表・列だけを読み、値を確かめて移行先の DB に入れる（隔離ファイルの名前の形、隔離の保存形式、スケジュールの種別・時刻の指定、除外の種類）。隔離したファイルの元の所有者・アクセス権は移さない
+  - 除外・監視対象・スケジュール・隔離中のファイルの一覧を表示して確認を求める
+  - 移行先に既にデータ（隔離・スケジュール・除外・監視対象・スキャンの履歴）があれば移行しない。旧版が動いている（`app.db-wal` が残っている）ときも移行しない
+  - 隔離ファイルは1件ずつ写し、失敗したら写したものを消して中止する。終わってから旧版の隔離ファイルを消し、旧版のフォルダに `MIGRATED.txt` を置く（同じフォルダからもう一度は移さない）
+  - SMTP パスワード: Windows は利用者の資格情報ストアから読んでサービスの保存先へ移す。Linux は入力を求める（空なら省略）
+  - `gui.json`: 実行した利用者のものに書き出す。Linux で sudo から実行したときは、その利用者の権限に下げた子プロセスで書く。既にあれば上書きしない
+
+PR #25 の Linux 実機の確認で直したもの:
+- 旧版の現在のログ（`app.log`）を、最後に書いた日付（旧版を終了したばかりなら今日）の `app.log.<日付>` として写していた。サービスがその日の夜中に今日の分を同じ名前へ切り替えようとすると、Python 3.14 の `TimedRotatingFileHandler` は既にある名前を見て切り替えをやめ、次の切り替えの時刻も進めないため、それ以降ログが切り替わらなくなった（古い Python では、写したログが消される）。今日以降の日付の名前は使わず、昨日の日付にまとめる（同じ名前になるものは古い順につなげる）
+- 元の所有者の記録が無い隔離ファイル（旧版から移したもの）を `quarantine restore` で復元したときは、所有者が管理者・root になることと、所有者・アクセス権を変えるよう案内する
+- 管理用コマンドで、Alembic の経過の行が端末に出ていた（`DatabaseService(quiet=True)`）
+
+確認: 全テスト（Windows・WSL）成功。sudo から実行したときの `gui.json` の書き出しは Linux 実機で確かめる。
+
+## 58. 段階 12-3c-1: スケジュールの取りこぼし対策と定義更新の分岐
+
+サービス化・Web API設計書 9章・9.1節。12-3c は 3 つに分ける（12-3c-1: 取りこぼし対策と定義更新、12-3c-2: 通知の保存、12-3c-3: スリープからの復帰（`wake`））。
+
+- `SchedulerService`:
+  - APScheduler に `coalesce`（重なった回は1回にまとめる）と `misfire_grace_time`（設定の `schedule.misfire_grace_sec`、既定 3600 秒、60〜86400）を指定する。従来のアプリも同じ
+  - `catch_up_missed()`: 各ジョブの最終実行日時（`last_run`）と実行周期から、電源オフ・スリープ中に過ぎた回があれば、1 分後に1回だけ実行する（実行周期のジョブは次の回から数え直す）。APScheduler はジョブを覚えていない（メモリだけ）ため、サービスの起動時に呼ぶ。一度も実行していないジョブは対象にしない
+  - `on_resume()`: スリープからの復帰時に、取りこぼしを確かめてから APScheduler の待ち時間を計算し直させる（Linux では待ち時間にスリープ中の時間が数えられず、そのままでは次の回がスリープしていた時間だけ遅れる）
+  - `inhibit_sleep=True`（サービス）なら、ジョブの実行中はスリープを防ぐ（定義の自動更新も）
+  - `on_job_finished`: 最終実行結果を記録したときに呼ぶ。Web API の `schedule.finished` イベント（`api/events.connect_scheduler`）
+- `core/resume_watcher.py`: 30 秒ごとに時計を確かめ、想定より 120 秒以上進んでいれば復帰したとみなす。OS の通知（Windows のサービスの電源イベント、Linux の logind）を受け取るより単純で、両方で同じ仕組みになり、依存も増えない（設計書と違う点）
+- `core/sleep_inhibit.py`: Windows は `SetThreadExecutionState`（ジョブのスレッドで呼ぶ）、Linux は `systemd-inhibit --what=sleep` で `cat` を動かしておき、標準入力を閉じて終わらせる。できなければ何もしない
+- Linux の定義更新: OS の `clamav-freshclam.service` が動いていれば、root で動くサービスでも、無人実行（自動・スケジュール）は行わない（`skipped`。PR #23 の確認で、OS のサービスと重ねて更新していた）。利用者の操作による更新は、従来どおり freshclam を直接実行する（ログは `--log=/dev/null`）。設計書の「OS のサービスを再起動してジャーナルから結果を読む」は、従来の方法で問題が出ていないため行わない（設計書と違う点）
+
+確認: 全テスト（Windows 824 件・WSL 842 件）成功。
+
+## 59. 段階 12-3c-2: 通知の保存
+
+サービス化・Web API設計書 6.10節・7.1節。サービスはデスクトップに通知を出せない（Windows はセッション 0、Linux はログインした利用者のセッションがない）ため、未読として保存し、トレイGUI・WebUI が読んで表示する（表示は段階 12-4・12-5）。
+
+- `pending_notification`（Alembic `0006_add_pending_notification`。設計書の案では 0004 だが、先にスキャン履歴・隔離の変更が入ったため 0006）: `id`、`created_at`、`title`、`body`、`open_screen`、`acked_at`
+- `core/notification_store.py`（`NotificationStore`）: 保存・未読の一覧・既読・古い既読の削除。タイトル・本文は制御文字を見える形にし、長さを制限する（200・2000 文字）。`open_screen` は `ALLOWED_SCREENS` のものだけを残す。既読にしたものは `logging.retention_days` を過ぎたら、サービスの起動時に消す（未読は消さない）
+- `NotificationService(desktop_sink=...)`: 渡されていれば、デスクトップに表示する代わりに保存する（サービスだけ。従来のアプリは従来どおり表示する）。保存できなくても、メールの通知や検知後の処理は続ける
+- サービスの終了のとき、集約の途中（最初の検知から 60 秒以内）の検知通知を、DB を閉じる前に保存する（`NotificationService.flush_pending`。Linux 実機の確認での指摘）
+- Web API（user 以上。サービスだけ）:
+  - `GET /notifications/pending`: `{"notifications": [...], "total": n}`。未読を新しい順に最大 500 件と、未読の全体の件数
+  - `POST /notifications/ack`: `{"ids": [...]}`（最大 1000 件）か `{"all": true}` のどちらか一方。`{"acked": [...]}`（実際に既読にした ID）を返す。既読にした件数・ロール・接続元をログに残す（GUI／WebUI の区別は、WebUI の認証が入る段階 12-5 で加える）
+  - イベント: `notification`（`{id, created_at, title, body, open_screen}`）・`notification.acked`（`{ids}`。既読にしたものが無ければ送らない）
+
+確認: 全テスト（Windows 840 件・WSL 858 件）成功。
+
+## 60. 段階 12-3c-3: スケジュールのためにスリープから起こす
+
+サービス化・Web API設計書 6.6節・9.1節。ジョブごとに「スリープ中でも起こして実行する」（`wake`）を選べるようにし、サービスが OS の復帰タイマーを設定する。既定は false（ノート PC が鞄の中などで起動しないように）。編集画面の項目は段階 12-4・12-5。
+
+- `schedule.wake`（Alembic `0007_add_schedule_wake`。設計書の案では 0006）。既存のジョブは false
+- `SchedulerService(wake_timer=...)`: `wake` が有効なジョブのうち、次の実行時刻が最も早いものの 2 分前（`WAKE_LEAD`）に、タイマーを1つだけ設定する。ジョブの追加・変更・削除・有効無効の切り替え・実行の後、起動時、スリープからの復帰時に設定し直す（同じ時刻なら設定し直さない）。サービスの停止時に消し、起動時は必ず一度設定し直す（異常終了で残ったタイマーも消す）。設定できなくてもスケジュールは止めない（復帰後に取り返す）。定義の自動更新では起こさない
+  - `update_job(wake=None)` は wake を変えない（従来のアプリの編集画面にはまだ項目が無いため）
+- `core/wake_timer.py`:
+  - Windows: `CreateWaitableTimer`（名前なし）と `SetWaitableTimer(fResume=True)`。タイマーはサービスのプロセスが持ち、終われば消える
+  - Linux（root のサービスだけ）: `/etc/systemd/system/clamqtpie-wake.timer`（`OnCalendar=<UTC の日時>`、`WakeSystem=true`）と、何もしない `clamqtpie-wake.service` を書き、`daemon-reload` と `restart` で読み直させる。不要になったら止めて消す。`uninstall_service.sh` も消す
+  - 一般の利用者の従来のアプリは起こさない
+- Web API: `POST /schedules`・`PUT /schedules/{id}` に `wake`（既定 false。PUT は全体を置き換えるため、送らなければ false）。`GET /schedules` の各ジョブにも `wake`
+- `clamqtpie-ctl status`: Windows は電源プランの「スリープ解除タイマーの許可」（`powercfg /query SCHEME_CURRENT SUB_SLEEP RTCWAKE`。表示の言語によらないよう値だけを読む）、Linux は設定中の起こす予定を表示する。診断画面への表示は段階 12-4
+
+確認: 全テスト（Windows 856 件・WSL 873 件）成功。
+
+## 61. 段階 12-3d-1: clamd の接続先の確認
+
+サービス化・Web API設計書 9章（12章 43）。12-3d は 3 つに分ける（12-3d-1: clamd の接続先の確認、12-3d-2: 内部 API の接続先の確認・`endpoint.json`・回復動作、12-3d-3: 残り（隔離の途中のファイルの片づけ、`scan.quick_targets`、定義の古さ、user の手動スキャンの対象））。
+
+clamd が止まっている間に、同じポート・ソケットで別のプログラムが待ち受けていても、検査するファイルの名前・中身を渡さないよう、サービスは接続の前に相手を確かめる（`core/peer_verify.py`）。
+
+- Windows（TCP）: `GetExtendedTcpTable`（待ち受けだけ、PID つき）で、ループバックのそのポートで待ち受けているプロセスがすべて clamd のサービス（`clamd.service_name`、既定 `clamd`）の PID であること。psutil の `net_connections` は Windows で待ち受けの状態を正しく返さないことがあったため使わない
+- Linux（TCP）: `/proc/net/tcp`・`tcp6` で待ち受けているソケットの所有者が、すべて root か clamd.conf の `User`（既定 `clamav`）であること
+- Linux（UNIX ソケット）: ソケットと親のディレクトリの所有者が root か clamd の利用者で、親のディレクトリにほかの利用者が書き込めないこと
+- 確かめた結果は 5 秒使い回し、接続に失敗したら確かめ直す。確かめられなければ接続せず、clamd に接続できない（E1001、理由つき）として扱う
+- 確かめられなかった理由は WARNING でログに残す（同じ理由は 1 回だけ。確かめられるようになったら INFO）。clamd に接続できずにスキャンを中断するときも、理由をログに残す（サービスではジョブ・履歴に要約しか残らないため。Linux 実機の確認での指摘）
+- `clamd.tcp_host` が別の PC のときは確かめられないため、ログに一度警告して接続する
+- `GET /status` の `clamd.verified`（確かめた: true、確かめられない・別の PC: false、従来のアプリ: null）
+- 従来のアプリ（利用者の権限）は確かめない（サービスだけ）。診断画面への表示は段階 12-4
+
+確認: 全テスト（Windows 868 件・WSL 884 件）成功。この PC の clamd（Windows のサービス、WSL の UNIX ソケット）を実際に確かめられること（1 回あたり約 0.6 ms）。
+
+## 62. 段階 12-3d-2: 内部 API の接続先の確認・endpoint.json・回復動作
+
+サービス化・Web API設計書 3.1節・9.4節（12章 19・20・22）。
+
+- `core/service_endpoint.py`:
+  - サービスは待ち受けたポートを `api/endpoint.json`（`{"port", "pid"}`、トークンと同じ権限）に書く。止まっている間も前回の値を残す
+  - `read_endpoint()`: 無い・正しくなければ None（呼び出し側は設定の `api.port` を使う）
+  - `verify_service_listener()`: トークンを送る前に、ループバックのそのポートで待ち受けているのがサービスかを確かめる。Windows は待ち受けているプロセスがすべて `ClamQtPie` のサービスの PID であること、Linux は待ち受けているソケットの所有者がすべて root であること（12-3d-1 の `core/peer_verify.py` を使う）。違う・確かめられなければ E8105（`ServiceUnavailableError`）
+- `clamqtpie-ctl status`: `endpoint.json` のポートを表示し、確かめてから問い合わせる。確かめられなければ問い合わせない。トレイGUI（段階 12-4）も同じ関数を使う
+- 回復動作:
+  - Windows（`scripts/install_service.bat`）: `sc failure`（60 秒後に起動し直す、2 回まで、1 日で数え直す）と `sc failureflag 1`（エラーで止まったときも対象）
+  - Linux（`scripts/install_service.sh`）: 12-3a で設定済み（`Restart=on-failure`、`RestartSec=60`、`StartLimitIntervalSec=1d`、`StartLimitBurst=3`。置き場所の権限・API のポートの失敗は起動し直さない）
+  - 正式なインストーラーへの組み込みは段階 12-4
+
+確認: 全テスト（Windows 883 件・WSL 899 件）成功。
+
+## 63. 段階 12-3d-3: 隔離の途中のファイルの片づけ・クイックスキャンの対象・定義の古さ
+
+サービス化・Web API設計書 6.1節・6.2節。user のトークンでの手動スキャンの対象（R-9）は 12-3d-4 に分けた。
+
+- 隔離の途中で中断したファイル（§54 の残り）: `QuarantineService.recover_interrupted()` をサービス・従来のアプリの起動時に呼ぶ
+  - `<uuid>.restoring`（復元の途中で元に戻した中身。隔離ファイルは残っている）は消す
+  - `<uuid>.moving`（隔離の途中で元の場所から移した中身。まだ記録が無い）は、元の内容のまま置かないよう変換し、元の場所が分からない隔離の記録（ウイルス名「（不明: 隔離の途中で中断）」）として残す。誤検知だった場合に失わないため。元の場所が分からないため、復元は復元先を指定したときだけ（`clamqtpie-ctl quarantine restore --to`）
+  - リンク・通常のファイル以外・名前の形が違うものには触らない
+- `scan.quick_targets`（新設、既定は空、絶対パス 100 件まで）: サービスで、Web API で対象を指定しないクイックスキャン（ブラウザ・ctl）が使う場所。空の間は 400。従来のアプリの API は今までどおり利用者のフォルダを使う（`ApiContext.service_mode` で分ける）。Web API（`PUT /config`）と `clamqtpie-ctl config set scan.quick_targets '["/path"]'`（JSON の配列）で変えられる。設定画面の項目は段階 12-4・12-5
+- 定義の古さ（サービス）: 60 秒ごとの clamd の確認で、`VERSION` の定義の日付から経過日数を求め、`status` イベントの `definitions` に出す（これまでは `null`）。`update.stale_days` を超えた時点で1回、通知（保存）とメール（`notification.on_update_fail` と `on_detect_mail` が有効な場合）で知らせる。clamd が応答しない間は判定を変えない。従来のアプリはメールを送らない（今までどおり）
+
+確認: 全テスト（Windows 902 件・WSL 919 件）成功。
+
+## 64. 段階 12-3d-4: user のトークンのスキャンを、頼んだ利用者のフォルダの中に限る
+
+サービスは SYSTEM・root で動き全員のファイルを読めるため、user のトークンで任意の場所をスキャンできると、ほかの利用者のフォルダのファイル名と検知の有無が分かってしまう。そこでサービスでは、user のトークンのスキャンを、頼んだ利用者のプロファイル・ホームの中に限る（利用者の判断。設計書の「クライアントの偽装でのアクセス確認・SO_PEERCRED」の代わりに、接続元のソケットの持ち主で判断する）。
+
+- `core/peer_identity.py`: 内部 API への接続（ループバックの TCP）の接続元のポートから、相手のソケットを OS の表で探して利用者を求める
+  - Windows: `GetExtendedTcpTable`（接続中、PID つき）→ プロセスの利用者（SID）→ `ProfileList` の `ProfileImagePath`
+  - Linux: `/proc/net/tcp`・`tcp6` の接続元の行の uid → ホーム
+- `POST /scans`（サービス、user のトークン）:
+  - 対象を指定したスキャン（`custom`、対象を指定した `quick`）は、すべての対象が頼んだ利用者のフォルダの中（リンクをたどった実際の場所で判断）のときだけ。利用者を割り出せないとき・外を含むときは 403（E8102）
+  - フルスキャンは admin だけ。対象を指定しないクイックスキャン（管理者が決めた `scan.quick_targets`）はそのまま
+  - admin のトークン、従来のアプリの API（利用者の権限で動く）は限らない
+- スキャンの列挙（`ScanWorker`）は、リンク・ジャンクションをたどらない（すべてのスキャン）。`os.walk` は Windows のジャンクションをたどり、一般の利用者でもほかの利用者のフォルダを指すジャンクションを自分のフォルダに作れるため（実際に確かめた）。リンクの先が対象の中にあれば、そこを列挙したときに検査する
+- トレイGUI（段階 12-4）: クイックスキャン（その利用者のフォルダ）は user のトークンのまま、フルスキャン・ほかの場所は昇格して admin のトークンで頼む
+
+確認: 全テスト（Windows 912 件・WSL 929 件）成功。実際の接続から、テストを動かす利用者のプロファイル・ホームを割り出せること（Windows・WSL）。
+
+## 65. 段階 12-4a: トレイGUI の API クライアントの土台
+
+サービス化・Web API設計書 3.1節・3.2節・5章・10章。12-4 は 5 つに分ける（12-4a: API クライアントの土台、12-4b: 画面のつなぎ替え（user の操作）、12-4c: 昇格ヘルパーと admin の操作、12-4d: 配布物・インストーラ、12-4e: 従来のアプリの削除）。決めたこと: 従来のアプリ（ポータブル）は最終的にソースも含めて削除する、`POST /quarantine` を作る、通信は QtNetwork、Windows のインストーラは Inno Setup（利用者の判断）。
+
+- `api_client/client.py`（`ApiClient`）:
+  - 接続先は `api/endpoint.json` のポート（無ければ既定の 8765）。トークンは `api/user.token`。読めなければ E8110（`ServicePermissionError`、新設。「この PC の ClamQtPie を使う権限がありません」）、無ければ E8105（サービスが動いていない）
+  - トークンを送る前に毎回、待ち受けているのがサービスかを確かめる（`core/service_endpoint.verify_service_listener`）
+  - `QNetworkAccessManager` で送り、結果は `ApiReply.finished(data, error)`。エラーの応答はコードに合う `AppError` の派生にする。つながらない・待ちきれないときは E8105。401（サービスが起動し直してトークンが変わった）はトークンを読み直して 1 回だけやり直す
+  - `check_version()`: `GET /version` の `api_version` が合わなければ E8107
+  - `ApiReply` はクライアントへの参照を持つ（呼び出し側がクライアントを持っていないと、応答を待つ間にガベージコレクションで消えてプロセスが落ちた）
+- `api_client/events.py`（`EventStream`）: `GET /events` を受け取った分ずつ読み、`event(name, data)` を出す。ヘッダーが届いた時点で `connected`。切れたら `disconnected` を 1 回だけ出し、`Last-Event-ID` を付けてつなぎ直す
+- トレイGUI の多重起動防止のミューテックスを `Local\ClamQtPie_Tray`（ログオンのセッションごと）にできるようにした（`SingleInstanceLock(mutex_name=TRAY_MUTEX_NAME)`。使うのは 12-4b）
+- 12-4d への申し送り: `endpoint.json` を `user.token` と同じくグループに読ませる。spec に QtNetwork を加える（TLS のプラグインは入れない）
+
+確認: 全テスト（Windows 926 件・WSL 942 件）成功。本物の API（uvicorn）につないで、要求・エラー・トークンの読み直し・版数の確認・イベントの受信と再接続を確かめた。
+
+## 66. 段階 12-4b-1: トレイGUI をサービスのクライアントにする（画面のつなぎ替え）
+
+サービス化・Web API設計書 10章。12-4b は 2 つに分ける（12-4b-1: プロキシとトレイGUI の入口・画面のつなぎ替え、12-4b-2: 通知・スキャン履歴の画面・診断画面の追加の表示）。
+
+- `tray_main.py`（新設）: トレイGUI の入口。一般の利用者の権限で動き、サービスの内部 API だけを使う
+  - `user.token` を読めなければ E8110 と `clamqtpie-ctl users add <利用者>` を案内して終わる。サービスにつながらない・版数が合わないときは、トレイをエラーの状態にして 5 秒ごとにつなぎ直し、つながったら画面を作る
+  - 多重起動防止は `Local\ClamQtPie_Tray`（ログオンのセッションごと）
+  - 全 10 画面を、従来のサービスの代わりにプロキシにつなぐ（`app.py` と同じつなぎ方）。サービスのイベント（`config.changed`・`status`・`schedule.finished`）で画面を読み直す
+  - ログは利用者ごとの場所（`%LOCALAPPDATA%\clamqtpie\logs`・`~/.local/share/clamqtpie/logs`）
+- `api_client/sync.py`（`SyncCaller`）: 画面はこれまでどおり同期的にメソッドを呼ぶ。画面のスレッドからは QEventLoop を回して待ち、別のスレッド（`BackgroundTask` など）からは画面のスレッドに通信を頼んで待つ。一覧は 1,000 件ずつ全部読む
+- `api_client/proxies.py`: 従来のサービスと同じ名前・形のプロキシ（設定、隔離、除外、監視対象、スケジュール、更新履歴、clamd の状態、ログ、リアルタイム監視、スキャン、定義の更新）。スキャン・定義の更新・リアルタイム監視のシグナルはイベントから作る。`GET /status` は 2 秒使い回す
+  - 設定: サービスの設定は `GET /config`、利用者ごとの GUI の設定（`general`）は `gui.json`。保存では `gui.json` を書き、サービスの設定は変えたときだけ `PUT /config` を送る（トレイの案内の表示済みなどを、一般の権限で保存できる）
+  - スケジュールの編集で `wake` を渡さないとき（編集画面に項目が無い間）は、今の値のまま送る
+  - admin の操作もプロキシから API を呼ぶ。12-4c で昇格ヘルパーを通すまでは 403（E8102）のエラーを表示する
+- `POST /quarantine`（新設、利用者の判断）: スキャン画面の「隔離」。サービスで user のトークンなら、頼んだ利用者のフォルダの中のファイルだけ（§64 と同じ判断）
+- ホーム画面の直近のアクティビティは、ログを読めないとき（サービスにつながらない）に前回の表示を残す
+- テストの不備を直した: §61 の接続の失敗のテストは、空いているポートを閉じてから使っていたため、全体を流すとほかのテストのサーバーに同じポートを使われることがあった
+
+Linux 実機の確認（#34）で見つかった点を直した:
+- サービスにつながらない間、トレイのツールチップがすぐに「ClamQtPie」に戻り、ホーム画面が「clamd: 停止」と案内していた（ホーム画面の定期的な状態の確認で、clamd が止まったと判断していた）。つながらない間は clamd に問い合わせず、ホーム画面に「ClamQtPie サービスにつながりません」を出す。つながらないことのログは、エラーコードが変わったときだけ残す（5 秒ごとのつなぎ直しのたびには残さない）
+- スキャン画面の「スキャン件数」が、問題の無いファイルでは数えられず 0 のままだった（サービスは検知・エラーのファイルの結果だけを送る）。進み具合と終わりの件数で数える
+- トレイGUI の画面から頼んだスキャンを、スキャン履歴の実行元「画面」（`gui`）にする（`POST /scans` の `source`。表示の区別だけに使う）。クイックスキャンは、画面が求めた場所のうち自分のフォルダの中だけを送る（Linux の `/tmp` などはサービスが user のトークンでは断るため）
+- サービスは、権限が足りずに断った要求（403、E8102）をログに残す（エラーのダイアログの「詳細を見る」で見つかるように）
+- スキャン結果の検知日時・定義の更新履歴の実行日時を、この PC の時刻で表示する（`gui/time_text.py`。UTC の ISO 形式のまま出ていた）
+- 権限が無くて終わるときも、トレイGUI のログに残す
+
+確認: 全テスト（Windows 936 件・WSL 952 件、2 回ずつ）成功。本物の API（uvicorn）にプロキシをつなぎ、読み取り・admin の操作・隔離と復元・GUI の設定の保存・スキャンとリアルタイム監視のイベント・別のスレッドからの呼び出し・トレイGUI の全画面の組み立てを確かめた。導入したサービスでの実機の確認は 12-4b-2 の後にまとめて行う。
+
+## 67. 段階 12-4b-2: トレイGUI の通知・スキャン履歴・診断画面のサービスの状態
+
+サービス化・Web API設計書 7.2節・10章、§48・§60・§61 の残り。
+
+- **通知**（`gui/tray_notifications.py`）: サービスが保存した未読の通知（§59）を、トレイGUI がこの利用者のデスクトップに出す
+  - サービスにつながったとき（起動時・つなぎ直したとき）に `GET /notifications/pending`。まだ出していない通知が 2 件以上なら「未読の通知が n 件あります」の 1 件にまとめる。動いている間の通知は `notification` イベントで 1 件ずつ出す。出した通知の ID はメモリに持ち、二度出さない（起動し直したら、未読をもう一度まとめて出す）
+  - 既読: トーストのクリックで開いた画面の通知（Windows。`core/activation.py` の仕組みはそのまま。URL に通知の ID は入れない）と、トレイのメニュー「未読の通知（n 件）」の一覧（`gui/notification_dialog.py`）の「選んだ通知を既読にする」「すべて既読にする」で `POST /notifications/ack`
+  - `notification.acked`（ほかのトレイGUI・WebUI で既読にしたものも届く）で、通知センターに残っている通知を消す。Windows: Toast に `Tag`（通知の ID）と `Group`（`clamqtpie`）を付けて出し、`History.Remove` で消す（この PC で、消えることを確かめた）。Linux: `notify-send --print-id` の番号を覚え、`gdbus` で `CloseNotification` を呼ぶ。まとめた通知は、含む通知がすべて既読になってから消す
+  - 表示・削除（PowerShell・notify-send）は時間がかかるため、1 本の別のスレッドで順に行う。失敗してもログに残すだけ
+  - `core/notification_service.py` の表示の処理を関数（`show_windows_toast`・`remove_windows_toast`・`show_linux_notification`・`close_linux_notification`）にして、サービス・従来のアプリと共有する（Tag・番号は渡したときだけ）
+- **スキャン履歴**: スキャン画面に「スキャン履歴」の一覧（新しい順に 200 件、§48 の残り）。「詳細」（ダブルクリック）で対象・検知したファイル・検査できなかったファイルを表示する。スキャンの終了・スケジュールの実行・画面を開いたときに読み直す。従来のアプリでは表示しない
+- **診断画面**: 「サービスの状態」に、clamd であることを確かめてから接続しているか（§61。`GET /status` の `clamd.verified`）と、スリープから起こす設定（§60。Windows は電源プランのスリープ解除タイマー、Linux は起こす予定）を出す。画面を開いたときに確かめる。ヘルスチェック（`POST /diagnostics`）は admin のため、12-4c までは 403
+- **見つけた不具合**: 日本語の Windows で `clamqtpie-ctl status` の電源プランの表示が「確認できません」になっていた（§60）。powercfg は OEM コードページ（cp932）で出力するが、UTF-8 として読んでいた（Python 3.15 は UTF-8 モードが既定）。sc と同じく OEM コードページで読むようにした（`console_text_kwargs`）
+
+Linux 実機の確認（#35）で見つかった点を直した:
+- 未読の件数がトレイのメニューを開かないと分からなかった。ツールチップにも出す
+- まとめた通知の本文がタイトルだけで、同じ種類の通知（ジョブの失敗など）を見分けられなかった。本文の最初の行を添える
+- スキャン履歴の詳細の検知したファイルの扱い（隔離しました・通知のみ）は、スキャンの時点のものであることを書き添える（後でスキャン画面から隔離しても「通知のみ」のまま）
+
+確認: 全テスト（Windows 953 件・WSL 969 件、2 回ずつ）成功。本物の API（uvicorn）につないで、未読のまとめ・イベントでの表示・画面ごとの既読・すべて既読・通知センターから消す処理と、スキャン履歴の一覧・詳細を確かめた。Windows で、Tag を付けた Toast が `History.Remove` で通知センターから消えることを確かめた。導入したサービスでの実機の確認は、12-4c・12-4d の後にまとめて行う。
+
+## 68. 段階 12-4c-1: 昇格ヘルパーで admin の操作を実行する
+
+サービス化・Web API設計書 3.2節・10章（12章 23）。12-4c は 2 つに分ける（12-4c-1: 昇格ヘルパーと、admin の操作をヘルパーに回す仕組み、12-4c-2: 除外・監視対象・スケジュールの画面の「変更を保存」でのまとめ、保護された設定の読み取り専用の表示、`scan.quick_targets`・スケジュールの `wake` の入力欄）。
+
+- **昇格ヘルパー**（`elevate_main.py`。配布版は Windows `ClamQtPieElevate.exe`（`uac_admin=True`）、Linux `clamqtpie-elevate`。12-4d で作る）
+  - 操作の一覧（メソッド・パス・本文、最大 200 件）を受け取り、すべてが管理者の操作の一覧（`api_client/admin_ops.py` の `ADMIN_ROUTES`）にあることを確かめる。一覧に無い操作があれば、確認を求めずに断る（admin のトークンをほかの API に送らない）
+  - `admin.token` を自分で読み、接続先がサービスであることを確かめてから送る（`verify_service_listener`）。場所は頼んだ側から受け取らない
+  - 確認画面に、受け取った操作から自分で作った説明を表示する（`describe`。隔離ファイルの名前・除外・監視対象・スケジュールの名前は、admin のトークンで読んだ一覧から引く。設定の変更は今の値との違いを並べる）。「実行」のときだけ順に実行し、途中で失敗したら残りは実行しない。既定のボタンは「キャンセル」
+  - 結果（応答の JSON・実行できた件数・エラー）だけを返す。admin のトークンは返さない。確認画面を飛ばす仕組み（環境変数・引数）は作らない
+- **受け渡し**（`api_client/elevation.py`）。「長さ（4 バイト）＋JSON」
+  - Windows: UAC で昇格したプロセス（`ShellExecuteEx` の runas）には標準入出力をつなげないため、名前付きパイプにした（設計書は標準入出力）。パイプはトレイGUI が作る（名前は毎回の乱数、最初の 1 つだけ、リモートからは不可）。つないできたのが起動したヘルパーかをプロセス ID で確かめる。ヘルパーは `SECURITY_IDENTIFICATION` でつなぐ（パイプを作った側が、管理者の権限になりすませないように）
+  - Linux: `pkexec` で起動し、標準入出力で受け渡す。pkexec の取り消し（終了コード 126・127）は取り消しとして扱う。開発時は確認画面の表示先（`DISPLAY`・`XAUTHORITY`）を `env` で渡す。配布版は polkit のポリシー（`allow_gui`）で渡す（12-4d）
+- **admin の操作の回し方**: `ElevatedCaller`（`SyncCaller` と同じ形）を全部のプロキシに渡す。admin の操作は昇格ヘルパーに回し、user の操作が 403（E8102）になったら、一覧にある操作（フルスキャン・自分のフォルダの外のスキャン・隔離・スケジュールのスキャンの中止）だけ 1 回昇格してやり直す。隔離画面の複数選んだ削除は 1 回にまとめる（`delete_many`）
+- 取り消し（UAC・pkexec・確認画面）は E8111（`ElevationCancelledError`）。エラーのダイアログは出さない。ヘルパーを起動できない・応答が正しくないときは E8112（`ElevationError`）
+- 確認画面を同じ利用者のほかのプロセスから操作されないのは、Windows（UIPI。昇格したプロセスの画面）だけ。Linux の X11・XWayland には画面の間の隔離が無いため、確認画面は誤操作を防ぐためのもので、守りの中心は polkit の認証（`auth_admin`）になる
+
+確認: 全テスト（Windows 973 件・WSL 985 件、2 回ずつ）成功。本物の API（uvicorn）に対して、確認の後の実行・取り消し・途中の失敗で残りを実行しないこと・一覧に無い操作を断ること・接続先の確認を、Windows では名前付きパイプでの受け渡しを含めて確かめた。UAC・pkexec の確認画面は実機で確かめる（12-4d の後）。
+
+## 69. 段階 12-4c-2: admin の画面（変更のまとめ・保護された設定・新しい入力欄）
+
+サービス化・Web API設計書 3.2節・6.8節・10章の残り。§68 の昇格ヘルパーを、画面から 1 回の確認で使えるようにする。
+
+- **変更のまとめ**（`gui/pending_edits.py`）: リアルタイム保護の画面（監視対象・除外・検知時アクション）とスケジュールの画面（追加・編集・削除・有効無効）は、トレイGUI では変更を画面の中にためておき、［変更を保存］で 1 回の昇格にまとめて送る（削除 → 変更 → 有効無効 → 追加 → 設定の順）
+  - 一覧の「有効」の列に「追加（保存前）」「削除（保存前）」などを出し、保存していない件数を表示する。［変更を取り消す］で捨てる。削除の予定の行をもう一度削除すると、削除をやめる（保存するまでは取り消せるため、削除の確認は出さない）
+  - 昇格の確認で取り消したら、変更はそのまま残す。途中で失敗したら「n 件のうち m 件を保存したところで失敗しました」を出し、一覧をサービスの今の内容に戻す
+  - 保存していない変更がある画面を離れる・ウィンドウを閉じるときは、「保存」「破棄」「キャンセル」を確かめる（`MainWindow.confirm_leave`）。トレイのメニューの「終了」では確かめない
+  - スケジュールの「今すぐ実行」は、そのジョブに保存していない変更があれば、先に保存するよう案内する。監視への反映はサービスが行う（画面からは `add_target` などを呼ばない）
+  - 従来のアプリは、これまでどおりその場で変える
+- **スケジュールの編集画面**: トレイGUI では「スリープ中でも起こして実行する」（`wake`、§60）を出す。編集で今の値を引き継ぐ
+- **設定画面**（`bind_services(..., service_mode=True)`）
+  - 保護された項目（`GET /config` の `protected`。接続の設定・サービス名・clamonacc と freshclam の場所）は読み取り専用にし、入力欄のツールチップで `clamqtpie-ctl config set <項目> <値>` を案内する
+  - 「スキャン」タブにクイックスキャンの対象（`scan.quick_targets`、§63）。「定義更新」タブに定義が古いとみなす日数（`update.stale_days`。従来のアプリにも出す）
+  - サービスの設定と SMTP のパスワードは 1 回の昇格で保存する（`ConfigProxy.save(model, smtp_password=...)`）。写しを変えて保存し、保存できなければサービスの今の設定を読み直して画面に戻す（#34 の確認で指摘）。取り消したときは入力した値を残す
+  - 保存の結果（「保存しました（時刻）」など）を、保存のボタンの横に出す（従来のアプリも）
+
+確認: 全テスト（Windows 993 件・WSL 1005 件、2 回ずつ）成功。本物の API に対して、リアルタイム保護の画面の変更が昇格ヘルパー（同じプロセスで代わりに動かす）を通して保存されることを確かめた。
+
+## 70. 段階 12-4d-1: 配布物の分割・トレイGUI を使える利用者・Linux の導入
+
+サービス化・Web API設計書 3.2節・11章（12章 5・33）。12-4d は 2 つに分ける（12-4d-1: PyInstaller の分割・グループの権限・`clamqtpie-ctl users`・サービスの実行ファイルの置き場所の確認・Linux の `install.sh`／`uninstall.sh`、12-4d-2: Windows のインストーラ（Inno Setup）・`build_release.py`・旧版の自動起動の登録し直し）。
+
+- **PyInstaller の分割**（`ClamQtPie.spec`）: 1 つの spec で、サービス（`ClamQtPieService.exe`／`clamqtpie-service`）・トレイGUI（`ClamQtPie.exe`／`clamqtpie`、**UAC を求めない**）・昇格ヘルパー（`ClamQtPieElevate.exe`（`uac_admin=True`）／`clamqtpie-elevate`）・管理用コマンド（`clamqtpie-ctl`、コンソール）・通知のクリック（`ClamQtPieActivate.exe`、Python のまま）を作り、`_internal/` を共有する。従来のアプリ（`app.py`）は作らない。トレイGUI が使う QtNetwork を入れた（TLS のプラグインは入れない）。uvicorn は文字列で読み込むモジュールを `hiddenimports` に入れた
+  - Windows でビルドし、サービス（`--console`）が内部 API の待ち受けまで進むこと、トレイGUI がサービスを待つ状態で動くこと、`clamqtpie-ctl --help` を確かめた（約 128 MB）
+- **トレイGUI を使える利用者**（`core/service_access.py`）: サービスは起動のたびに作り直す `user.token`・`endpoint.json` を、ClamQtPie Users（Windows）・`clamqtpie`（Linux）のグループに読ませる（`admin.token` は読ませない）。Linux は `/var/lib/clamqtpie` を `root:clamqtpie` 0710、`api/` を 0750、2 つのファイルを 0640 にする。Windows はファイルにグループの読み取りを足す。グループが無ければ何もしない（開発中の確認用の導入）。できなくてもサービスは止めない
+- **`clamqtpie-ctl users list|add|remove <利用者>`**: `net localgroup`／`groupadd`・`usermod -aG`・`gpasswd -d`。グループが無ければ作る。利用者名は決まった文字だけを受け付ける。サインインし直すと使えるようになる
+- **サービスの実行ファイルの置き場所の確認**（12章 33）: 配布版のサービスとして動くとき、自分の実行ファイルとそのフォルダを一般の利用者が書き換えられれば起動しない（終了コード 2）
+- **Linux の導入**（`packaging/linux/`）: `install.sh`（`/opt/clamqtpie` に写してから入れ替え、`root:root`・`go-w`。リンクなら中止。`clamqtpie` グループを作り `SUDO_USER` を入れる。unit・polkit のポリシー・デスクトップの項目・`/usr/local/bin/clamqtpie-ctl` を置き、サービスを開始する。更新も同じコマンド）、`uninstall.sh`（データを消すかを尋ねる。`--purge` は尋ねずにデータとグループも消す）、`clamqtpie.service`、`io.github.babaken.clamqtpie.policy`（`auth_admin`、`allow_gui`）、`clamqtpie.desktop`。配布物の形（`app/`・`share/`・`install.sh`・`uninstall.sh`）は 12-4d-2 の `build_release.py` で作る
+- **見つけた不具合**: 配布版では pywin32 の `pywintypes` が二重に読み込まれ、`except pywintypes.error` で Windows のエラーを捕まえられなかった（グループが無いときにサービスが止まった）。`winerror` の有無で見分ける（`is_windows_error`）。昇格ヘルパーの受け渡しも同じようにした
+
+確認: 全テスト（Windows 1012 件・WSL 1024 件、2 回ずつ）成功。`install.sh`・`uninstall.sh` は構文の確認だけ（Linux の実機での導入は 12-4d-2 の配布物で行う）。
+
+## 71. 段階 12-4d-2: Windows のインストーラ・配布物の作成・旧版の引き継ぎ
+
+サービス化・Web API設計書 11章（12章 32）、12-4 の計画の決めたこと 4（Inno Setup。ACL・グループ・サービスの登録は自前のプログラムで行う）。
+
+- **`build_release.py`**: Windows は PyInstaller の出力から Inno Setup のインストーラ（`ClamQtPie-<版>-setup.exe`）、Linux は tar.gz（`ClamQtPie-<版>-linux64.tar.gz`。`app/`・`share/`・`install.sh`・`uninstall.sh`、すべて root の持ち物、グループ・その他の書き込みなし、実行ファイルは 755）を作り、どちらも `.sha256` を添える。ポータブルの zip は作らない。ISCC は `CLAMQTPIE_ISCC`・`%LOCALAPPDATA%\Programs\Inno Setup 6`・`%ProgramFiles(x86)%\Inno Setup 6` の順に探す。`--no-installer` で PyInstaller の出力まで
+- **インストーラ**（`packaging/windows/ClamQtPie.iss`。管理者で動く）: `%ProgramFiles%\ClamQtPie` に置き、`clamqtpie-ctl setup install --user <導入した利用者>` を呼ぶ。選べる作業: サインインしたときにトレイGUI を起動する（`HKCU\...\Run`、引用符で囲む）、`clamqtpie-ctl` を PATH に追加する
+  - 更新: 先にサービスを止めて止まるまで待ち、Restart Manager でトレイGUI を閉じて差し替える。終わったらトレイGUI を元の利用者の権限で起動する（`runasoriginaluser`）
+  - 旧版（ポータブル）の検出: 自動起動の値が導入先以外の `ClamQtPie.exe` を指していれば、導入の後に移行を勧める（「はい」で `clamqtpie-ctl migrate --from <旧版のフォルダ> --yes --restart`。導入した日のうちに行うよう案内する。§57）
+  - 削除: データ（隔離したファイルを含む）を消すかを尋ね（既定は残す）、`clamqtpie-ctl setup uninstall [--purge]` を呼ぶ。PATH から外す
+- **`clamqtpie-ctl setup install|uninstall`**（`core/windows_setup.py`。Windows だけ）: データの置き場所（`%ProgramData%\ClamQtPie`）を一般の利用者が作っていた・書き換えられる・リンクなら `ClamQtPie.untrusted-<日時>` に退避して作り直す（12章 32）。ClamQtPie Users グループを作り、導入した利用者を入れる。サービスを止めてから登録（遅延自動起動。既にあれば更新）し、回復動作（§62）を付けて開始する。削除はサービスを止めて登録を消し、`--purge` ならデータとグループも消す
+- **配布版のサービスの登録**: pywin32 は配布版でも `pythonservice.exe` を登録しようとするため、サービスのクラスに `_exe_name_`（自分の実行ファイル）を付けた
+- **旧版の自動起動の引き継ぎ**: トレイGUI の起動時に、旧版（ポータブルの ClamQtPie・旧名）の自動起動を、このトレイGUI で登録し直す（`AutostartService.refresh_command`・`migrate_legacy`。登録されていなければ登録しない）。通知のクリックの `clamqtpie:` は、トレイGUI が起動のたびに登録し直す
+- **見つけた不具合**: トレイGUI が自動起動のコマンドを文字列でなく一覧で渡していたため、設定画面で「OS起動時自動起動」を保存すると失敗していた（12-4b-1 から）。配布版の自動起動のパスを引用符で囲む（`Program Files` の空白）
+
+Windows の実機（開発用の PC）でインストーラを動かして確かめ、見つかった点を直した:
+- 更新で、動いているトレイGUI を Restart Manager が閉じられず（ほかのセッションの昇格していないプロセスのため。Permission Denied + Session Mismatch）、`ClamQtPie.exe` を上書きできずに止まった。インストーラが自分でトレイGUI・昇格ヘルパーを終わらせ、`CloseApplications=no` にした。静かな更新でもトレイGUI を起動し直す
+- サービスが止まったかの確かめ方を、`sc query` の出力をファイルに書いて読む形にした（止まらなければ導入をやめる）。STOPPED になった後もプロセスが少しの間ファイルを使っていて、削除で使用中のファイルが残ったため、プロセスが終わるまで待つ（10 秒で終わらなければ強制的に終わらせる。インストーラと `setup uninstall` の両方）
+- 2 回目の導入で `setup install` が失敗した（既にグループに入っている利用者を `net localgroup /add` するとエラーになる）。入っていれば何もしない。インストーラは失敗のときに ctl の出力（理由）を表示する
+- 削除で「データも消すか」の確認が、Inno Setup の削除の確認より先に出ていた。後に出す。前の削除で残ったフォルダも消す（`[UninstallDelete]`）
+- 確かめた: 導入（サービスの登録・遅延自動起動・回復動作・グループ・PATH・自動起動）、サインインし直した後に一般の利用者のまま `user.token` を読めて `admin.token` を読めないこと、トレイGUI が昇格せずにサービスの開始を待ってつながること、昇格ヘルパー（UAC → 確認画面 → 実行、UAC の取り消し、確認画面の取り消し）、通知のトーストを既読にすると通知センターから消えること、更新でデータが残ること、削除（データを残す・消す）
+
+Linux の実機（EndeavourOS・KDE Plasma 6 の Wayland・systemd 262）で tar.gz を `install.sh` で導入し、12-4b〜12-4d の全項目が期待どおりであることを確かめた。気になった点を直した:
+- 昇格の確認画面: 開いたときに本文の全体が選択された状態だった。カーソルを先頭に置き、フォーカスを「キャンセル」に置く。root で動くため利用者の画面のテーマにならなかったので、トレイGUI と同じ暗色のテーマで表示する（12-4c-1）
+- 保護された設定の入力欄が、ほかの欄と同じ見た目で変えられないことが分からなかった。無効の入力欄の背景・文字の色を変える（12-4c-2）
+- Plasma 6 では、サインアウトしても利用者の `systemd --user` が止まらず、アプリに新しいグループが付かないことがある（再起動で効いた）。`install.sh`・`clamqtpie-ctl users add` の案内に「使えなければ PC を再起動」を足した。すでにグループに入っている利用者には「入れました」と出さない（12-4d-1・12-4d-2）
+- 確認画面の数字の幅が広く見える点は、root の利用者のフォントの設定によるもので、直していない。`systemctl list-timers` の次の実行の表示は systemd の表示の問題（`NextElapseUSecRealtime` は正しい）
+
+確認: 全テスト（Windows 1025 件・WSL 1037 件、2 回ずつ）成功。Windows で `build_release.py` を実行し、インストーラ（約 68 MB）ができることを確かめた（インストーラの実行は、サービス・グループ・PATH を変えるため、利用者の確認を得てから行う）。WSL で tar.gz を作り、中のサービスが起動・終了できることを確かめた。
+
+## 72. 段階 12-4e: 従来のアプリの削除
+
+12-4 の計画の決めたこと 1（2026-11-02）。トレイGUI（§66〜§69）・配布物（§70・§71）がそろったため、従来のアプリ（ポータブル、1 プロセス。GUI が自分でサービスを組み立てる）を削除した。
+
+- **消したもの**: `app.py`（サービスの組み立て・画面への結線・起動の順番）、`scripts/measure_startup_time.py`（`app.py` の起動時間の計測。§30 の計測は従来のアプリのもの）
+- **起動スクリプト**: リポジトリ直下の `scripts/run_ClamQtPie.bat`・`.sh` は、開発環境からトレイGUI（`tray_main.py`）を起動するものにした（管理者・root は要らない。先にサービスを動かしておく）。`install_service.*`・`uninstall_service.*`（開発中のサービスの登録）はそのまま
+- **設定（schema_version 1）**: `ConfigService` は常にサービスの設定（schema_version 2、`general` を保存しない）として読み書きする（`gui_settings` 引数と `PORTABLE_SCHEMA_VERSION` を除いた）。旧版の schema_version 1 の `config.json` は、読み込むと schema_version 2 として保存し直す（`clamqtpie-ctl migrate` で移した後と同じ）
+- **SMTP パスワード**: `ConfigService` は秘密の保存先（`FileSecretStore`）だけを使い、keyring を使わない（保存先が無ければ「なし」として扱い、保存しようとすると E6003 の `KeyringUnavailableError`）。旧名（ClamAVFrontend）の keyring からの引き継ぎ（`migrate_legacy_smtp_password`・`migrate_legacy_names`）は、`clamqtpie-ctl migrate` が旧版のパスワードを読むときに旧名も探すようにした（`portable_migration.legacy_smtp_password`）。自動起動・URL スキーム・旧名のフォルダの引き継ぎは、これまでどおりトレイGUI の起動時に行う（`take_over_legacy_registrations`）
+- **画面の、サービスを直接使う経路**: リアルタイム保護・スケジュールの画面は、変更を常に画面の中にためておき［変更を保存］でまとめて送る（`bind_services` の `batch` を必須にした。その場でサービス・監視の本体を変える処理と、削除の前の確認を除いた。監視中の反映はサービスが行う）。設定画面は常にサービスの設定を `ConfigProxy` で読み書きする（`service_mode` 引数を除いた。「スキャン」タブ・保護された項目の読み取り専用・1 回の昇格での保存は常に有効）
+- **テスト**: 画面のテストは、`tests/gui_fakes.py` の `FakeServiceApi`（送られた操作を手元の本物のサービスに適用する）と、トレイGUI と同じ `ConfigProxy` で確かめる形に書き直した。従来のアプリだけの動き（keyring への保存、旧名の keyring の引き継ぎ、その場での反映）のテストは除いた
+- **残したもの**: サービスが使う `core/`・`db/`、旧版のデータの移行（`clamqtpie-ctl migrate`、`core/portable_migration.py`）、`core/legacy_migration.py` の自動起動・URL スキーム・旧名のフォルダの引き継ぎ
+- 利用者向けの README（`README.md`・`README_en.md`）と CLAUDE.md の、従来のアプリを前提にした説明は、12-6（設計書の改訂）でまとめて直す
+
+## 73. 段階 12-5a: WebUI の待ち受けとログイン（ループバックだけ）
+
+サービス化・Web API設計書 3.1節・3.3節・3.4節・6.11節。12-5 の計画（internal の `docs/12-5計画.md`）の 12-5a。画面（`web/`）は 12-5b、トレイのサブメニューは 12-5c、二段階認証は 12-5d、HTTPS と LAN は 12-5e。
+
+- **設定**（`api.*`。すべて保護された項目。`GET/PUT /config` には出さない）: `web_enabled`、`web_port`（8766。内部 API と同じなら直す）、`web_username`（`admin`）、`web_password_hash`（scrypt。空なら未設定で、未設定の間は ON にできない。読み込み時に壊れていれば未設定にして OFF）、`web_password_length`、`web_off_at`（UTC。空なら期限なし）、`session_timeout_min`（30）
+- **パスワード**（`core/web_password.py`）: `hashlib.scrypt`（ソルト 16 バイト、n=2^14, r=8, p=1）。照合は `hmac.compare_digest`。ハッシュが無い・ユーザー名が違うときも同じだけ計算する。保存されたハッシュの作り方は n≦2^16 などに限る（設定ファイルを書き換えて照合を重くさせない）。8 文字以上（LAN 許可中は 12 文字。12-5e で使う）
+- **待ち受け**（`api/web_control.py` の `WebController`）: 内部 API と同じルーターで `listener="web"` のアプリを作り、2 つ目の `ApiServer`（スレッド名 `WebUI`）で `127.0.0.1:<web_port>` に待ち受ける。ON のときだけ待ち受け、OFF でセッションをすべて破棄して止める。待ち受けに失敗したらサービスは止めずに OFF にして通知する（9.4節）。止めるときは WebUI の SSE の購読だけを終わらせる（`EventHub.end_all(tag)`）
+- **認証の切り替え**（`api/auth.py`）: 内部 API は Bearer だけ（Cookie は 401）、WebUI は Cookie セッションだけ（Bearer は 401）。セッションの権限は admin。状態を変える要求は、セッションに結び付けた CSRF トークン（`X-CSRF-Token`、ログイン応答の JSON で渡す。Cookie にはしない）と Origin（無ければ Referer。必須）を確かめる。admin の操作（`require_admin`）は再確認から 5 分以内のセッションだけ（E8108）。`PUT /web`・`PUT /web/credentials` は `require_bearer_admin`（WebUI からは 403 E8102）。接続元はループバックだけ（LAN は 12-5e）
+- **ログイン**（`api/routes/web.py`。`/auth/*` は WebUI の待ち受けにだけ付ける）: `POST /auth/session` で新しいセッション ID の Cookie（`HttpOnly`・`SameSite=Strict`・`Path=/`）を発行し、付いていた古いセッションは破棄する。失敗はユーザー名とパスワードのどちらが違ったかを区別しない。同じ接続元から 5 回続けて失敗したら 5 分間 429（E8106）。`DELETE /auth/session` でログアウト、`POST /auth/reauth`（パスワード）で 5 分間「確認済み」。再確認の失敗も同じ回数に数え、ロックしたらセッションも破棄する。ログインの設定を変えたら全セッションを破棄する
+- **タイマー OFF**: `PUT /web` の `off_after_min`（1〜527040 分、`null` で期限なし）か `off_at`（ISO 8601、366 日以内）。サービスは 2 秒ごとの状態の確認のときに時刻を比べ、過ぎていれば OFF にして通知する（`NotificationService.notify_system`）。止まっている間に時刻を過ぎていれば、起動時に待ち受けずに OFF にする
+- **`clamqtpie-ctl web`**: `status`・`enable [--for D | --until T]`・`timer (D | --until T | clear)`・`disable`・`set-login [--username] [--generate | --password-stdin]`・`hash-password`。サービスが動いていれば admin のトークンで `PUT /web`・`PUT /web/credentials` を送り（`elevate_main.AdminApi`。接続先の確認つき）、止まっていれば同じ検査（`web_changes`・`credential_changes`）で設定ファイルを直接変える。パスワードは引数で受け取らない。`config show` はハッシュを「（設定済み）」と表示し、`config set` では WebUI の項目を変えさせない（web のコマンドを案内する）
+- ログイン・ログアウト・失敗・ロック・再確認・ON/OFF をログに残す（接続元付き）。通知の既読のログに経路（WebUI／トレイGUI・管理用コマンド）を加えた（6.10節）
+- 二段階認証のコード（`code`）はログイン・再確認の本文で受け取れるが、12-5d まで使わない。全体のロック（LAN だけが対象）は 12-5e
+
+## 74. 段階 12-5b: WebUI の画面
+
+サービス化・Web API設計書 7.3節・11章。clamav-webui（利用者の別リポジトリ）の仕組みを流用し、配色はトレイGUI（`gui/theme.py`）にそろえた（12-5 の計画の決めたこと 3）。
+
+- **ファイル**: `web/index.html`（1 枚の HTML。ログインと 10 画面を JavaScript で切り替える）、`web/app.js`、`web/style.css`。ビルドの工程は無い。配布物には spec の `_DATAS` で `web/` を入れる
+- **配る部分**（`api/web_static.py`。WebUI の待ち受けにだけ付ける）: `/` と `/web` は `/web/` へ転送、`/web/`・`/web/login` は `index.html`、`/web/app.js`・`/web/style.css` だけを配る（パスから任意のファイルを読まない）。WebUI の応答にはすべて `nosniff`・`X-Frame-Options: DENY`・`Referrer-Policy: same-origin`・`Cache-Control: no-store`、HTML には CSP（`script-src 'self'; style-src 'self'` など。clamav-webui より厳しく、インラインのスタイルも使わない）
+- **流用した仕組み**: fetch の包み（`api()`。エラーの JSON を `ApiError` にする）、`data-action` → `ACTIONS`（フォームは `FORMS`）、表示は `textContent` だけ（`el()` で要素を作る）。clamav-webui のダブルサブミットの CSRF（`csrf_token` Cookie）は使わず、ログイン応答の CSRF トークンをメモリに持つ。画面を読み直したときは `GET /auth/session`（Cookie のセッションが有効なら、そのセッションの CSRF トークンを返す。新設）
+- **画面**: ホーム（状態のカード、クイックスキャン・定義更新・リアルタイム保護・clamd の起動停止）、スキャン（種類・場所、進み具合は SSE、見つかったものの「隔離」、履歴と詳細）、隔離（復元・削除）、除外、リアルタイム保護（開始・停止、検知したときの動作、監視するフォルダ）、スケジュール（追加・編集・有効無効・今すぐ実行・削除、「スリープ中でも起こして実行する」）、定義更新（ログは SSE）、ログ（絞り込み・CSV・消去）、設定（変えられる項目だけ。保護された項目は一覧とコマンドの案内）、診断
+- **admin の操作**: E8108 を受けたら、操作の内容を並べた確認のダイアログ（`<dialog>`）でパスワードを求め、`POST /auth/reauth` の後に 1 回だけやり直す（トレイGUI の UAC と確認画面に相当）。WebUI はトレイGUI と違い、変更をためずにその場で送る（確認から 5 分間は確認を省くため、続けての操作で何度も聞かない）
+- **通知**: 画面上部の「通知」に未読の件数。一覧から 1 件ずつ・すべて既読にできる。`notification`・`notification.acked` で一覧と件数をすぐ直す。新しい通知はページの右下にも出す。ブラウザの OS 通知は HTTPS とあわせて 12-5e
+- **イベント**: `EventSource`（Cookie で認証）。切れて閉じた（ログインの期限切れ・WebUI の停止）ときは、3 秒後にセッションを確かめ、有効ならつなぎ直し、無効ならログインの画面に戻す
+- `GET /status` の `web` に、WebUI の ON/OFF と OFF にする時刻を入れた（画面上部の「この WebUI は 18:30 に OFF になります」）
+- **テスト**（`tests/unit/test_webui_pages.py`）: 応答のヘッダ、配るファイルの限定、内部 API では配らないこと、`innerHTML` などを使わないこと、インラインのスクリプト・ハンドラ・スタイルが無いこと、`data-action`・フォーム・画面とその処理の対応、`app.js` が呼ぶ API のパスが実在すること、扱うイベントをサービスが出していること、`node --check`（node があるとき）
+
+### 74.1 実機の確認（Windows・Linux）を受けて直したこと
+
+- **画面から始めたスキャンの検知も通知にする**: 通知を作っていたのはリアルタイム監視とスケジュールのスキャンだけで、トレイGUI・WebUI・API から始めたスキャンの検知では作らなかった。画面を閉じていても気づけるよう、`core/runtime.py` の `connect_scan_notifications` で `ScanDispatcher.file_scanned` の検知を `NotificationService.notify_detection`（`quarantined=False`。画面からのスキャンは自動では隔離しない）に渡す
+- **WebUI の「隔離」に再確認を求める**: `POST /quarantine` は user の操作で、サービスでは頼んだ利用者のフォルダの中だけに限っていたが、WebUI のセッションは admin として扱うため、どこのファイルでも再確認なしで隔離できた。WebUI の待ち受けでは隔離ファイルの削除・復元と同じく、再確認から 5 分以内に限る（トレイGUI・内部 API の扱いは変えない）
+- **セッションの Cookie の名前**を `session` から `clamqtpie_session` にした。Cookie はポートで分かれないため、このPC で動くほかのアプリ（127.0.0.1 の別のポート）が同じ名前の Cookie を使うと、ログインが上書きされて切れる
+- **WebUI が OFF になった・サービスが止まったとき**: 画面が気づかず、操作するとブラウザの英語のエラーだけが出ていた。`fetch` の失敗を「サービスにつながりません。WebUI が OFF になったか、サービスが止まった可能性があります」にしてログインの画面に戻す。`EventSource` はつなぎ直しを続けて閉じないため、エラーのたびに（重ねずに）3 秒後にセッションを確かめる
+- **変更の一覧はいつも見せる**: 設定の保存は、再確認から 5 分以内だと確認のダイアログが出ず、変更の一覧も見ずに保存されていた。`GET /auth/session` に `reauthenticated` を加え、5 分以内なら `confirm` で一覧を見せる（トレイGUI は毎回、一覧を見せる）
+- **ログの CSV に「コード」の列**（E8101 など）を加えた（トレイGUI の CSV 出力も同じ）
+- **画面**: スキャン履歴の結果を日本語に（完了・中断・失敗）、再確認のダイアログのパスワードの欄に見出し、変更の一覧の見出しの行に「・」を付けない、中立の知らせは灰色の線（赤はエラー・検知、緑は成功だけ）、長い画面をスクロールしてもメニューは見えたまま、幅が狭いときの上部の折り返し、パスの入力欄を広く、除外の入力欄の例を OS によらない書き方に、診断で [注意] があれば上に件数を書き、「伏せ字のレポートをコピー」を加えた
+- **`clamqtpie-ctl web`**: `enable` のエラー（パスワードが未設定）に `web set-login` を案内、`status` は OFF のとき URL を出さない、`config show` はパスワードの文字数（`web_password_length`）も伏せる、`--password-stdin` は端末で手入力するときは入力した文字を出さない（`getpass`）
+
+## 75. 段階 12-5c: トレイの「WebUI」サブメニュー
+
+サービス化・Web API設計書 3.3節・10章。12-5 の計画（internal の `docs/12-5計画.md`）の 12-5c。
+
+- **メニュー**（`gui/webui_menu.py`。トレイのメニューの「WebUI」。サービスにつながってから出す）: 状態の行（「WebUI: ON（21:54 に OFF）」など。押せない）、ブラウザで開く（待ち受けているときだけ）、ON にする（1 時間・8 時間・24 時間・時間を指定...・OFF にするまで。ON の間は押せず、「OFF にする時刻を変更...」を使う）、OFF にする時刻を変更...、OFF にする、ログイン設定...。状態は `GET /web`（user）で、メニューを開くたびと操作の後に読み直す
+- **昇格**: `PUT /web`・`PUT /web/credentials` は Bearer の admin だけなので、管理者の操作の一覧（`api_client/admin_ops.py`）に加え、昇格ヘルパーを通す。確認画面の説明は、ON（いつ自動で OFF にするか）・OFF（ログイン中の WebUI はすべてログアウト）・時刻の変更・ログインの設定（ユーザー名だけ。パスワードは出さない）
+- **ON にするときにパスワードが未設定**なら、先にログイン設定のダイアログを開き、ログインの設定と ON を 1 回の昇格にまとめる
+- **ダイアログ**（`gui/dialogs/webui_dialogs.py`）: OFF にする時刻（長さ `90m`・`8h`・`2d` か日時）、ログイン設定（ユーザー名・パスワード 2 回、または自動で作る 20 文字）、自動で作ったパスワードを 1 回だけ見せる（コピーできる）。入力の検査はサービスと同じ関数（`core/duration_text.py`・`core/web_password.py`）
+- LAN・二段階認証・HTTPS の項目は 12-5d・12-5e で足す
+
+### 75.1 12-5b の実機の確認で出た小さな直し
+
+- `clamqtpie-ctl web enable|timer --until` に時刻だけ（`23:00`）を書けるようにした（今日のその時刻、過ぎていれば明日）
+- 監視するフォルダが無いときにリアルタイム保護を始めようとしたときの文を「監視するフォルダがありません。先に監視するフォルダを追加してください」にした（新しく導入した直後はこの状態から始まる）
+- 診断の伏せ字の版（`POST /diagnostics`）の先頭に、伏せたもの（ホーム・ユーザー名・コンピューター名、アプリのフォルダ、ソケット・clamd のホスト、設定ファイルと clamonacc の場所）と伏せていないもの（ClamAV の実行ファイル・定義のフォルダ）の説明を添えた（`core/diagnostics_service.py` の `MASK_NOTE`）。伏せる基準は以前のレビューで決めたとおり変えない
+
+### 75.2 12-5c の実機の確認で出た直し
+
+- サービスが `ValueError` で断ったとき（入力の誤り・「監視するフォルダがありません…」など）は、その文を応答の `message` にし、`detail` には入れないようにした（`api/errors.py`）。トレイGUI のエラーのダイアログはメッセージとコードだけを出すため、昇格ヘルパーを通した操作では「リクエストの内容が正しくありません [E8100]」だけになり、案内の文が届いていなかった。WebUI でも「リクエストの内容が正しくありません（…）」の前置きが無くなる。断った要求はログにも E8100 で残す（「詳細を見る」で探せるように）。FastAPI の入力の検証（`RequestValidationError`）は、これまでどおり固定の文と項目名だけを返す
+- リアルタイム監視を始めるときに監視するフォルダが無ければ、開始を送る前に案内するようにした（トレイの「リアルタイム監視 ON/OFF」とリアルタイム保護の画面）。サービスに送ると、pkexec・UAC の認証と昇格ヘルパーの確認画面を通った後で断られていた
+- 「WebUI のログイン設定」「WebUI を OFF にする時刻」「WebUI のパスワード」のボタンを「キャンセル」「閉じる」にした（Qt の翻訳は配布物から外しているため、英語のままだった）。「長さで決める」の入力欄の例を短くし、書き方は欄の下に添えた
+- 暗い色の画面で、印の付いていないチェックボックス・ラジオボタンの枠が見えにくい点は、アプリ全体の配色（`gui/theme.py`）の問題のため、ここでは直していない
+
+## 76. 段階 12-5d: 二段階認証（TOTP）
+
+サービス化・Web API設計書 3.3節・6.11節。12-5 の計画（internal の `docs/12-5計画.md`）の 12-5d。
+
+- **計算**（`core/totp.py`）: RFC 6238（HMAC-SHA1、30 秒、6 桁）を標準ライブラリで計算する。前後 1 ステップまで受け付け、一度受け付けたステップ番号より前・同じものは受け付けない（`api.web_totp_last_step`。再起動しても引き継ぐ）。秘密鍵は 20 バイトの乱数（Base32、32 文字）。予備のコードは 10 個（英数字 10 文字、紛らわしい文字を除く。表示は `ABCDE-FGHJK`）で、scrypt のハッシュだけを `api.web_recovery_code_hashes` に保存し、使ったものは消す。QR コードは `segno`（依存に追加。pure Python）
+- **秘密鍵の置き場所**: SMTP パスワードと同じ秘密の保存先（`ConfigService.get/set/delete_totp_secret`、名前 `web_totp_secret`）。`config.json` には入れない。設定済みなのに秘密鍵を読めないときは、二段階認証を外さずにログインを断り、ログに `web totp reset` を案内する。`api.web_totp_enabled` が壊れていても設定済みとして扱う（設定ファイルの破損で二段階認証が外れないように）
+- **ログイン**: 設定済みなら、パスワードに加えて確認コード（予備のコードも可）が要る。パスワードが違っても確認コードの照合を行い（どちらが違ったかを時間で見分けさせない）、使ったことにするのは両方が合ったときだけ。失敗の文は「ユーザー名・パスワード・確認コードのどれかが違います」。失敗はパスワードと同じく総当たり対策の回数に数える。ログインの画面は、二段階認証を設定しているかをログインの前に知らせないよう、確認コードの欄をいつも出す（設定していなければ空欄でよい）
+- **再確認**（`POST /auth/reauth`）: 設定済みなら確認コードで確かめ、パスワードは使わない（設計書どおり）。`POST /auth/session`・`GET /auth/session` の応答の `totp` で、画面はどちらを聞くかを決める
+- **設計書からの変更: 設定の API を `POST /web/totp {"secret", "code"}` の 1 つにした**（設計書は `POST /web/totp/setup` で秘密鍵を作り、`/confirm` で確かめる 2 つ）。どちらも admin の Bearer だけなので、トレイGUI では QR コードの前後で UAC・pkexec と確認画面が 2 回出てしまう。秘密鍵は頼む側（トレイGUI・`clamqtpie-ctl`）が作って QR コードを見せ、利用者が認証アプリのコードを入れた後で、秘密鍵とコードを一緒に送る（昇格は 1 回。サービスは仮の秘密鍵を持たなくて済む）。コードが合えば有効にし、セッションをすべて破棄して、予備のコードをこの応答でだけ返す。解除は `DELETE /web/totp`（秘密鍵・予備のコードを消し、セッションを破棄）
+- **トレイ**: 「WebUI」→「二段階認証の設定...」（設定済みなら「（設定済み）」と付け、「設定し直す」「解除する」を選ぶ）。QR コード・手で入れるときの秘密鍵・コードの欄のダイアログの後、1 回の昇格で送り、予備のコードを 1 回だけ見せる（コピーできる）。昇格ヘルパーの確認画面には、秘密鍵もコードも出さない
+- **clamqtpie-ctl**: `web totp setup | status | reset [--yes]`。setup は端末に文字で QR コード（白地に黒。表示できない文字コードの端末では秘密鍵だけ）と秘密鍵を表示し、コードを入れてもらってから送る（サービスが止まっていれば設定を直接変える）。予備のコードは端末にだけ 1 回表示する。`config show` は予備のコードのハッシュを個数だけにし、`config set` では二段階認証の項目を変えさせない
+- LAN からの接続を許可するときに二段階認証を必須にする確かめと、解除したときに LAN 許可を OFF にするのは、LAN からの接続（12-5e）とあわせて作る
+
+設計の見直し（実機の確認の前に行った。設計書にない点を足した。設計書の本体は 12-6 で直す）:
+
+- **予備のコードを使ったときの知らせ**: ログイン・再確認で予備のコードを使ったら、応答に `recovery_used`・`recovery_codes_left` を付け、画面は残りの数と、設定し直す方法（トレイの「二段階認証の設定...」か `web totp setup`。WebUI からは設定し直せない）を知らせる（見落とさないよう alert）。0 個になったときは「予備のコードがなくなりました」と強めの文にする。常に出す注意・OS の通知は出さない（減るのは使ったときだけのため）。予備のコードだけを作り直す手段は設けない（新しい予備のコードは、設定し直して得る）
+- **確認コードの間違いが続いたらログインを止める**: パスワードは合っていて確認コードだけが違ったログインを `api.web_totp_failures` に数え、ログに「パスワードが漏れているおそれがあります」と残す。10 回（`totp.STOP_FAILURES`）になったら、接続元を問わず（ループバックも）パスワードと確認コードでのログインを止め、トレイに通知してパスワードの変更を勧める。止めている間も、パスワードと予備のコードでのログインは受け付ける。回数を 0 に戻して停止を解くのは管理者の操作だけ（`POST /web/unlock`（admin の Bearer だけ）、トレイの「WebUI」→「ログインの停止を解く」（止めているときだけ出る）、`clamqtpie-ctl web unlock`、パスワードの変更）。時間・ログインの成功・サービスの再起動では戻さない（パスワードが漏れた後に、確認コードを時間をかけて当てられないように）。`GET /web` の `login_stopped`・`web status` に出す。壊れた値は止めた側に倒す
+- **止めている間の応答**: パスワード・確認コードの正否によらず、接続元ごとのロックと同じ 429（E8106）と同じ文にする（止まったことから、パスワードが合っていたと見分けさせない）。そのため接続元ごとのロックの応答からも、残りの分（「約 N 分後」）を外した
+- **認証アプリに登録する名前**: ユーザー名ではなく、この PC の名前（`ClamQtPie:<PC の名前>`。Windows は `COMPUTERNAME`、Linux はホスト名）。複数の PC の WebUI を認証アプリで見分けられ、ユーザー名を変えてもずれない。秘密鍵を作るトレイGUI・`clamqtpie-ctl` がその場で取る
+- **トレイでの設定で確認コードが切れたとき**（Linux 実機の確認で見つけた）: 確認コードは昇格の確認（UAC・pkexec と確認画面）の後でサービスが確かめるので、確認画面で時間をかけると前後 1 ステップを外れて断られる（E6002、detail `code`）。そのときは同じ秘密鍵のまま設定のダイアログを開き直し、断られた理由を出して新しいコードを入れてもらう（秘密鍵を作り直すと、認証アプリに登録し直すことになるため）。受け付ける幅は広げない
+
+## 77. サービスの起動の回数の上限（Linux）の扱い
+
+サービス化・Web API設計書 9.4節の回復動作。12-5d の Linux 実機の確認で、導入 2 回と確認用スクリプトの再起動 2 回で上限に当たり、確認が途中で止まったため見直した（上限の値は変えない）。
+
+- **前提の違い**: Windows の回復動作（`sc failure`）は落ちたときの自動の再起動にだけ効き、手での開始・導入は数えない。Linux（systemd）の `StartLimitBurst=3`・`StartLimitIntervalSec=1d` は、手での `systemctl start/restart`・導入の `enable --now` を含むすべての開始を数え、超えると手での開始も断る（`start-limit-hit`）。回数は `systemctl reset-failed` か PC の再起動で 0 に戻る
+- **導入・更新では数え直す**: `install.sh` は `systemctl enable --now` の前に `systemctl reset-failed clamqtpie.service` を実行する（ctl の `--restart` と同じ扱い）。導入は管理者が意図して行う操作で、上限の対象（落ち続けるサービス）ではないため。導入し直すと回数は 0 に戻り、導入そのものの開始が 1 回目になる
+- **上限で止まっているときの知らせ**: `clamqtpie-ctl status` は、systemd の状態が failed・理由が `start-limit-hit`（`core/service_status.service_stop_reason`）なら、上限で止めていること、原因を確かめる場所（`journalctl -u clamqtpie`・`/var/log/clamqtpie/`）、直したあとに実行する `sudo systemctl reset-failed clamqtpie && sudo systemctl start clamqtpie` を表示する。トレイGUI の「サービスにつながりません」には `clamqtpie-ctl status` の案内を添える（ctl は root で動かすので、Linux は `sudo clamqtpie-ctl status`、Windows は管理者のコマンドプロンプトで、と書く）。数え直して開始するコマンドは作らない（原因を確かめずに起動し直す流れを作らない）。区別は Linux だけ（Windows は回復動作の後も手で開始できる）
+- **確認・デバッグ中**: その PC にだけ drop-in（`/etc/systemd/system/clamqtpie.service.d/debug-no-start-limit.conf`、`[Unit] StartLimitIntervalSec=0`）を置いて上限を外し、終わったら消す。置く・消す・状態を確かめるスクリプトは internal の `tools/` にあり、配布物・ctl には入れない
+- README の困ったときの節への記載は、12-6 の README の書き直しで行う
+
+## 78. 配布物: Python のモジュールを実行ファイルどうしで共有する
+
+段階 12 で実行ファイルが 4 つ（トレイGUI・サービス・昇格ヘルパー・clamqtpie-ctl。Windows は通知のクリックの ClamQtPieActivate も）になり、PyInstaller の既定ではそれぞれが自分の Python のアーカイブ（PYZ）に同じモジュールを持っていた。
+
+- **noarchive**: `ClamQtPie.spec` の Analysis を `noarchive=True` にし、モジュールを `_internal/` に .pyc として置く。実行ファイルは同じ `_internal/` を使うので、同じモジュールが 1 回だけ入る。ファイルの数は増える（Windows で約 830 → 約 2130）が、合計の大きさと起動の時間は減る
+- **入れないもの**: 実行時に使わない `pygments`（mako のエラー表示の色付け・httpx のコマンドから。mako は無ければ色付けなしに切り替える）・`setuptools`・`pkg_resources`・`_distutils_hack`・`pydoc_data` を `_EXCLUDES` に足した
+- **MERGE を使わなかった理由**: PyInstaller の `MERGE` は、実行ファイルどうしで共通の依存（DLL・データ）を 1 か所にまとめる仕組みで、PYZ の中身は対象にしない。また、まとめられた側の実行ファイルは onefile と同じ扱い（展開して使う）になり、onedir の配布物には合わない
+- **測った値**（変更前 → 変更後。Linux は WSL（Ubuntu）でビルドした値。大きさ・起動の時間はビルドした環境の Python・Qt のライブラリで変わり、Arch 系の実機でビルドした変更後の配布物は tar.gz 89.1 MB・展開後 237 MB・1572 ファイル・起動 約 150 ms だった。比べるときは同じ環境の変更前と比べる）:
+
+| | 変更前 | 変更後 |
+|---|---|---|
+| Windows のインストーラ | 70.4 MB | 31.3 MB |
+| Windows の導入後 | 130 MB・833 ファイル | 113 MB・2134 ファイル |
+| Windows の `clamqtpie-ctl --help` の起動 | 764 ms | 157 ms |
+| Linux の tar.gz | 109.3 MB | 73.3 MB |
+| Linux の展開後 | 217 MB・247 ファイル | 199 MB・1513 ファイル |
+| Linux の `clamqtpie-ctl --help` の起動 | 161 ms | 100 ms |
+
+- テスト（`test_service_access.py`）: spec の Analysis が `noarchive=True` で、実行時に使わないものを入れないことを確かめる
+
+## 79. 段階 12-5e1: WebUI の HTTPS（ローカル CA）
+
+サービス化・Web API設計書 3.5節。12-5e は 2 つに分けた（e1: HTTPS とローカル CA、e2: LAN からの接続）。決めたことの記録は internal の `docs/dig/2026-11-05-12-5e.md`。HTTPS は LAN からの接続の前提で、v0.10.0 では `clamqtpie-ctl web tls` だけで有効にする（トレイGUI には出さない）。
+
+- **LAN の範囲**（`core/net_scope.py`）: 各インターフェースの IPv4 のアドレスとネットマスク（psutil）から、直接つながっているサブネットを求める。プライベートアドレス（10/8・172.16/12・192.168/16）だけで、リンクローカル・ループバック・/32 を除く。仮想ブリッジ・VPN（`docker*`・`br-*`・`virbr*`・`veth*`・`tun*`・`wg*`・`vEthernet (WSL…)`・`vEthernet (Default Switch)` など）を名前で除く。Windows のインターフェースの名前は「イーサネット 3」のような表示名で見分けられないため、レジストリのアダプターの説明（DriverDesc。`VirtualBox Host-Only`・`TAP-Windows`・`WireGuard` など）でも除く（実機で VirtualBox のホストだけのネットワーク 192.168.56.0/24 が LAN に入っていたため）。e2 の接続元の検査・待ち受けのアドレスもこれを使う
+- **IPv4 だけ**（設計書からの変更）: 家庭の IPv6 の多くはグローバルアドレスで許可の条件（プライベートだけ）に入らず、一時アドレスは 1 日ほどで変わって証明書の作り直しが続くため。ループバックの `::1` は今までどおり
+- **ローカル CA**（`core/local_ca.py`）: ECDSA P-256・2 年・`BasicConstraints(ca, pathlen=0)`・Name Constraints（critical）。許す名前は localhost・このPC の名前（短い名前・FQDN・`.local`・`.lan`・`.home.arpa`。DNS に使えない文字を含む名前は入れない）、許す IP は 127.0.0.0/8 と CA を作った時点の LAN のサブネット。サーバー証明書は 1 年・SAN は名前と 127.0.0.1・各 LAN のアドレス（CA の Name Constraints の外のものは入れない）。置き場所は `<データ>/tls/`（`ServicePaths.tls_dir`。鍵は `write_private_file` で SYSTEM・root だけ）
+- **自動更新**: WebUI を HTTPS で待ち受けるときと 1 日 1 回（`WebController.check_tls`。2 秒ごとの定期処理から呼び、前回から 1 日たったときだけ確かめる）、サーバー証明書の名前・アドレスの変化か期限まで 30 日を切ったことを見て作り直し、待ち受けだけを始め直す（セッションは残す）
+- **CA は自動では作り直さない**: 作り直すとすべての端末で登録のやり直しになるため。期限の 30 日前から・サブネットが CA を作ったときと変わったら、`GET /web` の `tls_info.notes`・`web status`・`web tls status` で `web tls reset-ca` を案内する。期限が切れたら作らずに、前のサーバー証明書があれば HTTPS のまま待ち受ける（ブラウザに警告が出る。LAN 許可を OFF にするのは e2）
+- **このPC の信頼ストアには登録しない**: ループバックは HTTP でもブラウザが安全な接続として扱うので、このPC で HTTPS を使う利点は小さく、信頼ストアの書き換えは乗っ取られたときの影響を広げる。このPC もほかの端末と同じく `web tls export-ca` で書き出して手で登録する
+- **CA 証明書の配布**（設計書からの変更）: HTTP の別ポート（`api.web_ca_port`、8767）は作らない。HTTPS の WebUI がログインの前でも `/web/ca.crt`（DER。Android・Windows・macOS でそのまま開ける）と `/web/ca-info`（SHA-256 のフィンガープリント）を配り、ログイン画面に「CA 証明書をダウンロード」とフィンガープリントを出す。守りの中心はフィンガープリントの照合で、別ポートで得られるのは「警告を一度越えなくてよい」ことだけのため。HTTP のときは 404。`http://` で開いたときの HTTPS への転送は無い
+- **待ち受け**: `ApiServer(tls=(サーバー証明書, 鍵))` で uvicorn に渡す（TLS 1.2 より古いものは Python の既定で受け付けない）。HTTPS の方式を変えたら待ち受けを始め直し、セッションをすべて破棄する
+- **Cookie**: HTTPS のときは `__Host-clamqtpie_session`（Secure・Path=/・Domain なし）。HTTP のときは今までどおり `clamqtpie_session`。どちらかは要求の scheme（`proxy_headers` は無効なので実際の接続のもの）で決める。HSTS は付けない。状態を変える要求の Origin は、scheme も含めて Host と同じであること（HTTPS の WebUI に HTTP のページから送らせない）
+- **CA を作り直した後の古いタブ**（Linux 実機の確認で見つけた）: 作り直す前から開いていたタブは、証明書の検証が通らずに要求が失敗するが、ブラウザの JavaScript には理由（証明書のエラーか）が渡らず、「サービスにつながりません」と見分けられない。そのため、つながらないときの文に「HTTPS の証明書（ローカル CA）を作り直した場合は、ページを読み直してください」を足した
+- **API**: `PUT /web/tls {"mode": "off"|"local_ca"}`・`POST /web/tls/reset-ca`（admin の Bearer だけ。reset-ca は前の CA のフィンガープリントを返す）。`GET /web` の `tls`・`tls_info`
+- **clamqtpie-ctl**: `web tls on|off|status|export-ca [FILE]|reset-ca [--yes]`。サービスが止まっていれば設定ファイルを変える・CA を消す（CA を作るのはサービスだけ）。reset-ca は、ローカル CA は失効させられないので前の CA を各端末から消すよう、フィンガープリント付きで案内する。CA の鍵を書き出すコマンドは無い。`web tls on|off` は、WebUI が ON なら切り替えた後の URL も出す（scheme が変わるため。Windows 実機の確認で、前の `http://` の URL を開いてしまったことから）
+- **Windows で CA 証明書を登録するとき**（Windows 実機の確認で見つけた）: .crt を開いて証明書のインポート ウィザードで「証明書の種類に基づいて、自動的に証明書ストアを選択する」を選ぶと、CA が「中間証明機関」に入る。Firefox 系のブラウザ（Floorp で確認）は Windows の証明書も読み込む（`security.enterprise_roots.enabled`）ため、ブラウザ自身に CA を登録して信頼しても、同じ CA が Windows の中間証明機関にあると `SEC_ERROR_UNKNOWN_ISSUER` で警告が消えない（中間証明機関から消すと通る。同じ作りのテスト用の証明書で再現と解消を確かめた）。README の登録手順（12-6）では、Windows は「証明書をすべて次のストアに配置する」→「信頼されたルート証明機関」を選ぶこと、Firefox 系は中間証明機関に入っていたら消すことを書く
+- **設定**: `api.web_tls`（`"off"`・`"local_ca"`、既定 off）。利用者が用意した証明書（`"custom"`・`use-cert`）は v0.10.0 では受け付けない（不正な値として off に戻す）
+- 依存に `cryptography` を加えた（証明書の作成。標準ライブラリの `ssl` では作れない）
+- **配布物の python3t.dll**（ビルドで見つけた）: Windows の Python 3.15 用の cryptography（abi3・abi3t の両方の印の wheel）の `_rust.pyd` は `python3t.dll` を読み込む。開発環境では Python 本体の `abi3t-compat/python3t.dll` が読み込まれるが、PyInstaller はこれを集めないため、配布物では「DLL load failed while importing _rust」になった。spec の `_extra_binaries()` で `_internal/` に入れる
+- セキュリティの確かめに bandit を使う（開発用。Windows の `.venv` は Python 3.15 で PyYAML のビルド済みの版が無いため、WSL の venv に入れた）。12-5e1 で変えたファイルに新しい指摘はなかった
+## 80. 導入した直後のサインインし直し（Windows）
+
+Windows の実機の確認（#46）で見つけた。グループのメンバーシップはサインインしたときにトークンに入るため、インストーラが利用者を ClamQtPie Users に新しく入れても、サインインし直すまで効かない。インストーラが最後に元の利用者の権限で起動するトレイGUI は user.token を読めず、E8110 で終わっていた（それまでの確認は管理者の PowerShell からインストーラを動かしていて、トレイGUI も昇格して起動し、Administrators の権限で読めていたため表に出なかった）。グループを消して作り直したときも、SID が変わるので同じことが起きる。
+
+- **clamqtpie-ctl setup install**: 利用者をグループに新しく入れたら、終了コード 10（`EXIT_SIGNIN_REQUIRED`）で返す（`setup_install` が True を返す）。すでに入っていれば今までどおり 0
+- **インストーラ**: 10 なら完了の画面で再起動の確認を出す（`NeedRestart`。文は `[Messages]` の `FinishedRestartLabel` で、サインアウトしてサインインし直すまでトレイGUI は使えないことと、その代わりに今すぐ再起動するかを尋ねる）。トレイGUI は起動しない（`[Run]` の `Check: not SignInRequired`）。次のサインインで自動起動から起動する。更新（すでに入っている）は今までどおり
+- **トレイGUI の E8110**: グループに入っているのに、今のサインインのトークン（Linux は補助グループ）に入っていなければ（`service_access.signin_is_stale`）、追加の依頼ではなく、サインアウトしてサインインし直す（だめなら再起動）よう案内する。Windows は `CheckTokenMembership`、Linux は `os.getgroups()` で確かめる。確かめられなければ今までの案内
+- Linux の install.sh は、以前からグループに入れたときに「サインアウトしてサインインし直す」と表示している
+## 81. サービスを通常の自動起動にする（Windows）
+
+段階 12-4d からサービスは遅延自動起動（`--startup delayed`）だったが、PC を起動してサインインするたびに、トレイGUI がサービスの起動（自動起動の約 2 分後）までつながらず、「サービスにつながりません（E8105）」の警告が出ていた（Windows の実機で確認）。遅延にしなければならない理由は無く、ウイルス対策のサービスは起動の直後から動いているほうが役割に合う（リアルタイム監視・スケジュールが早く始まり、サービスが止まっている間に別のプロセスがポートで待ち受けられる時間も短くなる）ため、通常の自動起動（`--startup auto`）にした。
+
+- `register_service` は導入でも更新でも `--startup auto` で登録する（pywin32 は `auto` のとき遅延の設定を外すので、遅延で導入済みのサービスも更新で通常の自動起動になる）
+- clamd がまだ起動していなくても、サービスは今までどおりつなぎ直す
+## 82. 段階 12-5e2: WebUI の LAN からの接続（試験的）
+
+サービス化・Web API設計書 3.1節・3.3節。決めたことの記録は internal の `docs/dig/2026-11-05-12-5e.md`。v0.10.0 では試験的で、有効にできるのは `clamqtpie-ctl web lan on` だけ（トレイGUI には設定の項目を出さない）。
+
+- **許可の条件**（`core/web_lan.lan_problems`）: HTTPS（ローカル CA）・二段階認証を設定済み・パスワードが 12 文字以上（`web_password.MIN_LENGTH_LAN`）。満たさなければ `PUT /web {"lan": true}` は 400。HTTPS の無効化（`tls_changes`）・二段階認証の解除（`disable_totp`。ctl の `web totp reset` も）・12 文字より短いパスワード（`credential_changes`）・CA の期限切れ（`_prepare_tls`・`check_tls`。通知する）で `api.web_lan` を false に戻す。設定ファイルを書き換えて条件を満たさない true にしても、読み込むときに false に直す
+- **WebUI を OFF にしても許可は残す**（dig Q9）。ON にすると LAN からも待ち受ける。LAN から待ち受けていることは隠さず見せる: `web status`、トレイの WebUI のサブメニュー（「LAN からの接続: 許可（試験的）」の行）、トレイから ON にするときの昇格の確認画面（本文に `lan: true` を付けて送り、「LAN からも接続できます」と出す）、WebUI の画面の上の帯
+- **待ち受け**: HTTPS で待ち受けるときだけ、ループバックと LAN の各アドレス（`LanScope.listen_hosts`）の同じポートで待ち受ける（`ApiServer(hosts=...)`。uvicorn にソケットを複数渡す）。`create_listen_socket` は、ループバックのほかは `allow_lan` のときの LAN のアドレス（プライベートの IPv4）だけを受け付ける（`0.0.0.0` などで待ち受けない）。LAN のアドレス・サブネットの変化は 1 分ごとに確かめ（`check_lan`）、変わったら待ち受けを始め直す（サーバー証明書も、名前・アドレスが変われば作り直される）
+- **接続元・Host**（`api/auth._check_web_request`）: LAN から待ち受けているときだけ（`web.scope`）、接続元に LAN のサブネットを、Host にこのPC の名前（短い名前・`.local`・`.lan`・`.home.arpa`・FQDN）と LAN のアドレスを加える。Origin が Host と同じであることは今までどおり
+- **セッション**: LAN からの接続を許可している間の有効期限は 15 分（設定の値がもっと短ければそちら。`web_lan.session_timeout_min`）。許可を変えたらセッションをすべて破棄する
+- **全体のロック**（`LoginGuard.lan_failure`）: LAN からのログイン・再確認の失敗が 1 時間に 30 回になったら、LAN からのログインを 15 分止めて通知する（接続元を変えながらの総当たり）。このPC のブラウザからのログインは止めない。接続元ごとのロック（5 回で 5 分）は今までどおり
+- **Windows のファイアウォール**: LAN から待ち受けるときに受信の規則 `ClamQtPie WebUI`（TCP の WebUI のポート、`remoteip=localsubnet`、`profile=private`、サービスの実行ファイルだけ）を作り直し、待ち受けをやめたら消す。削除（`setup uninstall`）でも消す。LAN のネットワークがパブリックなら、規則は広げずに「プライベートに切り替えるとつながる（信頼できないネットワークでは切り替えない）」と知らせる（`Get-NetConnectionProfile`。dig Q8）
+- **Linux のファイアウォール**: 変えない。ufw・firewalld が有効なら開け方を、無効なら注意を知らせる（`web status` の「注意」）
+- **トレイGUI の LAN・HTTPS の設定の項目と、隠し設定 `api.web_lan_menu` は作らなかった**（全体の dig で、v0.10.0 では隠す前提だった）。隠したまま使われない UI を足すより、試験的でなくすときにトレイの項目とあわせて作るほうが、確かめる範囲が小さいため
+- `clamqtpie-ctl web lan on|off`。HTTPS の無効化・二段階認証の解除・短いパスワードで許可が OFF になったら、そのことも表示する。`api.web_lan` は `config set` では変えさせない
+- **`clamqtpie-ctl web tls renew`**（`POST /web/tls/renew`）: CA はそのままで、サーバー証明書だけを作り直す。Windows の実機の確認（Android の Firefox）で見つけた: 端末で警告を越えて証明書の例外を作ると、後で CA を登録しても、例外がある間は「接続が安全ではありません」と表示され続け、Android の Firefox には例外を消す画面が無い。例外はそのときのサーバー証明書に結び付くため、サーバー証明書を作り直すと使われなくなり、CA で確かめられる（実機で確かめた）。CA の登録はやり直さなくてよい
+- **`clamqtpie-ctl config set --restart` の止まるのを待つ処理**（Windows 実機の確認で見つけた不具合）: `sc stop` の後、`sc query` に RUNNING が無いことで止まったとみなしていたため、止まる途中（STOP_PENDING）で設定を書き換えて開始し、開始が 1056（動いている）で失敗していた（止まる途中のサービスが設定を上書きするおそれもある）。STOPPED（か登録が無い）になるまで待つ（`service_status.service_stopped`）
+## 83. OS の定義更新サービス（clamav-freshclam）の開始・停止（Linux）
+
+Linux の実機の確認で見つけた。clamav-freshclam が動いていると、ClamQtPie の自動更新は重ねて更新しないよう見送る（段階 12-3c）が、見送るたびに「実行しませんでした」をログに残していて、自動更新の間隔ごとに同じ行が並んでいた。また、ClamQtPie からは clamav-freshclam を止められず、ClamQtPie の自動更新に任せたくても端末で `systemctl` を使うしかなかった。
+
+- **定義更新の画面**（トレイGUI の「セキュリティ インテリジェンス」・WebUI の「定義更新」）に「OS の定義更新サービス (clamav-freshclam)」の欄を足した。状態（動いています／止まっています）、PC の起動時に自動で起動する（する／しない）、誰が定義を更新しているか（「定義の更新は OS のサービスが行っています」／「ClamQtPie が自動更新します」）を出し、開始・停止のボタンを置く。clamav-freshclam が無い OS（Windows・未導入・systemd が無い）では出さない
+- **停止は `systemctl disable --now`、開始は `systemctl enable --now`**（`core/freshclam_service.py`）。止めても次の起動でまた動くと、ClamQtPie の自動更新は見送ったままになるため、今の状態と PC の起動時の両方を揃える。片方だけ違う（端末で `stop` だけした等）ときは、どちらのボタンも押せる。状態は `systemctl show -p LoadState -p ActiveState -p UnitFileState` で読む
+- **API**: `GET /updates/freshclam-service`（user）、`PUT /updates/freshclam-service {"enabled": bool}`（admin。トレイGUI は昇格の確認画面、WebUI は再確認）。サービスは root で動くため `systemctl` をそのまま呼ぶ（root でなければ pkexec）。失敗は E8004
+- **見送りのログ**: 見送りが始まったときだけ記録し、OS のサービスが動いている間は記録しない。OS のサービスが止まったら覚えを消し、また動いて見送るときに記録する（サービスの起動ごとにも 1 回記録する）
+
+## 84. コンソールのウィンドウが一瞬見える（Windows）
+
+Windows の実機の確認（インストーラで入れたとき）で見つけた。ウィンドウを持たないプロセス（トレイGUI など）がコンソールのコマンドをそのまま起動すると、子プロセスごとに新しいコンソールが開き、一瞬見える。Windows 11 で既定の端末が Windows Terminal（「Windows に任せる」を含む）だと、Windows Terminal のウィンドウが開く（この PC で、ウィンドウを持たない Python から確かめた。`SW_HIDE` を付けて起動する Inno Setup の `Exec` と、`CREATE_NO_WINDOW` では開かず、指定なしでは開いた）。
+
+- 指定が無かったのは、トレイGUI が通知（Toast）を出す・消す PowerShell、サインインし直しの判定の `net localgroup`、診断の `powercfg`、サービスの状態の `sc query`、`clamqtpie-ctl` の `setup`（`sc`・`icacls` など）とサービスの開始・停止、Windows の freshclam。インストールの直後にトレイGUI が起動して未読の通知を出すときなどに見えていた
+- Windows でコンソールのコマンドを起動するところには、すべて `core/exec_path.no_window_kwargs`（`CREATE_NO_WINDOW`）を付ける（`clamd_process` にあったものを移した。ctl・サービスの状態の確認から PySide6 を読み込まないように）。新しく起動するところを足すときも付ける
+
+## 85. 監視するフォルダの案内・呼び方・断った要求のログのカテゴリ（#43 の持ち越し）
+
+段階 12-5c の Linux 実機の確認（#43）で挙がった気になった点のうち、v0.10.0 の前に直すと決めた 3 点。
+
+- **WebUI でも先に案内する**: WebUI の「始める」は、パスワードの再確認の後でサービスに断られていた（E8100）。トレイGUI と同じく、有効な監視するフォルダが無ければ、再確認の前に「監視するフォルダがありません。先に、リアルタイム保護の画面の「追加」から…」と案内して送らない（`web/app.js` の `toggleRealtime`）。サービスの確かめ（`api/actions.py`）は残す
+- **呼び方をそろえた**: 画面によって「監視対象」「監視対象フォルダー」「監視するフォルダ」が混ざり、案内の文は「「追加」から」と書いていたのにトレイGUI のボタンは「監視対象を追加」だった。利用者に見せる文（トレイGUI の画面・ボタン・案内、昇格ヘルパーの確認画面、ログ、ctl の migrate の表示、E2001 の文）は「監視するフォルダ」にした。トレイGUI のボタンは「フォルダを追加」「フォルダを外す」「有効/無効を切替」で、案内の文はそのボタンの名前を指す（WebUI のボタンは「追加」「外す」）。トレイGUI の「フォルダー」も「フォルダ」にした。コードのコメント・変数名は変えていない
+- **断った要求のログのカテゴリ**: 断った要求（E8100・E8102）のログはカテゴリが付かず「システム」に入り、リアルタイムの操作を断ったものが「リアルタイム」の絞り込みで出なかった。API のパスの先頭で、`scans` はスキャン、`realtime` はリアルタイム、`updates` は更新、`quarantine` は隔離にし、ほかはシステムのまま（`api/errors.py` の `_category_for`）。スケジュールはスキャンと更新の両方があるため、システムのまま
+- **E6001 の文**: 「実行ファイルの配置場所の書き込み権限を確認してください」はポータブル版のときの文で、設定をサービスがプログラムと別の場所（`%ProgramData%\ClamQtPie`・`/etc/clamqtpie`）に保存する今の形に合わないため、「設定ファイルの置き場所の空き容量と書き込み権限を確認してください」にした
+
+#52 の Linux 実機の確認で挙がった気になった点のうち、この PR で直したもの。
+
+- **外す予定の行の表示**: トレイGUI の監視するフォルダの一覧で、外す予定の行の「有効」の欄が「削除（保存前）」と出て、ボタン・確認画面の「外す」とそろっていなかった。「外す（保存前）」にした（`PendingEdits.state_text` の `removed_label`）。除外・スケジュールの一覧は「削除」のまま
+- **［フォルダを外す］の表示**: 外す予定の行をもう一度［フォルダを外す］で選ぶと外すのをやめる動きは残し、外す予定の行を選んでいる間はボタンを［外すのをやめる］、保存前の追加の行なら［追加をやめる］と出して、押すと何が起きるかを示す（`RealtimeScreen._update_remove_target_button`）
+- **同じフォルダの重複の登録**: 重複の確かめが文字列の完全一致だけで、`/tmp/` と `/tmp` のような書き方の違いでは同じフォルダを 2 回登録できた。`os.path.normpath`（Windows は `normcase` も）でそろえて比べ、`normpath` の形で保存する（`api/actions.py` の `add_watch_target`）。すでにある書き方の違う行は消さない
+
+同じ確認で挙がった、WebUI での変更がトレイGUI の一覧に出ない件（サービスが変更の知らせを出していない）は、別の PR で直す。
+
+## 86. v0.10.0 に向けた資料の改訂（12-6 の先に済ませる分）
+
+全体の dig（internal の `docs/dig/2026-11-05-app-overall.md` の Q5）で、v0.10.0 の前に済ませると決めた資料。
+
+- **README・README_en**: サービス化した形に書き直した（構成・置き場所、インストーラと `install.sh` での導入、ポータブル版からの移行、管理者の操作と保護された設定、定義更新と clamav-freshclam、WebUI・二段階認証・HTTPS（CA の登録の手順。Windows のストアの選び方、Firefox 系と Windows の中間証明機関、Android と Android の Firefox）・LAN からの接続（試験的）、困ったとき（E8105・起動の回数の上限・E8110・WebUI）、開発の手順）。冒頭で導入の方法が変わったことと移行の手順を目立たせた
+- **CA 証明書の取り出し方**: `/web/ca.crt` も HTTPS で配るため、別の端末で開くと警告を越えることになる。README では、PC で `web tls export-ca` で書き出してファイルで渡す方法（警告を越えない）を先に書き、ブラウザでダウンロードする方法には、登録した後に `web tls renew` で証明書の例外を使われなくする手順を添えた
+- **設計書**: `docs/インストーラ_パッケージング設計書.md` に 10 章、`docs/エラーコード一覧_例外設計書.md` に 8 章（段階 12 改訂）を足した。ほかの設計書（基本設計・詳細設計・画面設計・タスクトレイ常駐アプリプロセス設計・テスト仕様）の改訂は v0.10.0 の後に行う
+
+## 87. WebUI・ほかのトレイGUI で変えた一覧が、トレイGUI の画面に出ない
+
+#52 の Linux 実機の確認で見つかった（`dev` からあった）。WebUI で監視するフォルダを足しても、トレイGUI の「リアルタイム保護」の画面には、トレイGUI を起動し直すまで出なかった。
+
+- 原因: `api/actions.py` は変えた後に `ApiContext.notify_changed` を呼ぶが、サービス（`api/service_api.py`）はこれを渡しておらず、何も知らせていなかった（1 プロセスの形のときは `app.py` が画面を読み直していた。12-4e で `app.py` を除いたときに抜けた）。除外・スケジュール・隔離・ログ・clamd の停止・clamav-freshclam の開始・停止も同じだった
+- 直し方: サービスは `notify_changed` に `api/events.py` の `data_changed_publisher` を渡し、変えた対象を `data.changed`（`{"what": "targets"}` など。対象は `DATA_CHANGED_TARGETS`）で知らせる。設定は `config.changed`、スキャン・定義の更新の開始は `scan.started`・`update.started`、監視の開始・停止は `status` で知らせているため重ねない
+- トレイGUI は `data.changed` で、その一覧を読み直す（`tray_main.reload_changed_screens`）。保存していない変更は残す。サービスに無くなった行（ほかで消した行）への保存していない変更は捨てる（`PendingEdits.prune`。保存すると E8109 になるため）。イベントを受けられなかった間（つなぎ直しの途中など）の変更も出るよう、「リアルタイム保護」「スケジュール」の画面を開いたときにも読み直す
+- WebUI も、開いている画面が対象なら読み直す（`web/app.js` の `DATA_CHANGED_SCREENS`）。トレイGUI で変えたものが、開いている WebUI に出なかったのも同じ原因だった
+
+## 88. トレイGUI とテストが一時フォルダを消さずに溜める（#55）
+
+#54 の Linux 実機の確認で見つかった。
+
+- トレイGUI・確認画面（`elevate_main.py`）は、数値・日付の入力欄の矢印の画像を、起動のたびに新しい一時フォルダ（`QTemporaryDir`、`/tmp/ClamQtPie-XXXXXX`）に書いていた。モジュールの変数に持たせていただけで、Python の終了のときに PySide6 のオブジェクトが壊される保証がないため、［終了］で閉じても消えずに残った。ログアウト・kill で終わったときも残る
+  - 直し方: 決まった場所（ユーザー単位のキャッシュ。Windows は `%LOCALAPPDATA%\clamqtpie\theme`、Linux は `$XDG_CACHE_HOME/clamqtpie/theme`（無ければ `~/.cache/clamqtpie/theme`））に、起動のたびに上書きで書く。終わり方によらず溜まらないため、終了時の削除は要らない
+  - トレイGUI と確認画面が同時に書いても壊れた画像を読まないよう、別の名前で書いてから `os.replace` で置き換える
+  - pkexec の後の確認画面（root）は root のホームの下に書くため、ユーザーのフォルダに root のファイルはできない
+  - フォルダを作れない・書けないときは、これまでどおり矢印なしのまま動く
+- `tests/unit/test_notification_service.py` の `test_smtp_ssl_rejects_untrusted_certificate` は、試しの証明書を `tempfile.mkdtemp()` に作って消していなかった。`tmp_path` を使う
+- 以前に溜まった `/tmp/ClamQtPie-*`・`/tmp/tmp*` は消さない（OS の一時フォルダの片付けに任せる）
+
+## 89. v0.10.0 の公開
+
+段階 12（サービス化・WebUI。§55〜§88）を v0.10.0（ベータ）として公開する。`core/version.py` の `APP_VERSION`、`version_info.txt`、`build_release.py` のビルド例を 0.10.0 にそろえた。
+
+- 導入の方法が変わる（ポータブル版をやめ、Windows はインストーラ、Linux は `install.sh`）。v0.9.x のデータは `clamqtpie-ctl migrate`（Windows はインストーラが尋ねる）で移す
+- DB は起動時に 0007 まで上がる
+- 12-6 のうち、基本設計・詳細設計・画面設計・タスクトレイ常駐アプリプロセス設計・テスト仕様の改訂は v0.10.0 の後に行う（§86）

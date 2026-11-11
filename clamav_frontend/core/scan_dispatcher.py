@@ -141,6 +141,9 @@ class ScanWorker(QObject):
                 # （続行するとファイル数分のエラーダイアログが表示されてしまう）
                 errors += 1
                 aborted = True
+                # 理由をログに残す（サービスではジョブ・履歴に要約しか残らず、管理者に理由が分からない）
+                logger.error(f"{self._label}を中断します: {exc.message} (detail: {visible_controls(str(exc.detail))})",
+                             extra={"error_code": exc.code})
                 self.error.emit(exc)
                 break
             except AppError as exc:
@@ -249,20 +252,29 @@ class ScanWorker(QObject):
                 for root, dirs, filenames in os.walk(target):
                     if self._stop_requested:
                         break
-                    # 立ち入らないフォルダ（Linuxの/proc等）はos.walkの探索対象から外す
+                    # 立ち入らないフォルダ（Linuxの/proc等）とリンク・ジャンクションはos.walkの探索対象から外す
                     dirs[:] = [
                         d for d in dirs
                         if os.path.normcase(os.path.normpath(os.path.join(root, d))) not in self._skip_dirs
+                        and not _is_link(os.path.join(root, d))
                     ]
                     for name in filenames:
                         candidate = Path(root) / name
-                        if not is_excluded(str(candidate)):
+                        if not _is_link(str(candidate)) and not is_excluded(str(candidate)):
                             files.append(candidate)
             else:
                 for entry in target.iterdir():
-                    if entry.is_file() and not is_excluded(str(entry)):
+                    if not _is_link(str(entry)) and entry.is_file() and not is_excluded(str(entry)):
                         files.append(entry)
         return files
+
+
+def _is_link(path: str) -> bool:
+    """リンク・ジャンクションか。スキャンの対象のフォルダの中から外の場所をたどらないために使う
+    （os.walk は Windows のジャンクションをたどる。一般の利用者でも、ほかの利用者のフォルダを指すジャンクションを
+    自分のフォルダに作れるため、サービスでは頼んだ利用者のフォルダの外を列挙してしまう。12章 R-9）。
+    リンクの先が対象の中にあれば、そこを列挙したときに検査する"""
+    return os.path.islink(path) or (hasattr(os.path, "isjunction") and os.path.isjunction(path))
 
 
 class ScanDispatcher(QObject):

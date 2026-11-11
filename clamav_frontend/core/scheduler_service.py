@@ -2,6 +2,17 @@
 SchedulerService — APScheduler連携によるスケジュールジョブ管理
 
 参照: 画面設計書4章、要件定義書、エラーコード一覧・例外設計書E4001〜E4003
+
+取りこぼし対策（サービス化・Web API設計書 9章。段階 12-3c）:
+- 同じジョブの重なった回は1回にまとめ（coalesce）、予定の時刻を過ぎても misfire_grace_sec 秒までは実行する
+- 電源オフ・スリープ中に過ぎた回は、起動時とスリープからの復帰時（catch_up_missed）に1回だけ取り返す。
+  APScheduler はジョブを覚えていない（メモリだけ）ため、各ジョブの最終実行日時（last_run）と実行周期から判断する
+- 復帰時は APScheduler の待ち時間も計算し直させる（wakeup。Linux では待ち時間にスリープ中の時間が数えられず、
+  そのままでは次の回がスリープしていた時間だけ遅れる）
+- inhibit_sleep なら、ジョブの実行中はスリープを防ぐ（core/sleep_inhibit.py）
+- wake が有効なジョブのうち、次の実行時刻が最も早いものの WAKE_LEAD 前に、スリープから起こすタイマーを
+  1つだけ設定する（core/wake_timer.py。9.1節）。ジョブの追加・変更・削除・有効無効の切り替え・実行の後と、
+  復帰時に設定し直す。定義の自動更新では起こさない
 """
 from __future__ import annotations
 
@@ -15,6 +26,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from core.exceptions import JobAlreadyRunningError, JobExecutionError, JobValidationError
+from core.sleep_inhibit import prevent_sleep
+from core.wake_timer import WakeTimer
 from db.database import DatabaseService
 from db.models import Schedule
 
@@ -24,6 +37,14 @@ VALID_SCAN_TYPES = ("scan", "update")
 _AUTO_UPDATE_JOB_ID = "auto_update"
 #: 前回の更新から間隔が過ぎている場合に、起動（登録）から自動更新を始めるまでの待ち（clamdの起動を待つため）
 _AUTO_UPDATE_START_DELAY = timedelta(minutes=2)
+#: 取りこぼした回を取り返すまでの待ち（起動直後・復帰直後は、clamd やネットワークの準備を待つ）
+CATCH_UP_DELAY = timedelta(minutes=1)
+#: 予定の時刻を過ぎても実行する猶予（秒）の既定（設定の schedule.misfire_grace_sec）
+DEFAULT_MISFIRE_GRACE_SEC = 3600
+#: スリープから起こす時刻を実行時刻より早める長さ（ネットワークや clamd の準備を待つため）
+WAKE_LEAD = timedelta(minutes=2)
+#: 起こす時刻をまだ OS に設定していない印（起動の直後は、前回の異常終了で残ったタイマーも消すため必ず設定する）
+_WAKE_UNKNOWN = object()
 #: 標準のcron式の曜日（0と7が日曜）→ APSchedulerの曜日名
 _CRON_WEEKDAY_NAMES = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
 
@@ -87,6 +108,8 @@ class ScheduleRecord:
     scan_type: str
     last_run: str
     next_run: str
+    #: スリープ中でも起こして実行する（段階 12-3c）
+    wake: bool = False
 
 
 def _to_record(row: Schedule) -> ScheduleRecord:
@@ -99,6 +122,7 @@ def _to_record(row: Schedule) -> ScheduleRecord:
         scan_type=row.scan_type,
         last_run=row.last_run or "",
         next_run=row.next_run or "",
+        wake=bool(row.wake),
     )
 
 
@@ -109,6 +133,9 @@ class SchedulerService:
         run_scan: Callable[[str, str], object],
         run_update: Callable[[], None],
         on_job_fail: Callable[[str, str], None] | None = None,
+        misfire_grace_sec: int = DEFAULT_MISFIRE_GRACE_SEC,
+        inhibit_sleep: bool = False,
+        wake_timer: WakeTimer | None = None,
     ) -> None:
         """
         run_scan: スキャンジョブ実行時に呼ばれるコールバック（対象パス, ジョブ名）。
@@ -116,12 +143,24 @@ class SchedulerService:
         run_update: 定義更新ジョブ実行時に呼ばれるコールバック
         on_job_fail: ジョブ失敗時に呼ばれるコールバック（ジョブ名, 失敗理由）。
                      通知機能詳細仕様書の on_job_fail 通知に接続する想定（Phase7）。
+        misfire_grace_sec: 予定の時刻を過ぎても実行する猶予（秒）。重なった回は1回にまとめる
+        inhibit_sleep: ジョブの実行中はスリープを防ぐ（サービス）
+        wake_timer: wake が有効なジョブのためにスリープから起こすタイマー（サービス。None なら起こさない）
+        on_job_finished: 最終実行結果を記録したときに呼ばれる（ジョブID, ジョブ名, 結果, 補足）。
+                         結果は "success" | "failure"。Web API の schedule.finished に使う
         """
         self.db = db
         self._run_scan = run_scan
         self._run_update = run_update
         self._on_job_fail = on_job_fail
-        self._scheduler = BackgroundScheduler()
+        self._scheduler = BackgroundScheduler(
+            job_defaults={"coalesce": True, "misfire_grace_time": misfire_grace_sec})
+        self._inhibit_sleep = inhibit_sleep
+        self._wake_timer = wake_timer
+        #: 設定中の起こす時刻（同じ時刻で設定し直さないため）
+        self._wake_at: datetime | None | object = _WAKE_UNKNOWN
+        self._wake_lock = threading.Lock()
+        self.on_job_finished: Callable[[int, str, str, str], None] | None = None
         self._started = False
         # 同一ジョブの重複実行防止（「今すぐ実行」とスケジュール発火の重なり等）。
         # APSchedulerのmax_instancesはスケジュール発火同士しか防げないため、全経路で共通の判定を持つ
@@ -135,14 +174,18 @@ class SchedulerService:
             self._scheduler.start()
             self._started = True
             self._reload_all_jobs()
+            self.refresh_wake()
 
     def shutdown(self) -> None:
         if self._started:
             self._scheduler.shutdown(wait=False)
             self._started = False
+            # サービスが止まっている間に起こしても実行できないため消す（起動時に設定し直す）
+            self._apply_wake(None)
+            self._wake_at = _WAKE_UNKNOWN
 
     # -- ジョブCRUD -----------------------------------------------------
-    def add_job(self, name: str, scan_type: str, cron: str, target: str = "") -> ScheduleRecord:
+    def add_job(self, name: str, scan_type: str, cron: str, target: str = "", wake: bool = False) -> ScheduleRecord:
         self._validate(name, scan_type, cron, exclude_id=None)
 
         with self.db.session() as session:
@@ -154,6 +197,7 @@ class SchedulerService:
                 scan_type=scan_type,
                 last_run=None,
                 next_run=None,
+                wake=1 if wake else 0,
             )
             session.add(row)
             session.commit()
@@ -162,11 +206,13 @@ class SchedulerService:
 
         if self._started:
             self._schedule_job(record)
+            self.refresh_wake()
         return record
 
     def update_job(
-        self, job_id: int, name: str, scan_type: str, cron: str, target: str = ""
+        self, job_id: int, name: str, scan_type: str, cron: str, target: str = "", wake: bool | None = None
     ) -> ScheduleRecord:
+        """wake: None なら変えない（従来のアプリの編集画面には、まだこの項目が無い）"""
         self._validate(name, scan_type, cron, exclude_id=job_id)
 
         with self.db.session() as session:
@@ -177,12 +223,16 @@ class SchedulerService:
             row.scan_type = scan_type
             row.cron = cron
             row.target = target
+            if wake is not None:
+                row.wake = 1 if wake else 0
             session.commit()
             record = _to_record(row)
 
         if self._started:
             self._unschedule_job(job_id)
-            self._schedule_job(record)
+            if record.enabled:
+                self._schedule_job(record)
+            self.refresh_wake()
         return record
 
     def remove_job(self, job_id: int) -> None:
@@ -193,6 +243,7 @@ class SchedulerService:
                 session.commit()
         if self._started:
             self._unschedule_job(job_id)
+            self.refresh_wake()
 
     def set_enabled(self, job_id: int, enabled: bool) -> None:
         with self.db.session() as session:
@@ -208,6 +259,7 @@ class SchedulerService:
             self._unschedule_job(job_id)
             if enabled:
                 self._schedule_job(record)
+            self.refresh_wake()
 
     def set_auto_update(
         self,
@@ -239,7 +291,7 @@ class SchedulerService:
                 last_run = last_run.replace(tzinfo=timezone.utc)
             next_run = max(next_run, last_run + timedelta(hours=interval_hours))
         self._scheduler.add_job(
-            run_update,
+            self._guarded(run_update, "定義の自動更新"),
             trigger="interval",
             hours=interval_hours,
             next_run_time=next_run,
@@ -259,6 +311,87 @@ class SchedulerService:
                 next_time = getattr(job, "next_run_time", None)
                 record.next_run = next_time.isoformat() if next_time else ""
         return records
+
+    # -- 取りこぼし対策 -----------------------------------------------------
+    def catch_up_missed(self, now: datetime | None = None) -> list[str]:
+        """電源オフ・スリープ中に過ぎた回があるジョブを、少し後（CATCH_UP_DELAY）に1回だけ実行する。
+        取り返すジョブの名前を返す。最終実行日時の無いジョブ（一度も実行していない）は対象にしない"""
+        if not self._started:
+            return []
+        now = now or datetime.now(timezone.utc)
+        names = []
+        for record in self.list_all():
+            if not record.enabled or self.is_job_running(record.id):
+                continue
+            last = _parse_last_run(record.last_run)
+            if last is None:
+                continue
+            try:
+                missed = cron_trigger(record.cron).get_next_fire_time(None, last)
+            except ValueError:
+                continue
+            if missed is None or missed > now:
+                continue
+            # 実行周期のジョブは次の回から数え直し（過ぎた回を APScheduler が重ねて実行しないよう）、
+            # 取り返しの1回を別に登録する
+            self._unschedule_job(record.id)
+            self._schedule_job(record)
+            self._scheduler.add_job(
+                self._execute, trigger="date", run_date=now + CATCH_UP_DELAY, args=[record],
+                id=f"catch_up_{record.id}", replace_existing=True,
+            )
+            names.append(record.name)
+            logger.info(f"電源オフ・スリープ中に過ぎた回を取り返します: {record.name}（予定 {missed.isoformat()}）")
+        return names
+
+    def on_resume(self, slept_sec: float = 0.0) -> list[str]:
+        """スリープからの復帰時に呼ぶ（core/resume_watcher.py）"""
+        if not self._started:
+            return []
+        logger.info(f"スリープからの復帰を検出しました（約 {int(slept_sec)} 秒）。スケジュールを確かめます")
+        names = self.catch_up_missed()
+        self._scheduler.wakeup()
+        self.refresh_wake()
+        return names
+
+    # -- スリープから起こす ---------------------------------------------------
+    def next_wake_time(self) -> datetime | None:
+        """wake が有効なジョブの次の実行時刻のうち、最も早いものの WAKE_LEAD 前。無ければ None"""
+        if not self._started:
+            return None
+        times = [datetime.fromisoformat(record.next_run) for record in self.list_all()
+                 if record.enabled and record.wake and record.next_run]
+        return min(times) - WAKE_LEAD if times else None
+
+    def refresh_wake(self) -> None:
+        """スリープから起こすタイマーを設定し直す。起こす時刻が過ぎていれば（実行の直前）消す"""
+        if self._wake_timer is None:
+            return
+        try:
+            when = self.next_wake_time()
+        except Exception as exc:  # noqa: BLE001 - 起こせなくても、復帰後に取り返す
+            logger.warning(f"スリープから起こす時刻を決められませんでした (detail: {exc})")
+            return
+        if when is not None and when <= datetime.now(timezone.utc):
+            when = None
+        self._apply_wake(when)
+
+    def _apply_wake(self, when: datetime | None) -> None:
+        if self._wake_timer is None:
+            return
+        with self._wake_lock:
+            if when == self._wake_at:
+                return
+            try:
+                if when is None:
+                    self._wake_timer.clear()
+                    logger.info("スリープから起こす予定を消しました")
+                else:
+                    self._wake_timer.set(when)
+                    logger.info(f"スリープから起こす予定を設定しました: {when.isoformat()}")
+                self._wake_at = when
+            except Exception as exc:  # noqa: BLE001 - 起こせなくても、復帰後に取り返す
+                logger.warning(f"スリープから起こすタイマーを設定できませんでした (detail: {exc})")
 
     def is_job_running(self, job_id: int) -> bool:
         """ジョブを実行中か（Web API の「今すぐ実行」で、別のスレッドに渡す前に 409 を返すため）"""
@@ -334,10 +467,17 @@ class SchedulerService:
             self._running_job_ids.add(record.id)
 
         try:
-            self._execute_body(record)
+            if self._inhibit_sleep:
+                with prevent_sleep(f"スケジュールのジョブを実行中: {record.name}"):
+                    self._execute_body(record)
+            else:
+                self._execute_body(record)
         finally:
             with self._running_lock:
                 self._running_job_ids.discard(record.id)
+            # 次の回に合わせて起こす時刻を設定し直す
+            if record.wake:
+                self.refresh_wake()
 
     def _execute_body(self, record: ScheduleRecord) -> None:
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -382,8 +522,37 @@ class SchedulerService:
     def _update_last_run(self, job_id: int, executed_at: str, success: bool, note: str = "") -> None:
         if not success:
             note = "失敗"
+        name = None
         with self.db.session() as session:
             row = session.get(Schedule, job_id)
             if row is not None:
                 row.last_run = f"{executed_at} ({note})" if note else executed_at
+                name = row.name
                 session.commit()
+        if name is not None and self.on_job_finished is not None:
+            try:
+                self.on_job_finished(job_id, name, "success" if success else "failure", note)
+            except Exception as exc:  # noqa: BLE001 - 知らせる処理の失敗でジョブの結果を変えない
+                logger.warning(f"スケジュールの結果を知らせられませんでした (detail: {exc})")
+
+    def _guarded(self, func: Callable[[], object], reason: str) -> Callable[[], object]:
+        """inhibit_sleep なら、実行中はスリープを防ぐ"""
+        if not self._inhibit_sleep:
+            return func
+
+        def run():
+            with prevent_sleep(reason):
+                return func()
+
+        return run
+
+
+def _parse_last_run(text: str) -> datetime | None:
+    """最終実行日時（"<ISO 8601>" または "<ISO 8601> (補足)"）の日時"""
+    if not text:
+        return None
+    try:
+        value = datetime.fromisoformat(text.split(" ", 1)[0])
+    except ValueError:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)

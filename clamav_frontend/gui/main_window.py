@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QStackedWidget,
     QSystemTrayIcon,
@@ -104,10 +105,7 @@ class MainWindow(QMainWindow):
         body.addWidget(self.stacked_widget, stretch=1)
         root.addLayout(body, stretch=1)
 
-        self.nav_list.currentRowChanged.connect(self.stacked_widget.setCurrentIndex)
-        self.nav_list.currentRowChanged.connect(
-            lambda row: self.screen_changed.emit(self.nav_list.item(row).data(_NAV_KEY_ROLE))
-        )
+        self.nav_list.currentRowChanged.connect(self._on_nav_row_changed)
         self.nav_list.setCurrentRow(0)
         self.setCentralWidget(central)
 
@@ -229,6 +227,38 @@ class MainWindow(QMainWindow):
         )
 
     # -- 画面遷移 -----------------------------------------------------
+    def _on_nav_row_changed(self, row: int) -> None:
+        current = self.stacked_widget.currentIndex()
+        if row != current and not self.confirm_leave(self.stacked_widget.currentWidget()):
+            # 離れるのをやめた: 選択を元に戻す（この変更では画面を切り替えない）
+            self.nav_list.blockSignals(True)
+            self.nav_list.setCurrentRow(current)
+            self.nav_list.blockSignals(False)
+            return
+        self.stacked_widget.setCurrentIndex(row)
+        self.screen_changed.emit(self.nav_list.item(row).data(_NAV_KEY_ROLE))
+
+    def confirm_leave(self, screen) -> bool:
+        """保存していない変更（トレイGUI の除外・監視対象・スケジュール）がある画面を離れてよいか。
+        「保存」は保存してから、「破棄」は変更を捨ててから離れる"""
+        if screen is None or not getattr(screen, "has_unsaved_changes", lambda: False)():
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("保存していない変更")
+        box.setText("この画面に、保存していない変更があります。保存しますか？")
+        save_button = box.addButton("保存", QMessageBox.ButtonRole.AcceptRole)
+        discard_button = box.addButton("破棄", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("キャンセル", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is save_button:
+            return bool(screen.save_changes())
+        if clicked is discard_button:
+            screen.discard_changes()
+            return True
+        return False
+
     def navigate_to(self, key: str) -> None:
         for row in range(self.nav_list.count()):
             item = self.nav_list.item(row)
@@ -254,6 +284,8 @@ class MainWindow(QMainWindow):
     # -- ×ボタンのトレイ格納挙動（タスクトレイ常駐アプリプロセス設計書4.1節） -------
     def closeEvent(self, event: QCloseEvent) -> None:
         event.ignore()
+        if not self.confirm_leave(self.stacked_widget.currentWidget()):
+            return
         self.hide()
 
         if self._tray_icon is not None and self._config_service is not None:

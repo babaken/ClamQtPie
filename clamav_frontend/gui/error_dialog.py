@@ -11,7 +11,7 @@ from typing import Callable
 
 from PySide6.QtWidgets import QMessageBox, QPushButton, QWidget
 
-from core.exceptions import AppError
+from core.exceptions import AppError, ElevationCancelledError
 
 #: 「詳細を見る」の既定動作（MainWindowがログ画面への遷移を登録する）。各画面はコールバックを
 #: 個別に渡さなくても、画面設計書「共通仕様」のログ画面へのリンク付きダイアログになる
@@ -33,6 +33,8 @@ def show_error_dialog(
     on_show_detail: 「詳細を見る」押下時に呼ばれるコールバック。省略時はset_default_detail_handler()
                      で登録された既定動作（ログ画面へ遷移し、エラーコードで絞り込む）を使う。
     """
+    if isinstance(error, ElevationCancelledError):
+        return  # 利用者が UAC・pkexec・昇格ヘルパーの確認で取り消した（エラーではない）
     if on_show_detail is None:
         on_show_detail = _default_detail_handler
     box = QMessageBox(parent)

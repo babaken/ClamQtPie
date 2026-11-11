@@ -2,9 +2,13 @@
 ConfigService
 
 参照: config.jsonスキーマ定義書2章・3章・7章
-- ポータブル配置（実行ファイルと同一ディレクトリ）
+- サービスの設定（schema_version 2）。利用者ごとの GUI の設定（general）は gui.json に分けたため、読み込んでも
+  使わず、保存もしない
 - アトミック書き込み（tmp→rename）
-- SMTPパスワードはkeyring経由（config.jsonには保存しない）
+- SMTP パスワードは config.json に保存せず、秘密の保存先（core/secret_store.py の FileSecretStore）に置く
+
+段階 12-4e で従来のアプリ（ポータブル、1 プロセス）を削除し、schema_version 1 の保存と keyring の扱いを除いた
+（旧版の keyring のパスワードは clamqtpie-ctl migrate が読む。core/portable_migration.py）。
 """
 from __future__ import annotations
 
@@ -14,23 +18,25 @@ import os
 import tempfile
 from pathlib import Path
 
-from core.config_model import ConfigModel, validate_and_fix
+from core.config_model import GUI_SECTIONS, SCHEMA_VERSION, ConfigModel, validate_and_fix
 from core.exceptions import ConfigError, ConfigWriteError, KeyringUnavailableError
-from core.version import APP_ID, LEGACY_APP_ID
 
-_KEYRING_SERVICE_NAME = APP_ID
-#: 製品名の変更前のサービス名（migrate_legacy_smtp_passwordで新しいサービス名へ移す）
-_LEGACY_KEYRING_SERVICE_NAME = LEGACY_APP_ID
+#: サービスの秘密の保存先での、SMTP パスワードの名前
+_SMTP_SECRET_NAME = "smtp_password"
+_TOTP_SECRET_NAME = "web_totp_secret"
 
 logger = logging.getLogger("clamav_frontend")
 
 
 class ConfigService:
-    """config.jsonの読み書きとSMTPパスワードのkeyring連携を担う"""
+    """サービスの config.json の読み書きと、SMTP パスワードの保存を担う"""
 
-    def __init__(self, config_path: Path) -> None:
+    def __init__(self, config_path: Path, secret_store=None) -> None:
+        """secret_store: SMTP パスワードの保存先（core/secret_store.py の FileSecretStore）。None なら保存先が無く、
+        パスワードは「なし」として扱い、保存しようとすると KeyringUnavailableError（テスト・設定だけを読む用途）"""
         self.config_path = config_path
         self._model: ConfigModel | None = None
+        self._secret_store = secret_store
 
     # -- 読み込み -----------------------------------------------------
     def load(self) -> ConfigModel:
@@ -66,7 +72,7 @@ class ConfigService:
 
         model = ConfigModel.from_dict(raw)
 
-        if model.schema_version > ConfigModel().schema_version:
+        if model.schema_version > SCHEMA_VERSION:
             logger.warning(
                 "新しいバージョンで作成された設定ファイルの可能性があります "
                 f"(schema_version={model.schema_version})。上書き保存は行いません。"
@@ -87,8 +93,9 @@ class ConfigService:
 
         参照: config.jsonスキーマ定義書2.3節
         """
+        model.schema_version = SCHEMA_VERSION
         self._model = model
-        payload = json.dumps(model.to_dict(), ensure_ascii=False, indent=2)
+        payload = json.dumps(self.as_dict(model), ensure_ascii=False, indent=2)
 
         target_dir = self.config_path.parent
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -108,59 +115,45 @@ class ConfigService:
         except OSError as exc:
             raise ConfigWriteError(detail=str(exc)) from exc
 
+    def as_dict(self, model: ConfigModel | None = None) -> dict:
+        """保存する内容（利用者ごとの GUI の設定を除く）"""
+        data = (model or self.current).to_dict()
+        for section in GUI_SECTIONS:
+            data.pop(section, None)
+        return data
+
     @property
     def current(self) -> ConfigModel:
         if self._model is None:
             return self.load()
         return self._model
 
-    # -- SMTPパスワード（keyring連携） ---------------------------------
-    def get_smtp_password(self) -> str | None:
-        """keyring経由でSMTPパスワードを取得する（config.jsonスキーマ定義書3章）"""
-        try:
-            import keyring
+    # -- SMTP パスワード ---------------------------------------------
+    def get_smtp_password(self) -> str | None:
+        if self._secret_store is None:
+            return None
+        return self._secret_store.get(_SMTP_SECRET_NAME)
+
+    def set_smtp_password(self, password: str) -> None:
+        if self._secret_store is None:
+            raise KeyringUnavailableError(detail="SMTP パスワードの保存先がありません")
+        self._secret_store.set(_SMTP_SECRET_NAME, password)
+
+    def delete_smtp_password(self) -> None:
+        if self._secret_store is not None:
+            self._secret_store.delete(_SMTP_SECRET_NAME)
 
-            account = self.current.smtp.keyring_account
-            return keyring.get_password(_KEYRING_SERVICE_NAME, account)
-        except Exception as exc:  # keyringバックエンド不在等
-            raise KeyringUnavailableError(detail=str(exc)) from exc
+    # -- 二段階認証の秘密鍵（段階 12-5d。設定ファイルには入れない） -----------------
+    def get_totp_secret(self) -> str | None:
+        if self._secret_store is None:
+            return None
+        return self._secret_store.get(_TOTP_SECRET_NAME)
 
-    def set_smtp_password(self, password: str) -> None:
-        try:
-            import keyring
+    def set_totp_secret(self, secret: str) -> None:
+        if self._secret_store is None:
+            raise KeyringUnavailableError(detail="二段階認証の秘密鍵の保存先がありません")
+        self._secret_store.set(_TOTP_SECRET_NAME, secret)
 
-            account = self.current.smtp.keyring_account
-            keyring.set_password(_KEYRING_SERVICE_NAME, account, password)
-        except Exception as exc:
-            raise KeyringUnavailableError(detail=str(exc)) from exc
-
-    def delete_smtp_password(self) -> None:
-        try:
-            import keyring
-
-            account = self.current.smtp.keyring_account
-            keyring.delete_password(_KEYRING_SERVICE_NAME, account)
-        except Exception as exc:
-            # 未設定状態での削除等は致命的ではないためWARNINGに留める
-            logger.warning(f"SMTPパスワードの削除に失敗しました (detail: {exc})")
-
-    def migrate_legacy_smtp_password(self) -> bool:
-        """旧名のサービス名で保存したSMTPパスワードを、新しいサービス名へ移す。移したらTrue
-
-        新しいサービス名に既にパスワードがある場合は上書きしない（旧名の分だけ消す）。
-        keyringが使えない環境では何もしない（起動は止めない）。
-        """
-        try:
-            import keyring
-
-            account = self.current.smtp.keyring_account
-            legacy = keyring.get_password(_LEGACY_KEYRING_SERVICE_NAME, account)
-            if legacy is None:
-                return False
-            if keyring.get_password(_KEYRING_SERVICE_NAME, account) is None:
-                keyring.set_password(_KEYRING_SERVICE_NAME, account, legacy)
-            keyring.delete_password(_LEGACY_KEYRING_SERVICE_NAME, account)
-            return True
-        except Exception as exc:  # noqa: BLE001 - keyringバックエンド不在等
-            logger.warning(f"旧名で保存したSMTPパスワードを引き継げませんでした (detail: {exc})")
-            return False
+    def delete_totp_secret(self) -> None:
+        if self._secret_store is not None:
+            self._secret_store.delete(_TOTP_SECRET_NAME)

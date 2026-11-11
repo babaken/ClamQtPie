@@ -51,7 +51,7 @@ def format_size(size: int) -> str:
 
 
 class QuarantineScreen(BaseScreen):
-    screen_title = "隔離フォルダー"
+    screen_title = "隔離フォルダ"
     screen_subtitle = "隔離した不正なファイルを SHA-256 による整合性検証付きで管理します。"
 
     def build_content(self) -> None:
@@ -221,6 +221,15 @@ class QuarantineScreen(BaseScreen):
             "完全削除の確認",
             f"選択した{len(records)}件のファイルを完全に削除します。元に戻せません。よろしいですか？",
         ):
+            return
+        delete_many = getattr(self._quarantine_service, "delete_many", None)
+        if delete_many is not None:
+            # トレイGUI: 管理者の権限の確認を 1 回にまとめる（途中で失敗したら残りは実行しない）
+            try:
+                delete_many([record.id for record in records])
+            except AppError as exc:
+                show_error_dialog(self, exc)
+            self.reload()
             return
         for record in records:
             try:

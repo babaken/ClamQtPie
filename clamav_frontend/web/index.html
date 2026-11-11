@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ClamQtPie WebUI</title>
+  <link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+  <!-- ログイン（WebUI のログインは固定のアカウント 1 組。設定はトレイGUI か clamqtpie-ctl web set-login） -->
+  <main id="login-view" class="login" hidden>
+    <form id="login-form" class="card login-card" autocomplete="on">
+      <h1>ClamQtPie</h1>
+      <p class="muted">WebUI にログインしてください。</p>
+      <label for="login-username">ユーザー名</label>
+      <input id="login-username" name="username" autocomplete="username" required maxlength="32">
+      <label for="login-password">パスワード</label>
+      <input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="1024">
+      <!-- 二段階認証を設定しているかはログインの前には知らせない（いつも欄を出し、設定していなければ空欄でよい） -->
+      <label for="login-code">確認コード</label>
+      <input id="login-code" name="code" autocomplete="one-time-code" inputmode="numeric" maxlength="16"
+             placeholder="認証アプリの 6 桁（または予備のコード）">
+      <p class="muted small">二段階認証を設定していなければ、空欄のままでかまいません。</p>
+      <button type="submit" class="primary">ログイン</button>
+      <p id="login-error" class="error" role="alert"></p>
+      <!-- HTTPS（ローカル CA）のときだけ出す。端末に CA 証明書を登録すると、警告なしで開ける（段階 12-5e1） -->
+      <section id="login-ca" class="login-ca muted small" hidden>
+        <p>この WebUI は ClamQtPie のローカル CA の証明書を使っています。ブラウザの警告を出さないようにするには、
+          CA 証明書をこの端末に登録してください。登録の前に、フィンガープリントが ClamQtPie を動かしている PC の表示
+          （clamqtpie-ctl web tls status）と同じことを確かめてください。</p>
+        <p><a id="login-ca-link" href="/web/ca.crt" download="clamqtpie-ca.crt">CA 証明書をダウンロード</a></p>
+        <p>SHA-256: <code id="login-ca-fingerprint"></code></p>
+      </section>
+    </form>
+  </main>
+
+  <div id="app-view" hidden>
+    <header class="topbar">
+      <div class="brand">ClamQtPie</div>
+      <div id="off-banner" class="off-banner" hidden></div>
+      <div class="spacer"></div>
+      <button class="bell" data-action="toggleNotifications" title="未読の通知">通知 <span id="notify-count" class="badge">0</span></button>
+      <span id="user-name" class="muted"></span>
+      <button data-action="logout">ログアウト</button>
+    </header>
+
+    <div class="layout">
+      <nav class="sidebar" aria-label="画面">
+        <button data-screen="home" class="nav active">ホーム</button>
+        <button data-screen="scan" class="nav">スキャン</button>
+        <button data-screen="quarantine" class="nav">隔離</button>
+        <button data-screen="excludes" class="nav">除外</button>
+        <button data-screen="realtime" class="nav">リアルタイム保護</button>
+        <button data-screen="schedule" class="nav">スケジュール</button>
+        <button data-screen="update" class="nav">定義更新</button>
+        <button data-screen="logs" class="nav">ログ</button>
+        <button data-screen="settings" class="nav">設定</button>
+        <button data-screen="diagnostics" class="nav">診断</button>
+      </nav>
+
+      <main class="content">
+        <!-- ホーム -->
+        <section id="screen-home" class="screen">
+          <h2>ホーム</h2>
+          <div class="grid" id="home-cards"></div>
+          <div class="card">
+            <h3>すぐにできること</h3>
+            <div class="row">
+              <button class="primary" data-action="quickScan">クイックスキャン</button>
+              <button data-action="startUpdate">定義を更新</button>
+              <button data-action="toggleRealtime" id="home-realtime-button">リアルタイム保護</button>
+              <button data-action="startClamd">clamd を起動</button>
+              <button data-action="stopClamd">clamd を停止</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- スキャン -->
+        <section id="screen-scan" class="screen" hidden>
+          <h2>スキャン</h2>
+          <div class="card">
+            <div class="row">
+              <label for="scan-type">種類</label>
+              <select id="scan-type">
+                <option value="quick">クイックスキャン（設定の「クイックスキャンの対象」）</option>
+                <option value="full">フルスキャン</option>
+                <option value="custom">カスタムスキャン（場所を指定）</option>
+              </select>
+            </div>
+            <div class="row" id="scan-targets-row" hidden>
+              <label for="scan-targets">スキャンする場所<br><small class="muted">1 行に 1 つ（絶対パス）</small></label>
+              <textarea id="scan-targets" rows="3"></textarea>
+            </div>
+            <div class="row">
+              <label><input type="checkbox" id="scan-subfolders" checked> サブフォルダも含める</label>
+              <label><input type="checkbox" id="scan-excludes" checked> 除外の設定を使う</label>
+            </div>
+            <div class="row">
+              <button class="primary" data-action="startScan" id="scan-start">スキャンを開始</button>
+              <button data-action="cancelScan" id="scan-cancel" disabled>中止</button>
+            </div>
+            <div id="scan-progress" class="progress-text muted">実行中のスキャンはありません</div>
+            <progress id="scan-bar" max="1" value="0" hidden></progress>
+          </div>
+          <div class="card">
+            <h3>このスキャンで見つかったもの</h3>
+            <table>
+              <thead><tr><th>状態</th><th>ファイル</th><th>内容</th><th>操作</th></tr></thead>
+              <tbody id="scan-results"></tbody>
+            </table>
+          </div>
+          <div class="card">
+            <h3>スキャン履歴</h3>
+            <table>
+              <thead><tr><th>終了日時</th><th>実行元</th><th>種類</th><th>対象</th><th>結果</th><th>検査</th><th>検知</th><th>操作</th></tr></thead>
+              <tbody id="scan-history"></tbody>
+            </table>
+            <pre id="scan-history-detail" class="detail" hidden></pre>
+          </div>
+        </section>
+
+        <!-- 隔離 -->
+        <section id="screen-quarantine" class="screen" hidden>
+          <h2>隔離</h2>
+          <div class="card">
+            <div class="row">
+              <label><input type="checkbox" id="quarantine-show-all"> 復元・削除したものも表示する</label>
+              <button data-action="loadQuarantine">再読み込み</button>
+            </div>
+            <table>
+              <thead><tr><th>検知日時</th><th>元の場所</th><th>検知名</th><th>状態</th><th>操作</th></tr></thead>
+              <tbody id="quarantine-list"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 除外 -->
+        <section id="screen-excludes" class="screen" hidden>
+          <h2>除外</h2>
+          <div class="card">
+            <form id="exclude-form" class="row">
+              <label for="exclude-type">種類</label>
+              <select id="exclude-type">
+                <option value="file">ファイル</option>
+                <option value="folder">フォルダ</option>
+                <option value="extension">拡張子</option>
+                <option value="process">プロセス</option>
+              </select>
+              <input id="exclude-value" class="wide" placeholder="ファイル・フォルダの絶対パス、拡張子（.log）など" maxlength="4096" required>
+              <button type="submit" class="primary">追加</button>
+            </form>
+            <table>
+              <thead><tr><th>種類</th><th>値</th><th>状態</th><th>操作</th></tr></thead>
+              <tbody id="exclude-list"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- リアルタイム保護 -->
+        <section id="screen-realtime" class="screen" hidden>
+          <h2>リアルタイム保護</h2>
+          <div class="card">
+            <div class="row">
+              <span>状態: <strong id="realtime-state">-</strong></span>
+              <span class="muted" id="realtime-mode"></span>
+              <button data-action="toggleRealtime" id="realtime-toggle">開始</button>
+            </div>
+            <div class="row">
+              <span>検知したときの動作:</span>
+              <label><input type="radio" name="realtime-action" value="quarantine"> 自動で隔離</label>
+              <label><input type="radio" name="realtime-action" value="notify_only"> 通知だけ</label>
+              <button data-action="saveRealtimeAction">保存</button>
+            </div>
+          </div>
+          <div class="card">
+            <h3>監視するフォルダ</h3>
+            <form id="target-form" class="row">
+              <input id="target-path" class="wide" placeholder="監視するフォルダ（絶対パス）" maxlength="4096" required>
+              <button type="submit" class="primary">追加</button>
+            </form>
+            <table>
+              <thead><tr><th>フォルダ</th><th>状態</th><th>操作</th></tr></thead>
+              <tbody id="target-list"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- スケジュール -->
+        <section id="screen-schedule" class="screen" hidden>
+          <h2>スケジュール</h2>
+          <div class="card">
+            <table>
+              <thead><tr><th>名前</th><th>種類</th><th>スケジュール</th><th>状態</th><th>次回</th><th>最終実行</th><th>操作</th></tr></thead>
+              <tbody id="schedule-list"></tbody>
+            </table>
+          </div>
+          <div class="card">
+            <h3 id="schedule-form-title">ジョブの追加</h3>
+            <form id="schedule-form">
+              <input type="hidden" id="schedule-id">
+              <div class="row">
+                <label for="schedule-name">名前</label>
+                <input id="schedule-name" class="wide" maxlength="200" required>
+              </div>
+              <div class="row">
+                <label for="schedule-type">種類</label>
+                <select id="schedule-type">
+                  <option value="scan">スキャン</option>
+                  <option value="update">定義更新</option>
+                </select>
+              </div>
+              <div class="row" id="schedule-target-row">
+                <label for="schedule-target">スキャンする場所</label>
+                <input id="schedule-target" class="wide" maxlength="4096" placeholder="絶対パス">
+              </div>
+              <div class="row">
+                <label for="schedule-preset">実行する日時</label>
+                <select id="schedule-preset">
+                  <option value="0 3 * * *">毎日 3:00</option>
+                  <option value="0 12 * * *">毎日 12:00</option>
+                  <option value="0 3 * * 0">毎週日曜 3:00</option>
+                  <option value="0 3 1 * *">毎月 1 日 3:00</option>
+                  <option value="custom">指定する（cron 式）</option>
+                </select>
+                <input id="schedule-cron" maxlength="200" value="0 3 * * *" disabled>
+              </div>
+              <div class="row">
+                <label><input type="checkbox" id="schedule-wake"> スリープ中でも起こして実行する</label>
+              </div>
+              <div class="row">
+                <button type="submit" class="primary" id="schedule-submit">追加</button>
+                <button type="button" data-action="resetScheduleForm">新しく作る</button>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <!-- 定義更新 -->
+        <section id="screen-update" class="screen" hidden>
+          <h2>定義更新</h2>
+          <div class="card">
+            <div class="row">
+              <span>最後の更新: <strong id="update-last">-</strong></span>
+              <span class="muted" id="update-auto"></span>
+              <button class="primary" data-action="startUpdate" id="update-start">今すぐ更新</button>
+            </div>
+            <pre id="update-log" class="log-box"></pre>
+          </div>
+          <div class="card" id="freshclam-card" hidden>
+            <h3>OS の定義更新サービス (clamav-freshclam)</h3>
+            <div class="row">
+              <span>状態: <strong id="freshclam-active">-</strong></span>
+              <span>PC の起動時に自動で起動する: <strong id="freshclam-enabled">-</strong></span>
+            </div>
+            <p class="muted" id="freshclam-summary"></p>
+            <div class="row">
+              <button data-action="startFreshclam" id="freshclam-start">開始</button>
+              <button data-action="stopFreshclam" id="freshclam-stop">停止</button>
+            </div>
+            <p class="muted">停止すると、PC の起動時にも起動しなくなり、定義の更新は ClamQtPie の自動更新が行います。開始すると、PC の起動時にも自動で起動し、定義の更新は OS のサービスが行います。</p>
+          </div>
+          <div class="card">
+            <h3>更新履歴</h3>
+            <table>
+              <thead><tr><th>日時</th><th>結果</th><th>更新前</th><th>更新後</th></tr></thead>
+              <tbody id="update-history"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ログ -->
+        <section id="screen-logs" class="screen" hidden>
+          <h2>ログ</h2>
+          <div class="card">
+            <form id="log-form" class="row">
+              <label for="log-since">この日から</label>
+              <input id="log-since" type="date">
+              <select id="log-level">
+                <option value="">すべての重要度</option>
+                <option value="ERROR">エラー</option>
+                <option value="WARNING">警告</option>
+                <option value="INFO">情報</option>
+                <option value="DEBUG">デバッグ</option>
+              </select>
+              <select id="log-category">
+                <option value="">すべての種類</option>
+                <option>スキャン</option>
+                <option>リアルタイム</option>
+                <option>更新</option>
+                <option>隔離</option>
+                <option>システム</option>
+              </select>
+              <input id="log-keyword" placeholder="キーワード・エラーコード" maxlength="200">
+              <button type="submit" class="primary">表示</button>
+              <a id="log-export" class="button" href="/api/v1/logs/export.csv" download>CSV で保存</a>
+              <button type="button" data-action="clearLogs" class="danger">ログを消去</button>
+            </form>
+            <table>
+              <thead><tr><th>日時</th><th>重要度</th><th>種類</th><th>コード</th><th>内容</th></tr></thead>
+              <tbody id="log-list"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 設定 -->
+        <section id="screen-settings" class="screen" hidden>
+          <h2>設定</h2>
+          <form id="settings-form">
+            <div class="card">
+              <h3>通知</h3>
+              <label><input type="checkbox" data-setting="notification.on_detect_desktop"> 検知したらデスクトップ・WebUI に通知する</label>
+              <label><input type="checkbox" data-setting="notification.on_detect_mail"> 検知したらメールで知らせる</label>
+              <label><input type="checkbox" data-setting="notification.on_update_fail"> 定義更新の失敗を知らせる</label>
+              <label><input type="checkbox" data-setting="notification.on_job_fail"> スケジュールの失敗を知らせる</label>
+            </div>
+            <div class="card">
+              <h3>メール（SMTP）</h3>
+              <div class="row"><label>サーバー</label><input data-setting="smtp.host" maxlength="255"></div>
+              <div class="row"><label>ポート</label><input data-setting="smtp.port" type="number" min="1" max="65535"></div>
+              <div class="row"><label>暗号化</label>
+                <select data-setting="smtp.encryption">
+                  <option value="starttls">STARTTLS</option>
+                  <option value="ssl">SSL/TLS</option>
+                  <option value="none">なし</option>
+                </select>
+              </div>
+              <div class="row"><label>ユーザー名</label><input data-setting="smtp.user" maxlength="255"></div>
+              <div class="row"><label>送信元</label><input data-setting="smtp.from_address" maxlength="255"></div>
+              <div class="row"><label>送信先</label><input data-setting="smtp.to_address" maxlength="255"></div>
+              <div class="row">
+                <label for="smtp-password">パスワード</label>
+                <input id="smtp-password" type="password" autocomplete="new-password" placeholder="変えるときだけ入力" maxlength="1024">
+                <span id="smtp-password-state" class="muted"></span>
+              </div>
+              <div class="row"><button type="button" data-action="testMail">テストメールを送る</button></div>
+            </div>
+            <div class="card">
+              <h3>スキャン・リアルタイム保護</h3>
+              <div class="row">
+                <label for="quick-targets">クイックスキャンの対象<br><small class="muted">1 行に 1 つ（絶対パス）</small></label>
+                <textarea id="quick-targets" rows="3"></textarea>
+              </div>
+              <label><input type="checkbox" data-setting="realtime.default_enabled"> サービスの開始時にリアルタイム保護を始める</label>
+              <div class="row"><label>検知したときの動作</label>
+                <select data-setting="realtime.default_action">
+                  <option value="quarantine">自動で隔離</option>
+                  <option value="notify_only">通知だけ</option>
+                </select>
+              </div>
+              <label><input type="checkbox" data-setting="clamd.auto_start"> clamd が止まっていたら自動で起動する</label>
+            </div>
+            <div class="card">
+              <h3>定義更新</h3>
+              <label><input type="checkbox" data-setting="update.auto_update"> 自動で更新する</label>
+              <div class="row"><label>間隔（時間）</label><input data-setting="update.interval_hours" type="number" min="1" max="24"></div>
+              <div class="row"><label>古いとみなす日数</label><input data-setting="update.stale_days" type="number" min="1" max="365"></div>
+            </div>
+            <div class="card">
+              <h3>ログ</h3>
+              <div class="row"><label>残す日数</label>
+                <select data-setting="logging.retention_days">
+                  <option value="30">30 日</option><option value="60">60 日</option><option value="90">90 日</option>
+                  <option value="180">180 日</option><option value="365">365 日</option>
+                </select>
+              </div>
+              <div class="row"><label>記録する重要度</label>
+                <select data-setting="logging.level">
+                  <option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option><option>CRITICAL</option>
+                </select>
+              </div>
+            </div>
+            <div class="card">
+              <h3>保護された設定（WebUI からは変えられません）</h3>
+              <p class="muted">変えるには、管理者が <code>clamqtpie-ctl config set 項目 値</code> を実行します。</p>
+              <table>
+                <thead><tr><th>項目</th><th>値</th></tr></thead>
+                <tbody id="protected-list"></tbody>
+              </table>
+            </div>
+            <div class="row"><button type="submit" class="primary">設定を保存</button></div>
+          </form>
+        </section>
+
+        <!-- 診断 -->
+        <section id="screen-diagnostics" class="screen" hidden>
+          <h2>診断</h2>
+          <div class="card">
+            <p class="muted">ClamAV・サービスの状態を調べます。結果は、ホームフォルダ・ユーザー名などを伏せた形で表示します
+              （問い合わせなどで、外に貼り付けてよい形です）。</p>
+            <div class="row">
+              <button class="primary" data-action="runDiagnostics">診断する</button>
+              <button data-action="copyDiagnostics" id="diagnostics-copy" hidden>伏せ字のレポートをコピー</button>
+            </div>
+            <p id="diagnostics-summary"></p>
+            <pre id="diagnostics-report" class="detail" hidden></pre>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- 通知の一覧 -->
+    <aside id="notify-panel" class="panel" hidden>
+      <div class="row">
+        <h3>未読の通知</h3>
+        <div class="spacer"></div>
+        <button data-action="ackAllNotifications">すべて既読にする</button>
+        <button data-action="toggleNotifications">閉じる</button>
+      </div>
+      <ul id="notify-list" class="notify-list"></ul>
+    </aside>
+
+    <div id="toast-area" class="toast-area" aria-live="polite"></div>
+  </div>
+
+  <!-- 管理者の操作の前の再確認（トレイGUI の UAC と確認画面に相当） -->
+  <dialog id="reauth-dialog">
+    <form id="reauth-form" method="dialog">
+      <h3>管理者の操作の確認</h3>
+      <p id="reauth-intro">次の操作を行います。続けるには、パスワードを入力してください（確認してから 5 分間は省きます）。</p>
+      <ul id="reauth-operations"></ul>
+      <label for="reauth-password" id="reauth-label">WebUI のパスワード</label>
+      <input id="reauth-password" type="password" autocomplete="current-password" maxlength="1024">
+      <p id="reauth-error" class="error" role="alert"></p>
+      <div class="row">
+        <button type="submit" class="primary" value="ok">実行</button>
+        <button type="button" data-action="cancelReauth" value="cancel">キャンセル</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>

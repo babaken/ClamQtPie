@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  ClamQtPie の昇格ヘルパー（install.sh が /usr/share/polkit-1/actions に置く。段階 12-4d）
+  - 毎回、管理者の認証を求める（auth_admin。auth_admin_keep にしない: 確認の省略を許すと、その間は別のプロセスも
+    確認なしで使えてしまうため。サービス化・Web API設計書 3.2節）
+  - allow_gui: 昇格ヘルパーの確認画面を、頼んだ利用者の画面に出す（DISPLAY・XAUTHORITY を引き継ぐ）
+-->
+<policyconfig>
+  <vendor>ClamQtPie</vendor>
+  <action id="io.github.babaken.clamqtpie.elevate">
+    <description>Run ClamQtPie administrator operations</description>
+    <description xml:lang="ja">ClamQtPie の管理者の操作を実行する</description>
+    <message>Authentication is required to run ClamQtPie administrator operations</message>
+    <message xml:lang="ja">ClamQtPie の管理者の操作（隔離の復元・設定の変更など）を実行するには、認証が必要です</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/opt/clamqtpie/clamqtpie-elevate</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>

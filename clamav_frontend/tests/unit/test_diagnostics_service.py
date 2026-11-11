@@ -436,3 +436,11 @@ def test_alert_exceeds_max_is_checked(tmp_path, conf_line, warned):
     report = service.run()
 
     assert any("AlertExceedsMax" in c.message for c in report.checks) is warned
+
+
+def test_masked_report_explains_what_is_hidden():
+    # 読み手に伏せる基準が分かるように、伏せ字の版の先頭に説明を添える（段階 12-5c）
+    from core.diagnostics_service import MASK_NOTE, masked_report_text
+
+    text = masked_report_text("clamd.conf: /etc/clamav/clamd.conf\n", {"/etc/clamav/clamd.conf": "<clamd.conf>"})
+    assert text.startswith(MASK_NOTE) and "<clamd.conf>" in text and "/etc/clamav/clamd.conf" not in text

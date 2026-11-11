@@ -28,7 +28,7 @@ def _flush_detections(service: NotificationService) -> None:
     後のテストの途中で発火して結果を乱していた。確定はロックの中で行われるため、
     タイマーが先に動いていても、その処理が終わってから戻る
     """
-    service._aggregator._flush()
+    service._aggregator.flush()
 
 def test_mail_body_template_reflects_detection_count(tmp_path):
     # NT-U03
@@ -283,12 +283,11 @@ def test_smtp_ssl_rejects_untrusted_certificate(tmp_path):
     import socket
     import ssl
     import subprocess
-    import tempfile
     import threading
 
     import pytest
 
-    d = tempfile.mkdtemp()
+    d = tmp_path  # tempfile.mkdtemp() だと消えずに溜まった（#55）
     cert, key = f"{d}/c.pem", f"{d}/k.pem"
     try:
         subprocess.run(

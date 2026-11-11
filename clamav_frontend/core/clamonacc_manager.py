@@ -178,7 +178,7 @@ def _hint_for(text: str) -> str:
     ):
         return _GLIBC_FTS_HINT
     if "Not watching path" in text:
-        return "clamdの一時フォルダ（clamd.confのTemporaryDirectory）は監視対象にできません"
+        return "clamdの一時フォルダ（clamd.confのTemporaryDirectory）は監視するフォルダにできません"
     return ""
 
 
@@ -315,7 +315,7 @@ class ClamonaccRealtimeManager(QObject):
         self._mount_mode = bool(self._clamd_conf and self._clamd_conf.get_all("OnAccessMountPath"))
         self._exit_marker = f"{_EXIT_MARKER}{secrets.token_hex(8)}"
         command = self.build_command(clamonacc, targets, self._exclude_dirs())
-        logger.info(f"clamonaccを起動します: {clamonacc}（監視対象: {', '.join(targets)}）")
+        logger.info(f"clamonaccを起動します: {clamonacc}（監視するフォルダ: {', '.join(targets)}）")
         try:
             self._process = self._popen(
                 command,
@@ -389,7 +389,7 @@ class ClamonaccRealtimeManager(QObject):
     def _restart_if_running(self) -> None:
         # clamonaccは実行中に監視対象を変更できないため再起動で反映する（再度認証を求められる）
         if self.is_running:
-            logger.info("監視対象の変更を反映するためclamonaccを再起動します")
+            logger.info("監視するフォルダの変更を反映するためclamonaccを再起動します")
             self.stop()
             self.start()
 
@@ -439,13 +439,13 @@ class ClamonaccRealtimeManager(QObject):
             log_event(
                 CATEGORY_REALTIME,
                 f"clamd.confのOnAccessMountPath（{', '.join(mount_paths)}）が有効なため、clamonaccはマウントポイント全体を"
-                "監視します。アプリの監視対象・除外フォルダは使われず、OnAccessPreventionも働きません",
+                "監視します。アプリの監視するフォルダ・除外フォルダは使われず、OnAccessPreventionも働きません",
                 level=logging.WARNING,
                 error_code="E2005",
             )
         elif conf.is_enabled("OnAccessDisableDDD"):
             return (
-                f"{conf.path} でOnAccessDisableDDDが有効なため、clamonaccはアプリの監視対象を使えません。"
+                f"{conf.path} でOnAccessDisableDDDが有効なため、clamonaccはアプリの監視するフォルダを使えません。"
                 "OnAccessDisableDDDを削除（またはno）してください"
             )
         return ""
@@ -465,7 +465,7 @@ class ClamonaccRealtimeManager(QObject):
 
     def _emit_target_error(self, rejected: list[str]) -> None:
         detail = (
-            f"{', '.join(rejected)} は監視できないため、監視対象から外しました"
+            f"{', '.join(rejected)} は監視できないため、監視するフォルダから外しました"
             "（clamdの一時フォルダ（clamd.confのTemporaryDirectory）と/は、clamonaccの制限で監視できません）"
         )
         error = ClamonaccTargetError(detail=detail)
@@ -490,13 +490,13 @@ class ClamonaccRealtimeManager(QObject):
     def _check_target(self, path: str) -> bool:
         if _has_line_break(path):
             # 監視リストは1行1件のため、改行を含むパスは渡さない（別の行として解釈されてしまう）
-            log_event(CATEGORY_REALTIME, f"改行を含むフォルダは監視できないため監視対象から外しました: {path!r}", level=logging.WARNING, error_code="E2001")
+            log_event(CATEGORY_REALTIME, f"改行を含むフォルダは監視できないため監視するフォルダから外しました: {path!r}", level=logging.WARNING, error_code="E2001")
             self.watch_target_lost.emit(path)
             self._watch_target_service.disable_by_path(path)
             return False
         if Path(path).exists():
             return True
-        log_event(CATEGORY_REALTIME, f"監視対象フォルダが見つからないため監視を停止しました: {path}", level=logging.WARNING, error_code="E2001")
+        log_event(CATEGORY_REALTIME, f"監視するフォルダが見つからないため監視を停止しました: {path}", level=logging.WARNING, error_code="E2001")
         self.watch_target_lost.emit(path)
         self._watch_target_service.disable_by_path(path)
         return False
@@ -613,7 +613,7 @@ class ClamonaccRealtimeManager(QObject):
             return
         self._recent_detections[path] = now
         if not self._mount_mode and not is_under_any_folder(path, self._targets):
-            logger.warning(f"監視対象の外のパスの検知行のため、検知時アクションを行いません: {path!r} ({virus_name})")
+            logger.warning(f"監視するフォルダの外のパスの検知行のため、検知時アクションを行いません: {path!r} ({virus_name})")
             return
         # clamonaccの除外はフォルダ単位のみのため、ファイル・拡張子除外はここで反映する
         if self._exclude_service is not None and self._exclude_service.is_excluded(path):

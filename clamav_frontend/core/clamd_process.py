@@ -24,7 +24,7 @@ from core.background_task import BackgroundTask
 from core.clamav_service import ClamAVService
 from core.config_model import ClamdConfig
 from core.exceptions import AppError, ClamdConnectionError, ClamdProcessError
-from core.exec_path import child_env, system_tool
+from core.exec_path import child_env, no_window_kwargs, system_tool
 
 _DEFAULT_SERVICE_NAMES = {"Windows": "clamd", "Linux": "clamav-daemon"}
 #: sc start の「既に開始されています」（ERROR_SERVICE_ALREADY_RUNNING）
@@ -39,14 +39,6 @@ _SERVICE_NAME_RE = re.compile(r"[A-Za-z0-9_.@][A-Za-z0-9_.@-]{0,255}")
 
 def is_valid_service_name(name: str) -> bool:
     return bool(_SERVICE_NAME_RE.fullmatch(name))
-
-
-def no_window_kwargs(system: str) -> dict:
-    """Windowsでsc等を実行するときにコンソール画面を一瞬表示させない（配布版はコンソールを持たないため、
-    子プロセスごとに新しいコンソールが開いてしまう）"""
-    if system == "Windows":
-        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
-    return {}
 
 
 def console_text_kwargs(system: str) -> dict:

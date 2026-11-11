@@ -18,10 +18,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from api import actions
 from api.auth import require_admin
-from api.routes.read import exclude_item
-from core.diagnostics_service import mask_report
-from core.exceptions import ApiConflictError, AppError
-from core.logger import CATEGORY_SYSTEM
+from api.routes.read import exclude_item, freshclam_service_view
+from core.diagnostics_service import masked_report_text
+from core.exceptions import ApiConflictError, ApiNotFoundError, AppError
+from core.logger import CATEGORY_SYSTEM, CATEGORY_UPDATE
 
 logger = logging.getLogger("clamav_frontend")
 
@@ -58,6 +58,8 @@ class ScheduleBody(_Body):
     scan_type: str = Field(max_length=16)
     cron: str = Field(max_length=200)
     target: str = Field("", max_length=_MAX_TEXT)
+    #: スリープ中でも起こして実行する（段階 12-3c。PUT で送らなければ false になる）
+    wake: bool = False
 
 
 class PasswordBody(_Body):
@@ -102,11 +104,26 @@ async def stop_clamd(request: Request) -> Response:
     return _no_content()
 
 
+@router.put("/updates/freshclam-service")
+async def set_freshclam_service(body: EnabledBody, request: Request) -> dict:
+    """OS の定義更新サービス（clamav-freshclam）を開始（enable --now）・停止（disable --now）する"""
+    ctx = _ctx(request)
+    if ctx.freshclam_service is None:
+        raise ApiNotFoundError("OS の定義更新サービスがありません")
+    await run_in_threadpool(ctx.freshclam_service.set_running, body.enabled)
+    actions.audit(CATEGORY_UPDATE, "OS の定義更新サービス（clamav-freshclam）を" +
+                  ("開始し、PC の起動時に自動で起動するようにしました" if body.enabled
+                   else "停止し、PC の起動時に自動で起動しないようにしました"))
+    if ctx.notify_changed is not None:
+        await ctx.invoker.run(ctx.notify_changed, actions.CHANGED_FRESHCLAM)
+    return await run_in_threadpool(freshclam_service_view, ctx)
+
+
 @router.post("/diagnostics")
 async def run_diagnostics(request: Request) -> dict:
     report = await run_in_threadpool(_ctx(request).diagnostics_service.run)
     # 問い合わせ等に貼る前提の、伏せ字にした版を返す（ホームフォルダ・ユーザー名・ソケットのパスなど）
-    return {"has_problem": report.has_problem, "report": mask_report(report.to_text(), extra=report.sensitive)}
+    return {"has_problem": report.has_problem, "report": masked_report_text(report.to_text(), report.sensitive)}
 
 
 # -- 6.3 隔離 ---------------------------------------------------------------------------
@@ -168,14 +185,15 @@ async def remove_watch_target(request: Request, target_id: int) -> Response:
 # -- 6.6 スケジュール ---------------------------------------------------------------------
 @router.post("/schedules", status_code=201)
 async def add_schedule(request: Request, body: ScheduleBody) -> dict:
-    record = await _on_main(request, actions.add_schedule, body.name, body.scan_type, body.cron, body.target)
+    record = await _on_main(request, actions.add_schedule, body.name, body.scan_type, body.cron, body.target,
+                            body.wake)
     return asdict(record)
 
 
 @router.put("/schedules/{job_id}")
 async def update_schedule(request: Request, job_id: int, body: ScheduleBody) -> dict:
     record = await _on_main(
-        request, actions.update_schedule, job_id, body.name, body.scan_type, body.cron, body.target
+        request, actions.update_schedule, job_id, body.name, body.scan_type, body.cron, body.target, body.wake
     )
     return asdict(record)
 

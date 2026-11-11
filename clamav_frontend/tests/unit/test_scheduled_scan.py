@@ -44,7 +44,7 @@ def env(tmp_path, fake_clamd_server):
 
 
 def _run(env, action="quarantine", target=None, clamav_service=None, history_service=None):
-    # app.pyの_run_scheduled_scan()と同じ呼び出し方
+    # core/runtime.py と同じ呼び出し方
     return run_scheduled_scan(
         str(target if target is not None else env["target"]),
         "日次スキャン",

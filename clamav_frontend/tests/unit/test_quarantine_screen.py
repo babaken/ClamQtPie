@@ -103,9 +103,11 @@ class _Record(_FakeRecord):
     uuid: str = "uuid-1"
 
 
-def _screen_with(qtbot, records):
+def _screen_with(qtbot, records, batch=False):
     screen = _make_screen(qtbot)
-    service = MagicMock()
+    # 従来のサービス（1 件ずつ）。batch のときはトレイGUI のプロキシ（まとめて削除する delete_many がある）
+    methods = ["list_all", "restore", "delete_permanently", "quarantine"] + (["delete_many"] if batch else [])
+    service = MagicMock(spec=methods)
     service.list_all.return_value = records
     screen.bind_services(service)
     return screen, service
@@ -131,6 +133,18 @@ def test_bulk_delete_only_quarantined_rows(qtbot, monkeypatch):
     screen.delete_button.click()
 
     assert [c.args[0] for c in service.delete_permanently.call_args_list] == [1, 2]
+
+
+def test_bulk_delete_is_one_request_in_the_tray(qtbot, monkeypatch):
+    # トレイGUI: 管理者の権限の確認を 1 回にまとめる
+    screen, service = _screen_with(qtbot, [_rec(1), _rec(2), _rec(3, restored=True)], batch=True)
+    monkeypatch.setattr(quarantine_module, "show_confirm_dialog", lambda *a, **k: True)
+    screen.quarantine_table.selectAll()
+
+    screen.delete_button.click()
+
+    service.delete_many.assert_called_once_with([1, 2])
+    service.delete_permanently.assert_not_called()
 
 
 def test_detail_shows_all_fields(qtbot, monkeypatch):

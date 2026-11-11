@@ -921,7 +921,7 @@ def test_factory_passes_app_dirs_to_watchdog_manager(env):
 
 def test_detection_handled_reports_actual_quarantine_result(env, qtbot):
     # レビュー指摘: 隔離に失敗しても通知に「自動的に隔離されました」と出ていた。
-    # 通知（app.pyでnotify_detectionに接続）は、隔離を試した後の実際の結果で行う
+    # 通知（サービスの本体でnotify_detectionに接続）は、隔離を試した後の実際の結果で行う
     env["watch_target_service"].add(str(env["watched"]))
     manager = env["build"](default_action="quarantine")
     handled = []

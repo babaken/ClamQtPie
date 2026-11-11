@@ -32,8 +32,38 @@ from core.exceptions import (
     QuarantineRestoreConflictError,
     UnsafeExecutablePathError,
 )
+from core.logger import (
+    CATEGORY_QUARANTINE,
+    CATEGORY_REALTIME,
+    CATEGORY_SCAN,
+    CATEGORY_SYSTEM,
+    CATEGORY_UPDATE,
+    log_event,
+)
 
 logger = logging.getLogger("clamav_frontend")
+
+#: 断った要求のログのカテゴリ（ログ画面の絞り込みで、操作した機能のカテゴリから探せるように）。
+#: API のパスの先頭（/api/v1 の後）で決め、ここに無いものはシステム
+_CATEGORY_BY_RESOURCE = {
+    "scans": CATEGORY_SCAN,
+    "realtime": CATEGORY_REALTIME,
+    "updates": CATEGORY_UPDATE,
+    "quarantine": CATEGORY_QUARANTINE,
+}
+
+
+def _category_for(path: str) -> str:
+    parts = [part for part in path.split("/") if part]
+    # /api/v1/<resource>/...
+    resource = parts[2] if len(parts) > 2 and parts[0] == "api" else ""
+    return _CATEGORY_BY_RESOURCE.get(resource, CATEGORY_SYSTEM)
+
+
+def _log_refused(request: Request, text: str, reason: str, code: str) -> None:
+    log_event(_category_for(request.url.path), f"{text}: {request.method} {request.url.path}（{reason}）",
+              level=logging.WARNING, error_code=code)
+
 
 #: 例外の種類と HTTP の状態コード（上から順に照合し、最初に当てはまったものを使う）
 _STATUS_BY_ERROR: tuple[tuple[type[AppError], int], ...] = (
@@ -80,7 +110,10 @@ def _app_error_response(exc: AppError) -> JSONResponse:
     return JSONResponse(error_body(exc.code, exc.message, exc.detail), status_code=status, headers=headers)
 
 
-async def _handle_app_error(_request: Request, exc: AppError) -> JSONResponse:
+async def _handle_app_error(request: Request, exc: AppError) -> JSONResponse:
+    if isinstance(exc, ApiForbiddenError):
+        # 断った要求を残す（トレイGUI のエラーのダイアログの「詳細を見る」で、ログからこのコードを探せるように）
+        _log_refused(request, "権限が足りないため断りました", exc.detail or exc.message, exc.code)
     return _app_error_response(exc)
 
 
@@ -91,8 +124,13 @@ async def _handle_validation_error(_request: Request, exc: RequestValidationErro
                         status_code=400)
 
 
-async def _handle_value_error(_request: Request, exc: ValueError) -> JSONResponse:
-    return JSONResponse(error_body(_VALIDATION_CODE, _VALIDATION_MESSAGE, str(exc)), status_code=400)
+async def _handle_value_error(request: Request, exc: ValueError) -> JSONResponse:
+    # ValueError の文はサービスが利用者向けに書いた説明（「監視するフォルダがありません…」など）なので、
+    # それをメッセージにする。トレイGUI のエラーのダイアログはメッセージとコードだけを出すため、detail に
+    # 入れると届かない。断った要求はログにも残す（ダイアログの「詳細を見る」でこのコードを探せるように）
+    message = str(exc).strip() or _VALIDATION_MESSAGE
+    _log_refused(request, "リクエストを断りました", message, _VALIDATION_CODE)
+    return JSONResponse(error_body(_VALIDATION_CODE, message), status_code=400)
 
 
 #: FastAPI・Starlette が自分で返すエラー（存在しないパスなど）の表示用メッセージ

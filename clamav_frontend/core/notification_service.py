@@ -15,13 +15,14 @@ import ssl
 import smtplib
 import subprocess
 from email.mime.text import MIMEText
+from typing import Callable
 
 from core.activation import ALLOWED_SCREENS, SCREEN_QUARANTINE, toast_launch_uri
 from core.config_model import ConfigModel
 from core.config_service import ConfigService
 from core.detection_aggregator import DetectionAggregator, DetectionEvent
 from core.exceptions import DesktopNotifyError, KeyringUnavailableError, MailSendError
-from core.exec_path import child_env, system_tool
+from core.exec_path import child_env, find_system_tool, no_window_kwargs, system_tool
 from core.text_safety import visible_controls
 from core.version import APP_ID, APP_NAME
 
@@ -74,9 +75,14 @@ def _notify_send_text(text: str) -> str:
 
 
 class NotificationService:
-    def __init__(self, config_service: ConfigService, icon_path: str | None = None) -> None:
+    def __init__(self, config_service: ConfigService, icon_path: str | None = None,
+                 desktop_sink: Callable[[str, str, str | None], object] | None = None) -> None:
+        """desktop_sink: デスクトップ通知を表示する代わりに (title, body, open_screen) を渡す先。
+        サービスはデスクトップに通知を出せないため、core.notification_store.NotificationStore.add を渡して保存する
+        （サービス化・Web API設計書 7.1節）。None なら従来どおり表示する"""
         self._config_service = config_service
         self._icon_path = icon_path
+        self._desktop_sink = desktop_sink
         self._aggregator: DetectionAggregator | None = None
         self._rebuild_aggregator()
 
@@ -108,6 +114,11 @@ class NotificationService:
         )
         self._aggregator.add(event)
 
+    def flush_pending(self) -> None:
+        """集約の途中の検知通知を、待たずに出す（サービスの終了のとき。保存されずに消えないように）"""
+        if self._aggregator is not None:
+            self._aggregator.flush()
+
     def _on_detection_batch_ready(self, events: list[DetectionEvent]) -> None:
         notif = self.config.notification
         count = len(events)
@@ -137,14 +148,31 @@ class NotificationService:
             return
         self._send_desktop_notification("定義データベースの更新に失敗しました", detail)
 
-    def notify_definitions_stale(self, age_days: int) -> None:
-        """定義データベースが古くなった（update.stale_daysを超えた）ことを知らせる。定義更新の失敗と同じ設定に従う"""
+    def notify_definitions_stale(self, age_days: int, mail: bool = False) -> None:
+        """定義データベースが古くなった（update.stale_daysを超えた）ことを知らせる。定義更新の失敗と同じ設定に従う
+        mail: メールでも知らせる（サービス。サービス化・Web API設計書 6.1節。メールの通知が有効な場合）"""
         if not self.config.notification.on_update_fail:
             return
-        self._send_desktop_notification(
-            "ウイルス定義が古くなっています",
-            f"定義データベースが {age_days} 日更新されていません。定義更新を実行してください",
-        )
+        title = "ウイルス定義が古くなっています"
+        body = f"定義データベースが {age_days} 日更新されていません。定義更新を実行してください"
+        self._send_desktop_notification(title, body)
+        if mail and self.config.notification.on_detect_mail:
+            self._send_plain_mail(f"[{APP_NAME}] {title}", f"{body}\n\n本メールは{APP_NAME}から自動送信されています。\n")
+
+    def _send_plain_mail(self, subject: str, body: str) -> None:
+        """検知以外の知らせのメール。失敗してもリトライせずログに残すだけ（5.3節）"""
+        smtp = self.config.smtp
+        if not (smtp.host and smtp.from_address and smtp.to_address):
+            return
+        try:
+            password = self._config_service.get_smtp_password()
+            self._smtp_send(smtp, password, subject, body)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"メール通知の送信に失敗しました (detail: {exc})", extra={"error_code": "E7001"})
+
+    def notify_system(self, title: str, body: str) -> None:
+        """サービスの動きの知らせ（WebUI の自動 OFF など。段階 12-5a）。通知の設定に関係なく保存する"""
+        self._send_desktop_notification(title, body)
 
     def notify_job_failure(self, job_name: str, detail: str) -> None:
         if not self.config.notification.on_job_fail:
@@ -156,6 +184,12 @@ class NotificationService:
     # -- デスクトップ通知（4章） -----------------------------------------------
     def _send_desktop_notification(self, title: str, body: str, open_screen: str | None = None) -> None:
         """open_screen: クリック時に開く画面（Windows Toastのみ。Linuxのnotify-sendは仕様書4.2節どおりクリック動作なし）"""
+        if self._desktop_sink is not None:
+            try:
+                self._desktop_sink(title, body, open_screen)
+            except Exception as exc:  # noqa: BLE001 - 保存できなくても、メールの通知や検知後の処理は続ける
+                logger.warning(f"通知を保存できませんでした (detail: {exc})")
+            return
         try:
             if platform.system() == "Windows":
                 self._send_windows_toast(title, body, open_screen)
@@ -168,62 +202,10 @@ class NotificationService:
             )
 
     def _send_windows_toast(self, title: str, body: str, open_screen: str | None = None) -> None:
-        # PowerShell ToastNotificationManager経由（通知機能詳細仕様書4.1節）。
-        # 検知内容（title/body）はPowerShellスクリプトに文字列として埋め込まず、環境変数で渡して
-        # $env:経由で読む。環境変数の値はコードとして解釈されないため、ファイル名にどんな文字が含まれていても、
-        # 通知の文字列としてだけ扱われる
-        launch = ""
-        if open_screen in ALLOWED_SCREENS:
-            # クリックで clamqtpie:<画面> を開く（固定値のみ。toast_launch_uriの戻り値はALLOWED_SCREENS由来で安全）
-            launch = (
-                "$template.DocumentElement.SetAttribute('activationType', 'protocol'); "
-                f"$template.DocumentElement.SetAttribute('launch', '{toast_launch_uri(open_screen)}'); "
-            )
-        script = (
-            "[Windows.UI.Notifications.ToastNotificationManager, "
-            "Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null; "
-            "$template = [Windows.UI.Notifications.ToastNotificationManager]::"
-            "GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); "
-            "$texts = $template.GetElementsByTagName('text'); "
-            "$texts.Item(0).AppendChild($template.CreateTextNode($env:CLAMQTPIE_TOAST_TITLE)) | Out-Null; "
-            "$texts.Item(1).AppendChild($template.CreateTextNode($env:CLAMQTPIE_TOAST_BODY)) | Out-Null; "
-            + launch
-            + "$toast = [Windows.UI.Notifications.ToastNotification]::new($template); "
-            "[Windows.UI.Notifications.ToastNotificationManager]::"
-            # 差出人として通知に表示される名前（固定値のAPP_IDのみ。検知内容は埋め込まない）
-            f"CreateToastNotifier('{APP_ID}').Show($toast)"
-        )
-        # 管理者権限のPowerShellには、利用者が変えられる環境変数を引き継がない（core/exec_path.child_env）
-        env = child_env({"CLAMQTPIE_TOAST_TITLE": title, "CLAMQTPIE_TOAST_BODY": body}, "Windows")
-        try:
-            subprocess.run(
-                [system_tool("powershell", "Windows"), "-NoProfile", "-Command", script],
-                check=True,
-                capture_output=True,
-                timeout=10,
-                env=env,
-            )
-        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            raise DesktopNotifyError(detail=str(exc)) from exc
+        show_windows_toast(title, body, open_screen)
 
     def _send_linux_notify_send(self, title: str, body: str) -> None:
-        """title・body は、改行（本物の改行文字）のほかは文字どおりに表示させる（_notify_send_text）"""
-        # 多くの通知デーモンは本文の一部のマークアップ（<b>・<a href>等）を解釈するため、ファイル名などに
-        # 含まれる<・>・&をエスケープして、文字どおりに表示させる
-        cmd = [
-            system_tool("notify-send", "Linux"),
-            _notify_send_text(title),
-            _notify_send_text(body),
-            "--urgency=critical",
-            # 差出人の名前（固定値）。付けないと通知デーモンに「notify-send」と表示される
-            f"--app-name={APP_NAME}",
-        ]
-        if self._icon_path:
-            cmd.append(f"--icon={self._icon_path}")
-        try:
-            subprocess.run(cmd, check=True, capture_output=True, timeout=10)
-        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            raise DesktopNotifyError(detail=str(exc)) from exc
+        show_linux_notification(title, body, self._icon_path)
 
     # -- メール通知（5章） -----------------------------------------------------
     def _send_detection_mail(self, events: list[DetectionEvent]) -> None:
@@ -311,3 +293,120 @@ class NotificationService:
             )
         except Exception as exc:  # noqa: BLE001
             raise MailSendError(detail=str(exc)) from exc
+
+
+# -- デスクトップ通知（4章）。トレイGUI（段階 12-4b）も使う ---------------------------------------
+#: トレイGUI が出した Toast のまとまりの名前（既読になった通知を、通知センターから消すときに使う。固定値）
+TOAST_GROUP = "clamqtpie"
+_NOTIFICATIONS_DEST = "org.freedesktop.Notifications"
+
+
+def show_windows_toast(title: str, body: str, open_screen: str | None = None, tag: str | None = None) -> None:
+    """PowerShell ToastNotificationManager経由で Toast を出す（通知機能詳細仕様書4.1節）。
+    tag: 後で消すための名前（トレイGUI では通知の ID）。Group は TOAST_GROUP
+
+    検知内容（title/body）・tag はPowerShellスクリプトに文字列として埋め込まず、環境変数で渡して
+    $env:経由で読む。環境変数の値はコードとして解釈されないため、ファイル名にどんな文字が含まれていても、
+    通知の文字列としてだけ扱われる
+    """
+    launch = ""
+    if open_screen in ALLOWED_SCREENS:
+        # クリックで clamqtpie:<画面> を開く（固定値のみ。toast_launch_uriの戻り値はALLOWED_SCREENS由来で安全）
+        launch = (
+            "$template.DocumentElement.SetAttribute('activationType', 'protocol'); "
+            f"$template.DocumentElement.SetAttribute('launch', '{toast_launch_uri(open_screen)}'); "
+        )
+    tagging = f"$toast.Tag = $env:CLAMQTPIE_TOAST_TAG; $toast.Group = '{TOAST_GROUP}'; " if tag else ""
+    script = (
+        _TOAST_TYPES
+        + "$template = [Windows.UI.Notifications.ToastNotificationManager]::"
+        "GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); "
+        "$texts = $template.GetElementsByTagName('text'); "
+        "$texts.Item(0).AppendChild($template.CreateTextNode($env:CLAMQTPIE_TOAST_TITLE)) | Out-Null; "
+        "$texts.Item(1).AppendChild($template.CreateTextNode($env:CLAMQTPIE_TOAST_BODY)) | Out-Null; "
+        + launch
+        + "$toast = [Windows.UI.Notifications.ToastNotification]::new($template); "
+        + tagging
+        + "[Windows.UI.Notifications.ToastNotificationManager]::"
+        # 差出人として通知に表示される名前（固定値のAPP_IDのみ。検知内容は埋め込まない）
+        f"CreateToastNotifier('{APP_ID}').Show($toast)"
+    )
+    extra = {"CLAMQTPIE_TOAST_TITLE": title, "CLAMQTPIE_TOAST_BODY": body}
+    if tag:
+        extra["CLAMQTPIE_TOAST_TAG"] = tag
+    _run_powershell(script, extra)
+
+
+def remove_windows_toast(tag: str) -> None:
+    """show_windows_toast(tag=...) で出した Toast を、通知センターから消す（既読になった通知）"""
+    script = (
+        _TOAST_TYPES
+        + "[Windows.UI.Notifications.ToastNotificationManager]::History.Remove("
+        f"$env:CLAMQTPIE_TOAST_TAG, '{TOAST_GROUP}', '{APP_ID}')"
+    )
+    _run_powershell(script, {"CLAMQTPIE_TOAST_TAG": tag})
+
+
+_TOAST_TYPES = ("[Windows.UI.Notifications.ToastNotificationManager, "
+                "Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null; ")
+
+
+def _run_powershell(script: str, extra_env: dict[str, str]) -> None:
+    # 管理者権限のPowerShellには、利用者が変えられる環境変数を引き継がない（core/exec_path.child_env）
+    env = child_env(extra_env, "Windows")
+    try:
+        subprocess.run(
+            [system_tool("powershell", "Windows"), "-NoProfile", "-Command", script],
+            check=True,
+            capture_output=True,
+            timeout=10,
+            env=env,
+            **no_window_kwargs("Windows"),
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise DesktopNotifyError(detail=str(exc)) from exc
+
+
+def show_linux_notification(title: str, body: str, icon_path: str | None = None,
+                            print_id: bool = False) -> int | None:
+    """notify-send で通知を出す。print_id のときは、後で消すための通知の番号を返す（読めなければ None）
+
+    title・body は、改行（本物の改行文字）のほかは文字どおりに表示させる（_notify_send_text）。
+    多くの通知デーモンは本文の一部のマークアップ（<b>・<a href>等）を解釈するため、ファイル名などに
+    含まれる<・>・&をエスケープして、文字どおりに表示させる
+    """
+    cmd = [
+        system_tool("notify-send", "Linux"),
+        _notify_send_text(title),
+        _notify_send_text(body),
+        "--urgency=critical",
+        # 差出人の名前（固定値）。付けないと通知デーモンに「notify-send」と表示される
+        f"--app-name={APP_NAME}",
+    ]
+    if icon_path:
+        cmd.append(f"--icon={icon_path}")
+    if print_id:
+        cmd.append("--print-id")
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, timeout=10)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise DesktopNotifyError(detail=str(exc)) from exc
+    if not print_id:
+        return None
+    output = result.stdout.decode("ascii", "ignore") if isinstance(result.stdout, bytes) else str(result.stdout or "")
+    first = output.strip().split()[:1]
+    return int(first[0]) if first and first[0].isdigit() else None
+
+
+def close_linux_notification(notification_id: int) -> None:
+    """show_linux_notification(print_id=True) で出した通知を閉じる（既読になった通知。freedesktop の CloseNotification）"""
+    gdbus = find_system_tool("gdbus", "Linux")
+    if gdbus is None:
+        raise DesktopNotifyError(detail="gdbus が見つからないため、通知を閉じられません")
+    cmd = [gdbus, "call", "--session", "--dest", _NOTIFICATIONS_DEST, "--object-path",
+           "/org/freedesktop/Notifications", "--method", f"{_NOTIFICATIONS_DEST}.CloseNotification",
+           str(int(notification_id))]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=10)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise DesktopNotifyError(detail=str(exc)) from exc

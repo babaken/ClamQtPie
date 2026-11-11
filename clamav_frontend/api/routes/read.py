@@ -43,14 +43,17 @@ def get_status(request: Request) -> dict:
     ctx = _ctx(request)
     config = ctx.config_service.current
 
-    clamd = {"reachable": False, "engine_version": "", "database_version": "", "database_date": ""}
+    clamd = {"reachable": False, "verified": None, "engine_version": "", "database_version": "", "database_date": ""}
     try:
         if ctx.clamav_service.ping(retry=False):
             engine, db_version, db_date = ctx.clamav_service.get_version()
-            clamd = {"reachable": True, "engine_version": engine, "database_version": db_version,
+            clamd = {"reachable": True, "verified": None, "engine_version": engine, "database_version": db_version,
                      "database_date": db_date}
     except Exception:  # noqa: BLE001 - 応答しない clamd は「停止」として返す（ホーム画面と同じ）
         pass
+    # 接続先が clamd だと確かめられたか（サービスだけ。確かめられなければ接続しないため reachable も false。
+    # 別の PC の clamd は確かめられないため false のまま接続する）
+    clamd["verified"] = getattr(ctx.clamav_service, "endpoint_verified", None)
     # clamd が応答しない間は定義の日付が分からないため、古さも判定しない
     age = definitions_age_days(clamd["database_date"]) if clamd["reachable"] else None
 
@@ -72,8 +75,17 @@ def get_status(request: Request) -> dict:
         },
         "schedule": {"next_run": next_run or None, "next_job_name": next_job_name or None},
         "quarantine": {"count": sum(1 for q in ctx.quarantine_service.list_all() if not q.restored and not q.deleted)},
-        "web": {"enabled": False},  # WebUI は段階 12-5
+        "web": _web_status(ctx),
     }
+
+
+def _web_status(ctx) -> dict:
+    web = getattr(ctx, "web", None)
+    if web is None:
+        return {"enabled": False, "off_at": None, "lan": False}
+    status = web.status()
+    # lan: LAN から待ち受けているか（WebUI の画面に出す。段階 12-5e2）
+    return {"enabled": status["enabled"], "off_at": status["off_at"], "lan": bool(status.get("lan_listening"))}
 
 
 # -- 6.3〜6.7 一覧 ---------------------------------------------------------------------
@@ -132,6 +144,19 @@ def list_watch_targets(request: Request, limit: int = Limit, offset: int = Offse
 def list_schedules(request: Request, limit: int = Limit, offset: int = Offset) -> dict:
     items = [asdict(record) for record in _ctx(request).scheduler_service.list_all()]
     return _page(items, limit, offset)
+
+
+def freshclam_service_view(ctx) -> dict:
+    """OS の定義更新サービス（clamav-freshclam）の状態と、誰が定義を更新しているかの説明"""
+    from core.freshclam_service import FreshclamServiceState, summary_text
+
+    state = ctx.freshclam_service.status() if ctx.freshclam_service is not None else FreshclamServiceState()
+    return {**state.to_dict(), "summary": summary_text(state, ctx.config_service.current.update.auto_update)}
+
+
+@router.get("/updates/freshclam-service")
+def get_freshclam_service(request: Request) -> dict:
+    return freshclam_service_view(_ctx(request))
 
 
 @router.get("/updates/history")

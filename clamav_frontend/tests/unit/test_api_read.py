@@ -105,14 +105,14 @@ def test_read_apis_need_a_token(env, path):
 
 def test_status(env):
     body = _get(env, "/status").json()
-    assert body["clamd"] == {"reachable": True, "engine_version": "ClamAV 1.5.4", "database_version": "28170",
+    assert body["clamd"] == {"reachable": True, "verified": None, "engine_version": "ClamAV 1.5.4", "database_version": "28170",
                              "database_date": "Fri Oct 30 08:00:00 2026"}
     assert body["realtime"] == {"running": True, "mode": "watchdog監視"}
     assert body["scan"] == {"running": False}
     assert body["update"]["running"] is False and body["update"]["auto_update"] is True
     assert body["schedule"] == {"next_run": "2026-11-01T03:00:00+09:00", "next_job_name": "毎晩フルスキャン"}
     assert body["quarantine"] == {"count": 1}  # 復元済みは数えない
-    assert body["web"] == {"enabled": False}
+    assert body["web"] == {"enabled": False, "off_at": None, "lan": False}
     assert isinstance(body["definitions"]["age_days"], int)
 
 
@@ -187,7 +187,8 @@ def test_csv_export_neutralizes_formulas(env):
     assert "attachment" in response.headers["content-disposition"]
     text = response.content.decode("utf-8-sig")
     rows = list(csv.reader(io.StringIO(text)))
-    assert rows[0] == ["日時", "レベル", "カテゴリ", "メッセージ"]
-    messages = [row[3] for row in rows[1:]]
+    assert rows[0] == ["日時", "レベル", "カテゴリ", "コード", "メッセージ"]
+    assert [row[3] for row in rows[1:]] == ["E8004", "", ""]
+    messages = [row[4] for row in rows[1:]]
     assert all(not m.startswith(("=", "+", "-", "@")) for m in messages)
     assert "'=HYPERLINK(\"http://x\")" in messages  # 先頭に ' を付けて文字として扱わせる

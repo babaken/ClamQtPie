@@ -11,6 +11,7 @@ Phase 11: 直近アクティビティ（ログから最大10件）、カード�
 """
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -28,12 +29,16 @@ from PySide6.QtWidgets import (
 )
 
 from core.definitions import definitions_age_days
+from core.exceptions import AppError
 from core.logger import CATEGORY_QUARANTINE, CATEGORY_REALTIME, CATEGORY_SCAN, CATEGORY_UPDATE
 from gui import icons
 from gui.plain_text import plain, plain_tooltip
 from gui.screens.base import BaseScreen, make_card, wrap_layout
 from gui.theme import COLOR_NG, COLOR_OK, COLOR_TEXT_MUTED, COLOR_WARN, set_accent, set_variant
 
+# サービスにつながらないときの案内。clamqtpie-ctl は root（Windows は管理者）で動かす
+_CTL_STATUS_HINT = ("管理者のコマンドプロンプトで clamqtpie-ctl status" if sys.platform == "win32"
+                    else "端末で sudo clamqtpie-ctl status")
 #: 直近アクティビティの最大件数（画面設計書1章）
 ACTIVITY_LIMIT = 10
 #: 直近アクティビティで読む過去のログの日数
@@ -150,12 +155,12 @@ class HomeScreen(BaseScreen):
         self.realtime_settings_button.clicked.connect(lambda: self._navigate("realtime"))
         self.engine_button.clicked.connect(lambda: self._navigate("engine"))
         cards = [
-            ("scan", "ウイルス スキャン", "ファイル・フォルダーを ClamAV で検査します。クイック スキャンは"
+            ("scan", "ウイルス スキャン", "ファイル・フォルダを ClamAV で検査します。クイック スキャンは"
              "デスクトップ・ダウンロード・ドキュメント等を対象にします。",
              (self.scan_now_button, self.custom_scan_button)),
             ("update", "ウイルス定義", "freshclam で最新のウイルス定義データベースを取得します。",
              (self.update_now_button,)),
-            ("realtime", "リアルタイム ファイル監視", "監視対象のフォルダーで作成・変更されたファイルを自動でスキャンします。",
+            ("realtime", "リアルタイム ファイル監視", "監視するフォルダで作成・変更されたファイルを自動でスキャンします。",
              (self.toggle_realtime_button, self.realtime_settings_button)),
             ("engine", "ClamAV エンジン サービス", "検査を行う常駐サービス clamd の状態確認と起動・停止を行います。",
              (self.engine_button,)),
@@ -176,6 +181,8 @@ class HomeScreen(BaseScreen):
         self._realtime_manager = None
         self._log_reader_service = None
         self._status = AppStatus()
+        #: トレイGUI: サービスにつながらないときのエラーコード（set_service_down）
+        self._service_down: str | None = None
         self._on_quick_scan = None
         self._on_update_now = None
         self._on_toggle_realtime = None
@@ -196,7 +203,7 @@ class HomeScreen(BaseScreen):
     ) -> None:
         """
         on_quick_scan / on_update_now / on_toggle_realtime / on_navigate:
-            他画面への遷移と実処理起動はMainWindow（app.py）側のコールバックに委譲する
+            他画面への遷移と実処理起動はトレイGUI（tray_main.py）側のコールバックに委譲する
             （画面間の直接依存を避けるため）。
         stale_days: 定義が古いと判断する日数を返す関数（設定 update.stale_days。保存後の値を毎回読む）
         """
@@ -221,8 +228,8 @@ class HomeScreen(BaseScreen):
         check_clamd=Falseの場合はclamdへの問い合わせとアクティビティの再読込を省略し、
         リアルタイム監視の状態のみ更新する（短い間隔での定期更新用。clamdの状態は前回の結果を引き継ぐ）。
         """
-        if self._clamav_service is None:
-            return
+        if self._clamav_service is None or self._service_down is not None:
+            return  # サービスにつながらない間は、clamd の状態を問い合わせない（止まって見えるため）
 
         if check_clamd:
             try:
@@ -264,9 +271,21 @@ class HomeScreen(BaseScreen):
         self._update_hero()
         self.status_refreshed.emit(self._status)
 
+    def set_service_down(self, code: str | None) -> None:
+        """トレイGUI: サービスにつながらない（code はエラーコード）・つながった（None）"""
+        self._service_down = code
+        if code is not None:
+            self.clamd_status_card.set_value("不明", COLOR_TEXT_MUTED)
+            self._update_hero()
+
     def _update_hero(self) -> None:
         status = self._status
-        if status.clamd_running is None:
+        if self._service_down is not None:
+            title = "ClamQtPie サービスにつながりません"
+            detail = (f"サービスが止まっているか、起動の途中です。つながると表示が戻ります（{self._service_down}）。"
+                      f"止まったままのときは、{_CTL_STATUS_HINT}を実行して状態を確かめてください。")
+            color = COLOR_NG
+        elif status.clamd_running is None:
             title, detail, color = "状態を確認しています...", "", COLOR_TEXT_MUTED
         elif not status.clamd_running:
             title = "ClamAV エンジン サービスが停止しています"
@@ -292,7 +311,7 @@ class HomeScreen(BaseScreen):
         self.hero_title_label.setStyleSheet(f"color: {color};" if color else "")
         self.hero_detail_label.setText(detail)
         self.hero_detail_label.setVisible(bool(detail))
-        set_accent(self.hero_card, status.clamd_running is False)
+        set_accent(self.hero_card, status.clamd_running is False or self._service_down is not None)
 
     def refresh_activity(self) -> None:
         """直近アクティビティ（スキャン・検知・更新・隔離のログ）を新しい順に最大10件表示する"""
@@ -300,8 +319,12 @@ class HomeScreen(BaseScreen):
             return
         # 日をまたいでも直近のアクティビティが消えないよう、過去のファイルも直近の分だけ読む
         since = date.today() - timedelta(days=ACTIVITY_DAYS)
+        try:
+            all_entries = self._log_reader_service.read_entries(since=since)
+        except AppError:
+            return  # サービスにつながらない間（トレイGUI）は、前回の表示を残す
         entries = [
-            e for e in self._log_reader_service.read_entries(since=since)
+            e for e in all_entries
             if e.category in _ACTIVITY_SCREENS and e.level != "DEBUG"
         ][-ACTIVITY_LIMIT:]
         self.activity_table.setRowCount(0)

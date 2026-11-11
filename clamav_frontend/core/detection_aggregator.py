@@ -49,7 +49,7 @@ class DetectionAggregator:
         with self._lock:
             if self._batch is None:
                 self._batch = _Batch()
-                timer = threading.Timer(self._window_sec, self._flush)
+                timer = threading.Timer(self._window_sec, self.flush)
                 timer.daemon = True
                 self._batch.timer = timer
                 timer.start()
@@ -59,7 +59,8 @@ class DetectionAggregator:
             if len(self._batch.events) >= self._max_batch_size:
                 self._flush_locked()
 
-    def _flush(self) -> None:
+    def flush(self) -> None:
+        """まとめている途中の検知を、待たずに確定する（サービスの終了のとき。消えないように）"""
         with self._lock:
             self._flush_locked()
 

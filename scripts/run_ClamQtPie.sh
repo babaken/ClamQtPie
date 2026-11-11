@@ -1,7 +1,8 @@
 #!/bin/sh
-# ClamQtPie を開発環境から起動する。
+# ClamQtPie のトレイGUI を開発環境から起動する（root は要らない）。
+# 先にサービスを動かしておく（sudo scripts/install_service.sh、または service_main.py --console）。
 # Python は CLAMQTPIE_PYTHON（例: venv の bin/python）、clamav_frontend/.venv、PATH の python3 の順に探す。
-# 引数はそのまま app.py に渡す。
+# 引数はそのまま tray_main.py に渡す。
 cd "$(dirname "$0")/../clamav_frontend" || exit 1
 
 if [ -n "$CLAMQTPIE_PYTHON" ]; then
@@ -13,4 +14,4 @@ else
     PYTHON=python3
 fi
 
-exec "$PYTHON" app.py "$@"
+exec "$PYTHON" tray_main.py "$@"

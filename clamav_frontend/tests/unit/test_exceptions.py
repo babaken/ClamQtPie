@@ -25,6 +25,8 @@ def test_subclass_is_instance_of_app_error():
     err = ConfigWriteError()
     assert isinstance(err, AppError)
     assert err.code == "E6001"
+    # 設定の置き場所はプログラムのフォルダではないため、実行ファイルの配置場所を案内しない
+    assert "実行ファイル" not in err.message and "設定ファイルの置き場所" in err.message
 
 
 def test_str_representation_includes_code():

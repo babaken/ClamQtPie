@@ -2,7 +2,7 @@
 TrayIcon — タスクトレイ常駐アイコン・メニュー
 
 参照: タスクトレイ常駐アプリプロセス設計書5章、画面設計書9章
-- メニュー: メイン画面を開く／今すぐスキャン／定義更新／リアルタイム監視ON-OFF／終了
+- メニュー: メイン画面を開く／今すぐスキャン／定義更新／リアルタイム監視ON-OFF／未読の通知／WebUI／終了
 - アイコン状態: 通常／監視中／検知あり(未対応)／エラー（優先順位: エラー > 検知あり > 監視中 > 通常）
 """
 from __future__ import annotations
@@ -63,12 +63,20 @@ class TrayIcon(QSystemTrayIcon):
         self.update_now_action = QAction("定義更新", self._menu)
         self.toggle_realtime_action = QAction("リアルタイム監視 ON/OFF", self._menu)
         self.toggle_realtime_action.setCheckable(True)
+        # 未読の通知の一覧（トレイGUI だけ。サービスが保存した通知。段階 12-4b）
+        self.notifications_action = QAction("未読の通知", self._menu)
+        self.notifications_action.setVisible(False)
+        # WebUI の ON/OFF・ログインの設定（サービスにつながってから中身を作る。段階 12-5c。gui/webui_menu.py）
+        self.webui_menu = QMenu("WebUI", self._menu)
+        self.webui_menu.menuAction().setVisible(False)
         self.quit_action = QAction("終了", self._menu)
 
         self._menu.addAction(self.open_action)
         self._menu.addAction(self.scan_now_action)
         self._menu.addAction(self.update_now_action)
         self._menu.addAction(self.toggle_realtime_action)
+        self._menu.addAction(self.notifications_action)
+        self._menu.addMenu(self.webui_menu)
         self._menu.addSeparator()
         self._menu.addAction(self.quit_action)
         self.setContextMenu(self._menu)
@@ -106,4 +114,14 @@ class TrayIcon(QSystemTrayIcon):
 
     def set_warning(self, text: str | None) -> None:
         """ツールチップに注意を出す（Noneで消す）。定義が古いなど、アイコンの状態にはしない注意に使う"""
-        self.setToolTip(f"{APP_NAME}\n{text}" if text else APP_NAME)
+        self._warning = text
+        self._update_tooltip()
+
+    def set_note(self, text: str | None) -> None:
+        """ツールチップの最後に添える案内（Noneで消す）。トレイGUI の未読の通知の件数"""
+        self._note = text
+        self._update_tooltip()
+
+    def _update_tooltip(self) -> None:
+        lines = [APP_NAME] + [t for t in (getattr(self, "_warning", None), getattr(self, "_note", None)) if t]
+        self.setToolTip("\n".join(lines))

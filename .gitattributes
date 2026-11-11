@@ -1,3 +1,7 @@
 # 起動スクリプトの改行コードを固定する（core.autocrlf の設定に左右されないように）
 *.sh  text eol=lf
 *.bat text eol=crlf
+# Linux の配布物に入れるもの（systemd・polkit・デスクトップの項目）
+*.service text eol=lf
+*.policy  text eol=lf
+*.desktop text eol=lf

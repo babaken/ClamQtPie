@@ -3,6 +3,7 @@
 
 参照: 画面設計書6章
 Phase6: UpdateDispatcherとの結線を追加
+OS の定義更新サービス（Linux の clamav-freshclam）の状態の表示と、開始・停止（freshclam_service。無い OS では出さない）
 """
 from __future__ import annotations
 
@@ -17,8 +18,11 @@ from PySide6.QtWidgets import (
     QTextEdit,
 )
 
+from core.background_task import BackgroundTask
+from core.exceptions import AppError
 from gui.error_dialog import show_error_dialog
 from gui.screens.base import BaseScreen
+from gui.time_text import local_time_text
 from gui.theme import set_variant
 from gui.plain_text import plain
 
@@ -53,6 +57,33 @@ class UpdateScreen(BaseScreen):
         self.progress_bar.setVisible(False)
         self.add_layout_widget(self.progress_bar)
 
+        # OS の定義更新サービス（Linux の clamav-freshclam）。ある OS でだけ出す
+        self.freshclam_card = self.begin_card("OS の定義更新サービス (clamav-freshclam)")
+        self.freshclam_state_label = QLabel("状態: -")
+        self.freshclam_boot_label = QLabel("PC の起動時に自動で起動する: -")
+        self.freshclam_summary_label = QLabel("")
+        self.freshclam_summary_label.setWordWrap(True)
+        for label in (self.freshclam_state_label, self.freshclam_boot_label, self.freshclam_summary_label):
+            label.setObjectName("cardText")
+            self.add_layout_widget(label)
+        freshclam_buttons = QHBoxLayout()
+        self.freshclam_start_button = QPushButton("▶ 開始")
+        self.freshclam_stop_button = QPushButton("■ 停止")
+        self.freshclam_start_button.clicked.connect(lambda: self._set_freshclam_running(True))
+        self.freshclam_stop_button.clicked.connect(lambda: self._set_freshclam_running(False))
+        freshclam_buttons.addWidget(self.freshclam_start_button)
+        freshclam_buttons.addWidget(self.freshclam_stop_button)
+        freshclam_buttons.addStretch(1)
+        buttons_frame = QFrame()
+        buttons_frame.setLayout(freshclam_buttons)
+        self.add_layout_widget(buttons_frame)
+        hint = QLabel("停止すると、PC の起動時にも起動しなくなり、定義の更新は ClamQtPie の自動更新が行います。"
+                      "開始すると、PC の起動時にも自動で起動し、定義の更新は OS のサービスが行います。")
+        hint.setObjectName("cardText")
+        hint.setWordWrap(True)
+        self.add_layout_widget(hint)
+        self.freshclam_card.setVisible(False)
+
         self.begin_card("freshclam の更新出力")
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
@@ -71,16 +102,24 @@ class UpdateScreen(BaseScreen):
         self._clamav_service = None
         self._config_service = None
         self._on_open_settings = None
+        self._freshclam_service = None
+        #: OS の定義更新サービスの最後に読んだ状態（core.freshclam_service.FreshclamServiceState.to_dict()＋summary）
+        self._freshclam_state: dict | None = None
+        self._freshclam_task = BackgroundTask()
+        self._freshclam_task.finished.connect(self._on_freshclam_task_finished)
 
     # -- サービス層との結線 -----------------------------------------------------
     def bind_services(
-        self, update_service, update_dispatcher, clamav_service, config_service=None, on_open_settings=None
+        self, update_service, update_dispatcher, clamav_service, config_service=None, on_open_settings=None,
+        freshclam_service=None,
     ) -> None:
+        """freshclam_service: OS の定義更新サービス（status()・set_running(bool) が状態の dict を返す）。None なら出さない"""
         self._update_service = update_service
         self._update_dispatcher = update_dispatcher
         self._clamav_service = clamav_service
         self._config_service = config_service
         self._on_open_settings = on_open_settings
+        self._freshclam_service = freshclam_service
 
         self._update_dispatcher.log_line.connect(self._on_log_line)
         self._update_dispatcher.finished.connect(self._on_finished)
@@ -89,12 +128,55 @@ class UpdateScreen(BaseScreen):
         self.reload_version_label()
         self.reload_auto_update_label()
 
+    # -- OS の定義更新サービス -----------------------------------------------------
+    def showEvent(self, event) -> None:  # noqa: N802 - Qtのオーバーライド
+        super().showEvent(event)
+        self.reload_freshclam_service()  # 端末などで変えられていることがあるため、開くたびに読み直す
+
+    def reload_freshclam_service(self) -> None:
+        """状態を読み直す（systemctl を呼ぶため、別のスレッドで）"""
+        if self._freshclam_service is not None:
+            self._run_freshclam_task("status", self._freshclam_service.status)
+
+    def _set_freshclam_running(self, running: bool) -> None:
+        if self._freshclam_service is not None:
+            self._run_freshclam_task("set", lambda: self._freshclam_service.set_running(running))
+
+    def _run_freshclam_task(self, name: str, func) -> None:
+        if self._freshclam_task.run(name, func):
+            self._update_freshclam_buttons()
+
+    def _on_freshclam_task_finished(self, name: str, result, error) -> None:
+        if error is None and isinstance(result, dict):
+            self.apply_freshclam_state(result)
+        elif error is not None and name == "set":
+            show_error_dialog(self, error if isinstance(error, AppError) else AppError(detail=str(error)))
+        self._update_freshclam_buttons()
+
+    def apply_freshclam_state(self, state: dict) -> None:
+        self._freshclam_state = state
+        available = bool(state.get("available"))
+        self.freshclam_card.setVisible(available)
+        if available:
+            self.freshclam_state_label.setText("状態: " + ("動いています" if state.get("active") else "止まっています"))
+            self.freshclam_boot_label.setText("PC の起動時に自動で起動する: " + ("する" if state.get("enabled") else "しない"))
+            self.freshclam_summary_label.setText(state.get("summary", ""))
+        self._update_freshclam_buttons()
+
+    def _update_freshclam_buttons(self) -> None:
+        state = self._freshclam_state or {}
+        busy = self._freshclam_task.is_running
+        # 開始・停止は「今の状態」と「PC の起動時」の両方を揃える。片方だけ違うときは、どちらのボタンも押せる
+        self.freshclam_start_button.setEnabled(not busy and not (state.get("active") and state.get("enabled")))
+        self.freshclam_stop_button.setEnabled(not busy and bool(state.get("active") or state.get("enabled")))
+
     def reload_auto_update_label(self) -> None:
         if self._config_service is None:
             return
         update = self._config_service.current.update
         text = f"有効（{update.interval_hours}時間ごと）" if update.auto_update else "無効"
         self.auto_update_label.setText(f"自動更新: {text}")
+        self.reload_freshclam_service()  # 誰が定義を更新するかの説明は、自動更新の ON/OFF で変わる
 
     def _on_open_settings_clicked(self) -> None:
         if self._on_open_settings is not None:
@@ -120,7 +202,7 @@ class UpdateScreen(BaseScreen):
             result_label = {"success": "成功", "failure": "失敗", "no_change": "最新"}.get(
                 record.result, record.result
             )
-            values = [record.executed_at, result_label, record.before_version, record.after_version]
+            values = [local_time_text(record.executed_at), result_label, record.before_version, record.after_version]
             for col, value in enumerate(values):
                 self.history_table.setItem(row, col, QTableWidgetItem(value))
 

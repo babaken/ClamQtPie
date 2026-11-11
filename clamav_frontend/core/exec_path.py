@@ -17,6 +17,7 @@ import os
 import platform
 import posixpath
 import stat
+import subprocess
 
 from core.exceptions import UnsafeExecutablePathError
 
@@ -62,6 +63,17 @@ def find_system_tool(name: str, system: str | None = None) -> str | None:
     昇格に使うpkexec等の有無の確認に使う（PATHは利用者が変えられるため使わない）"""
     path = system_tool(name, system)
     return path if os.path.isfile(path) else None
+
+
+def no_window_kwargs(system: str | None = None) -> dict:
+    """Windows でコンソールのコマンド（sc・net・powershell など）を起動するときに、コンソールのウィンドウを出さない指定。
+
+    ウィンドウを持たないプロセス（トレイGUI・昇格ヘルパー・インストーラから起動したもの）がコンソールのコマンドを
+    そのまま起動すると、子プロセスごとに新しいコンソールが開き、一瞬見える（既定の端末が Windows Terminal の
+    Windows 11 では、Windows Terminal のウィンドウが開く。Windows の実機で発見）"""
+    if (system or platform.system()) == "Windows":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    return {}
 
 
 def child_env(extra: dict[str, str] | None = None, system: str | None = None) -> dict[str, str] | None:

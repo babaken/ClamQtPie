@@ -37,28 +37,28 @@ def test_schedule_screen_loads_jobs(qtbot):
         _FakeSchedule(1, "daily-scan", True, "0 3 * * *", "/home", "scan", "", "2026-07-18T03:00:00")
     ]
 
-    screen.bind_services(service)
+    screen.bind_services(service, MagicMock())
 
     assert screen.job_table.rowCount() == 1
     assert screen.job_table.item(0, 0).text() == "daily-scan"
 
 
-def test_schedule_screen_delete_requires_confirmation(qtbot, monkeypatch):
+def test_schedule_screen_delete_waits_for_save(qtbot):
+    # 削除は［変更を保存］まで送らない（保存するまでは取り消せる）
     screen = ScheduleScreen()
     qtbot.addWidget(screen)
     service = MagicMock()
     service.list_all.return_value = [
         _FakeSchedule(1, "daily-scan", True, "0 3 * * *", "/home", "scan", "", "")
     ]
-    screen.bind_services(service)
+    sent = []
+    screen.bind_services(service, sent.append)
     screen.job_table.selectRow(0)
 
-    import gui.screens.schedule as schedule_module
-
-    monkeypatch.setattr(schedule_module, "show_confirm_dialog", lambda *a, **k: False)
     screen.delete_job_button.click()
-
-    service.remove_job.assert_not_called()
+    assert sent == [] and screen.has_unsaved_changes()
+    screen.discard_changes()
+    assert not screen.has_unsaved_changes() and sent == []
 
 
 def test_schedule_screen_run_now_calls_service(qtbot):
@@ -68,7 +68,7 @@ def test_schedule_screen_run_now_calls_service(qtbot):
     service.list_all.return_value = [
         _FakeSchedule(1, "daily-scan", True, "0 3 * * *", "/home", "scan", "", "")
     ]
-    screen.bind_services(service)
+    screen.bind_services(service, MagicMock())
     screen.job_table.selectRow(0)
 
     screen.run_now_button.click()

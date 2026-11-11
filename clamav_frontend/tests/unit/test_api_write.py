@@ -356,6 +356,25 @@ def test_watch_targets(env):
                                   ("remove_target", str(folder))]
 
 
+def test_same_folder_written_differently_is_not_added_twice(env):
+    """末尾の区切り・「.」の違い（Windows は大文字と小文字の違いも）では、同じフォルダを 2 回登録しない"""
+    import os
+
+    folder = env.tmp / "Watch"
+    folder.mkdir()
+    response = _call(env, "POST", "/realtime/targets", {"path": str(folder) + os.sep})
+    assert response.status_code == 201
+    assert response.json()["path"] == str(folder)  # 書き方をそろえて保存する
+    variants = [str(folder) + os.sep, os.path.join(str(folder), ".")]
+    if os.name == "nt":
+        variants.append(str(folder).upper())
+    for variant in variants:
+        refused = _call(env, "POST", "/realtime/targets", {"path": variant})
+        assert refused.status_code == 400
+        assert "すでに監視するフォルダにあります" in refused.json()["error"]["message"]
+    assert len(_call(env, "GET", "/realtime/targets").json()["items"]) == 1
+
+
 @pytest.mark.parametrize("path", ["relative", "/no/such/folder/for/clamqtpie"])
 def test_watch_target_must_be_an_existing_absolute_folder(env, path):
     assert _call(env, "POST", "/realtime/targets", {"path": path}).status_code == 400
@@ -375,6 +394,15 @@ def test_schedules_crud(env):
     assert _call(env, "DELETE", f"/schedules/{job['id']}").status_code == 204
     assert env.context.scheduler_service.list_all() == []
     assert env.changed == ["schedules"] * 4
+
+
+def test_schedule_wake_flag(env):
+    body = {"name": "毎晩", "scan_type": "update", "cron": "0 3 * * *", "wake": True}
+    job = _call(env, "POST", "/schedules", body).json()
+    assert job["wake"] is True
+    # PUT は全体を置き換える（送らなければ起こさない）
+    assert _call(env, "PUT", f"/schedules/{job['id']}", {**body, "wake": False}).json()["wake"] is False
+    assert _call(env, "PUT", f"/schedules/{job['id']}", {**body, "wake": "yes"}).status_code in (400, 422)
 
 
 def test_scan_schedule_target_must_be_absolute(env):
@@ -414,7 +442,9 @@ def test_get_config_hides_api_settings_and_password(env):
     assert "api" not in body
     assert body["smtp"]["has_password"] is True
     assert "secret" not in str(body)
-    assert {"update.freshclam_path", "clamd.tcp_port", "general.autostart"} <= set(body["protected"])
+    assert {"update.freshclam_path", "clamd.tcp_port"} <= set(body["protected"])
+    # 利用者ごとの GUI の設定（gui.json）は、サービスの設定に含めない
+    assert "general" not in body and "general.autostart" not in body["protected"]
     assert "realtime.default_action" not in body["protected"]
 
 
@@ -434,7 +464,7 @@ def test_put_config_changes_the_live_settings(env):
 
 @pytest.mark.parametrize("field", ["update.freshclam_path", "realtime.clamonacc_path", "clamd.tcp_host",
                                    "clamd.tcp_port", "clamd.service_name", "clamd.connection_type",
-                                   "clamd.max_concurrent_connections", "general.autostart"])
+                                   "clamd.max_concurrent_connections"])
 def test_protected_settings_cannot_be_changed(env, field):
     # 実行ファイルの場所・clamd の接続先・サービス名・画面で変えられない項目は、Web API からは変えられない
     body = _config_body(env)
@@ -455,6 +485,12 @@ def test_protected_settings_cannot_be_changed(env, field):
 def test_api_settings_are_not_accepted(env):
     body = _config_body(env)
     body["api"] = {"enabled": True, "port": 8765}
+    assert _call(env, "PUT", "/config", body).status_code == 400
+
+
+def test_gui_settings_are_not_accepted(env):
+    body = _config_body(env)
+    body["general"] = {"autostart": False}
     assert _call(env, "PUT", "/config", body).status_code == 400
 
 

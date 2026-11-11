@@ -3,10 +3,10 @@ ClamAV エンジン サービス画面
 
 画面レイアウト刷新で追加。従来ホーム画面にあったclamdの「起動」ボタンを独立した画面にし、
 停止・定義データベースの再読み込み（RELOAD）・状態確認（PING）を加えた。
-- 起動はapp.pyのClamdStarter（停止検知時の自動起動と共通）に委譲する（on_start_clamd）
+- 起動はトレイGUI（tray_main.py）（停止検知時の自動起動と共通）に委譲する（on_start_clamd）
 - 停止・再読み込み・状態確認はBackgroundTaskでバックグラウンド実行する（sc / systemctl・pkexecの認証待ちで
   GUIを止めないため）
-- 稼働状態の表示はHomeScreen.refresh_status()の結果（AppStatus）をapp.pyから受け取る（apply_status）
+- 稼働状態の表示はHomeScreen.refresh_status()の結果（AppStatus）をトレイGUIから受け取る（apply_status）
 """
 from __future__ import annotations
 
@@ -106,12 +106,12 @@ class EngineScreen(BaseScreen):
     ) -> None:
         """
         controller: ClamdServiceController（停止とサービス名の表示に使う）
-        on_start_clamd: 起動の実処理（app.pyのClamdStarter）。起動試行を始めたらTrue、既に試行中ならFalseを返す。
+        on_start_clamd: 起動の実処理（トレイGUI がサービスに頼む）。起動試行を始めたらTrue、既に試行中ならFalseを返す。
             完了はon_start_clamd_finished()で受け取る
-        on_stop_requested: この画面から停止を要求したとき、停止処理を始める前に呼ぶ（app.pyで停止検知時の自動起動を抑止する）。
+        on_stop_requested: この画面から停止を要求したとき、停止処理を始める前に呼ぶ（停止検知時の自動起動を抑止する）。
             停止の完了後ではなく要求の時点で呼ぶのは、停止処理中（systemctl stopの待ち・sc stopのSTOP_PENDING）に
             定期確認のPINGが失敗して自動起動が走らないようにするため（レビューで指摘）
-        on_stop_failed: 停止に失敗したとき（または停止処理を始められなかったとき）に呼ぶ（app.pyで抑止を元に戻す）
+        on_stop_failed: 停止に失敗したとき（または停止処理を始められなかったとき）に呼ぶ（抑止を元に戻す）
         on_refresh: 稼働状態の再取得（HomeScreen.refresh_status。結果はapply_status()で届く）
         """
         self._clamav_service = clamav_service
@@ -126,7 +126,7 @@ class EngineScreen(BaseScreen):
         self._update_buttons()
 
     def reload_service_name(self) -> None:
-        """OSのサービス名の表示を更新する（設定の保存後にapp.pyから呼ばれる）"""
+        """OSのサービス名の表示を更新する（設定の保存後に呼ばれる）"""
         if self._controller is not None:
             self.service_label.setText(f"OSのサービス名: {self._controller.service_name}")
 
@@ -178,7 +178,7 @@ class EngineScreen(BaseScreen):
         self._update_buttons()
 
     def on_start_clamd_finished(self, ok: bool, error=None) -> None:
-        """clamd起動試行の完了時にapp.pyから呼ばれる（自動起動の完了でも呼ばれる）"""
+        """clamd起動試行の完了時に呼ばれる（自動起動の完了でも呼ばれる）"""
         if self._starting or ok:
             self.append_output("clamd が起動しました" if ok else f"起動できませんでした: {_describe(error)}")
         self._starting = False

@@ -3,7 +3,10 @@
 
 - realtime.*: リアルタイム監視のシグナル（検知・検知後の扱い・監視対象の消失・エラー）
 - status: 稼働状態が変わったとき（ホーム画面の定期確認の結果から。変わったときだけ出す）
-- config.changed: 設定を保存したとき（画面・Web API のどちらで保存しても。app.py から呼ぶ）
+- config.changed: 設定を保存したとき（画面・Web API のどちらで保存しても。サービスの本体から呼ぶ）
+- schedule.finished: スケジュールのジョブの最終実行結果を記録したとき（段階 12-3c）
+- notification・notification.acked: 通知を保存したとき・既読にしたとき（サービスのみ。段階 12-3c）
+- data.changed: Web API で一覧などを変えたとき（{"what": 変えた対象}。トレイGUI・WebUI が開いている画面を読み直す）
 
 リアルタイム監視のシグナルは監視のスレッドから出るため、EventHub.publish（任意のスレッドから呼べる）に直接つなぐ。
 """
@@ -33,6 +36,18 @@ def connect_realtime(events: EventHub, realtime_manager) -> None:
         lambda error: events.publish("realtime.error", {"code": getattr(error, "code", "E2000"),
                                                         "message": getattr(error, "message", ""),
                                                         "reason": error_reason_of(error)}))
+
+
+def connect_scheduler(events: EventHub, scheduler_service) -> None:
+    """スケジュールのジョブの結果を schedule.finished で知らせる（APScheduler のスレッドから呼ばれる）"""
+    scheduler_service.on_job_finished = lambda job_id, name, result, note: events.publish(
+        "schedule.finished", {"job_id": job_id, "name": visible_controls(name), "result": result, "note": note})
+
+
+def connect_notifications(events: EventHub, notification_store) -> None:
+    """通知の保存・既読を notification・notification.acked で知らせる（保存は検知の集約のスレッドなどから呼ばれる）"""
+    notification_store.on_added = lambda item: events.publish("notification", item)
+    notification_store.on_acked = lambda ids: events.publish("notification.acked", {"ids": ids})
 
 
 def error_reason_of(error) -> str:
@@ -83,3 +98,16 @@ class StatusPublisher:
 
 def publish_config_changed(events: EventHub) -> None:
     events.publish("config.changed", {})
+
+
+#: data.changed で知らせる対象（api/actions.py の CHANGED_*）。設定は config.changed、スキャン・定義の更新の開始は
+#: scan.started・update.started、監視の開始・停止は status で知らせるため、ここには入れない
+DATA_CHANGED_TARGETS = frozenset({"excludes", "targets", "quarantine", "schedules", "logs", "clamd", "freshclam"})
+
+
+def data_changed_publisher(events: EventHub):
+    """ApiContext.notify_changed に渡す（サービスの中には画面がないため、変えた対象をトレイGUI・WebUI に知らせる）"""
+    def publish(what: str) -> None:
+        if what in DATA_CHANGED_TARGETS:
+            events.publish("data.changed", {"what": what})
+    return publish

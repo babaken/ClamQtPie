@@ -177,9 +177,20 @@ def test_linux_root_update_avoids_log_lock_when_freshclam_service_runs(linux_ser
     calls["service_active"] = True
     calls["process"] = _FakeProcess(["Database updated"], 0)
 
-    service.update_now(interactive=False)
+    service.update_now(interactive=True)
 
     assert calls["popen"] == [["/usr/bin/freshclam", "--log=/dev/null"]]
+
+
+def test_linux_root_unattended_update_is_left_to_the_os_service(linux_service, monkeypatch):
+    # root で動くサービスでも、OS のサービスが更新しているなら、自動・スケジュールでは重ねて更新しない
+    service, calls = linux_service
+    monkeypatch.setattr("core.update_service.os.geteuid", lambda: 0, raising=False)
+    calls["service_active"] = True
+
+    record = service.update_now(interactive=False)
+
+    assert record.result == "skipped" and calls["popen"] == []
 
 
 def test_linux_pkexec_auth_cancel(linux_service):
@@ -294,3 +305,19 @@ def test_windows_freshclam_does_not_inherit_user_environment(update_service, mon
 
     assert received and received[0] is not None
     assert "CLAMQTPIE_TEST_USER_VARIABLE" not in received[0]
+
+
+def test_skips_are_logged_only_when_they_begin(linux_service, monkeypatch):
+    """OS のサービスが更新している間の見送りは、始まったときだけ記録する（自動更新の間隔ごとに並べない）"""
+    logged = []
+    monkeypatch.setattr("core.update_service.log_event", lambda category, message, *a, **k: logged.append(message))
+    service, calls = linux_service
+    calls["service_active"] = True
+    for _ in range(3):
+        assert service.update_now(interactive=False).result == "skipped"
+    assert len(logged) == 1 and "実行しませんでした" in logged[0]
+    calls["service_active"] = False  # OS のサービスを止めた
+    service.update_now(interactive=False)
+    calls["service_active"] = True  # また動かした
+    service.update_now(interactive=False)
+    assert sum("実行しませんでした" in m for m in logged) == 2

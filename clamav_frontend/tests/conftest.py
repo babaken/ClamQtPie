@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-# Python 3.15の遅延import対策（app.pyと同じ。core/lazy_import_fix.py）
+# Python 3.15の遅延import対策（各入口と同じ。core/lazy_import_fix.py）
 from core.lazy_import_fix import reify_concurrent_futures  # noqa: E402
 
 reify_concurrent_futures()

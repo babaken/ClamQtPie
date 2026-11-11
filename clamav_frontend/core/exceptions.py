@@ -71,7 +71,7 @@ class RealtimeError(AppError):
 
 class WatchTargetLostError(RealtimeError):
     default_code = "E2001"
-    default_message = "監視対象フォルダが見つかりません"
+    default_message = "監視するフォルダが見つかりません"
 
 
 class WatchBufferOverflowError(RealtimeError):
@@ -183,7 +183,8 @@ class ConfigError(AppError):
 
 class ConfigWriteError(ConfigError):
     default_code = "E6001"
-    default_message = "設定を保存できませんでした。実行ファイルの配置場所の書き込み権限を確認してください"
+    #: 設定はサービスが保存する（段階 12。置き場所はプログラムのフォルダではない）
+    default_message = "設定を保存できませんでした。設定ファイルの置き場所の空き容量と書き込み権限を確認してください"
 
 
 class ConfigValidationError(ConfigError):
@@ -305,6 +306,27 @@ class ServiceVersionMismatchError(ApiError):
 class ApiReauthRequiredError(ApiError):
     default_code = "E8108"
     default_message = "この操作の前に、確認コード（またはパスワード）を入力してください"
+
+
+class ServicePermissionError(ApiError):
+    """トレイGUI側で使う（user.token を読めない＝ClamQtPie Users・clamqtpie グループに入っていない）"""
+
+    default_code = "E8110"
+    default_message = "この PC の ClamQtPie を使う権限がありません"
+
+
+class ElevationCancelledError(ApiError):
+    """トレイGUI側で使う（UAC・pkexec の確認、昇格ヘルパーの確認画面で取り消した。段階 12-4c）"""
+
+    default_code = "E8111"
+    default_message = "管理者の権限での操作を取り消しました"
+
+
+class ElevationError(ApiError):
+    """トレイGUI側で使う（昇格ヘルパーを起動できない・応答が正しくない。段階 12-4c）"""
+
+    default_code = "E8112"
+    default_message = "管理者の権限で操作を実行できませんでした"
 
 
 class ApiNotFoundError(ApiError):

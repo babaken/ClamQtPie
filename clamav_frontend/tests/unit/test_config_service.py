@@ -18,7 +18,7 @@ def test_creates_default_config_when_missing(tmp_path):
     model = service.load()
 
     assert config_path.exists()
-    assert model.schema_version == 1
+    assert model.schema_version == 2
     assert model.general.autostart is True
     assert model.clamd.tcp_port == 3310
 
@@ -118,3 +118,21 @@ def test_invalid_api_settings_are_auto_corrected(tmp_path, api):
 
     assert model.api.enabled is False
     assert model.api.port == 8765
+
+
+def test_without_secret_store_the_smtp_password_is_not_kept(tmp_path):
+    # SMTP パスワードは秘密の保存先（FileSecretStore）にだけ置く。keyring には保存しない（段階 12-4e）
+    from core.exceptions import KeyringUnavailableError
+
+    service = ConfigService(tmp_path / "config.json")
+    assert service.get_smtp_password() is None
+    with pytest.raises(KeyringUnavailableError):
+        service.set_smtp_password("secret")
+    service.delete_smtp_password()  # 何もしない
+
+
+def test_config_is_always_saved_as_the_service_config(tmp_path):
+    service = ConfigService(tmp_path / "config.json")
+    service.save(service.current)
+    saved = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert saved["schema_version"] == 2 and "general" not in saved

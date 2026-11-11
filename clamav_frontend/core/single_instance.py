@@ -24,6 +24,9 @@ from core.version import APP_ID, APP_SLUG
 logger = logging.getLogger("clamav_frontend")
 
 _MUTEX_NAME = f"Global\\{APP_ID}_SingleInstance"
+#: サービスのクライアントになったトレイGUI（段階 12-4）のミューテックス。ログオンのセッションごと（12章 42）。
+#: 監視・スキャンはサービスが行うため、複数の利用者がそれぞれのセッションでトレイGUI を動かしてよい
+TRAY_MUTEX_NAME = f"Local\\{APP_ID}_Tray"
 
 
 def default_lock_dir() -> Path:
@@ -43,11 +46,14 @@ class SingleInstanceLock:
         self,
         lock_dir: Path | None = None,
         other_instance_running: Callable[[], bool] | None = None,
+        mutex_name: str | None = None,
     ) -> None:
         """lock_dir: Linuxのロックファイル置き場（省略時はdefault_lock_dir()。Windowsでは使わない）
         other_instance_running: 本アプリの別のプロセスが動いているか（省略時はanother_instance_running。テスト用の差し替え口）
         """
         self._lock_dir = lock_dir or default_lock_dir()
+        #: Windows のミューテックスの名前（トレイGUI は TRAY_MUTEX_NAME。省略時は従来のアプリの _MUTEX_NAME）
+        self._mutex_name = mutex_name
         self._other_instance_running = other_instance_running or another_instance_running
         self._is_windows = platform.system() == "Windows"
         self._mutex_handle = None
@@ -68,7 +74,7 @@ class SingleInstanceLock:
             import winerror
 
             try:
-                self._mutex_handle = win32event.CreateMutex(None, False, _MUTEX_NAME)
+                self._mutex_handle = win32event.CreateMutex(None, False, self._mutex_name or _MUTEX_NAME)
             except pywintypes.error as exc:
                 # 管理者権限で起動中のインスタンスが作成したGlobal mutexには、
                 # 通常権限のプロセスからはアクセス拒否になる。これも「起動済み」の候補とする

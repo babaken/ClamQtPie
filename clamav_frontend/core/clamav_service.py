@@ -102,12 +102,20 @@ class ClamAVService:
         self,
         config: ClamdConfig,
         restart_clamd: Callable[[], bool] | None = None,
+        verify_endpoint: bool = False,
+        clamd_user: str | None = None,
     ) -> None:
         """
         restart_clamd: clamdサービスの起動を試みるコールバック（core/clamd_process.py、E8003関連）
+        verify_endpoint: 接続の前に相手が clamd かを確かめる（サービス。core/peer_verify.py。段階 12-3d）
+        clamd_user: clamd.conf の User（Linux で、待ち受け・ソケットの所有者として認める利用者）
         """
         self.config = config
         self._client = ClamdClient(config)
+        if verify_endpoint:
+            from core.peer_verify import ClamdEndpointVerifier
+
+            self._client.verifier = ClamdEndpointVerifier(config, clamd_user=clamd_user)
         self._restart_clamd = restart_clamd
         self._semaphore = threading.Semaphore(config.max_concurrent_connections)
         # プロトコル設計書5章「キュー超過時はリアルタイム検知を優先」: オンデマンドスキャンは
@@ -171,6 +179,12 @@ class ClamAVService:
     @property
     def endpoint(self) -> str:
         return self._client.endpoint
+
+    @property
+    def endpoint_verified(self) -> bool | None:
+        """接続先が clamd だと確かめられたか（確かめない従来のアプリ・まだ接続していなければ None）"""
+        verifier = self._client.verifier
+        return None if verifier is None else verifier.verified
 
     def get_version(self) -> tuple[str, str, str]:
         return self._client.get_version()

@@ -2,8 +2,8 @@
 旧名（ClamAVフロントエンド / ClamQt）で登録した内容を、新しい名前（ClamQtPie）へ引き継ぐ
 
 製品名の変更でOSに登録する識別子を変えた（core/version.py）。旧版から置き換えた環境で、
-次のものが旧名のまま残って動かなくなる・二重に登録されるのを防ぐため、起動時に1回ずつ確認する。
-- SMTPパスワード（キーリングのサービス名 ClamAVFrontend → ClamQtPie）: 新しいサービス名へ移す
+次のものが旧名のまま残って動かなくなる・二重に登録されるのを防ぐため、トレイGUI の起動時に確認する
+（tray_main.take_over_legacy_registrations）。
 - 自動起動（Runキーの値 ClamAVFrontend / clamav-frontend.desktop）: 旧版の実行ファイルを指しているため、
   消して現在の実行ファイルで登録し直す
 - 通知クリック用のURLスキーム（clamqt:）: 旧版の補助プログラムを指しているため消す（新しい clamqtpie: は
@@ -12,6 +12,7 @@
   ロックファイルを消し、空になったフォルダを消す
 
 どれも失敗しても起動は止めない（ログに記録するだけ）。
+旧名の keyring の SMTP パスワードは、clamqtpie-ctl migrate が旧版の設定と一緒に移す（core/portable_migration.py）。
 """
 from __future__ import annotations
 
@@ -20,7 +21,6 @@ import os
 import platform
 from pathlib import Path
 
-from core.logger import CATEGORY_SYSTEM, log_event
 from core.version import LEGACY_APP_SLUG, LEGACY_PROTOCOL
 
 logger = logging.getLogger("clamav_frontend")
@@ -29,25 +29,6 @@ logger = logging.getLogger("clamav_frontend")
 _LEGACY_HELPER_MARKERS = ("ClamAVFrontendActivate.exe", "notify_activate.py")
 #: 旧版のユーザー単位のフォルダに置いていたファイル
 _LEGACY_STATE_FILES = ("show_request", "show_request.tmp", "app.lock")
-
-
-def migrate_legacy_names(config_service, autostart_service, winreg_module=None) -> list[str]:
-    """旧名の登録を引き継ぐ。引き継いだ項目の説明を返す（ログにも記録する）"""
-    migrated: list[str] = []
-    if config_service.migrate_legacy_smtp_password():
-        migrated.append("SMTPパスワード")
-    try:
-        if autostart_service.migrate_legacy():
-            migrated.append("OS起動時の自動起動")
-    except Exception as exc:  # noqa: BLE001 - 起動は止めない
-        logger.warning(f"旧名の自動起動の登録を引き継げませんでした (detail: {exc})")
-    if remove_legacy_protocol(winreg_module):
-        migrated.append(f"通知クリック用のURLスキーム（{LEGACY_PROTOCOL}:）の削除")
-    if remove_legacy_state_dir():
-        migrated.append(f"旧フォルダ（{LEGACY_APP_SLUG}）の削除")
-    if migrated:
-        log_event(CATEGORY_SYSTEM, f"旧名で登録した内容を引き継ぎました: {'、'.join(migrated)}")
-    return migrated
 
 
 def remove_legacy_protocol(winreg_module=None) -> bool:
