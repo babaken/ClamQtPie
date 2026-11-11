@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import socket
+import ssl
 import sys
 import threading
 import time
@@ -83,6 +84,22 @@ def create_listen_socket(port: int, host: str = LOOPBACK_HOST, allow_lan: bool =
     return sock
 
 
+#: HTTPS で受け付ける最も古い TLS の版
+MINIMUM_TLS_VERSION = ssl.TLSVersion.TLSv1_2
+
+
+def require_modern_tls(config: uvicorn.Config) -> None:
+    """HTTPS のときは、TLS 1.2 より古い版を受け付けないよう SSL の設定に明示する
+
+    Python 3.10 以降の既定でも TLS 1.2 以上だが、Python・OpenSSL の既定に任せず、ここで決める。
+    uvicorn は待ち受けの開始の前に設定を読み込んでいなければ読み込む（load）ため、先に読み込んでから変える。
+    """
+    if not config.loaded:
+        config.load()
+    if config.ssl is not None:
+        config.ssl.minimum_version = MINIMUM_TLS_VERSION
+
+
 class ApiServer:
     """uvicorn をスレッドで動かす。start() で待ち受けを始め、stop() で止める"""
 
@@ -136,10 +153,11 @@ class ApiServer:
             proxy_headers=False,
             # 止めるときは、つながったままのイベントの購読（SSE）を待ち続けずに切る
             timeout_graceful_shutdown=1,
-            # HTTPS（WebUI だけ）。TLS 1.2 より古いものは Python の既定の設定で受け付けない
+            # HTTPS（WebUI だけ）。TLS 1.2 より古いものは受け付けない（require_modern_tls）
             ssl_certfile=self._tls[0] if self._tls else None,
             ssl_keyfile=self._tls[1] if self._tls else None,
         )
+        require_modern_tls(config)
         self._server = uvicorn.Server(config)
         self._thread = threading.Thread(
             target=self._server.run, kwargs={"sockets": [self._socket, *self._extra_sockets]}, name=self._name,

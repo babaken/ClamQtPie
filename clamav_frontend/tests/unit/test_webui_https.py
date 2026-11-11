@@ -305,13 +305,34 @@ def test_real_https_listener_is_trusted_with_the_local_ca(tmp_path):
     server.start()
     try:
         context = ssl.create_default_context(cafile=str(ca.path(CA_CERT)))
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         with socket.create_connection(("127.0.0.1", server.port), timeout=5) as raw:
             with context.wrap_socket(raw, server_hostname="127.0.0.1") as tls:
                 assert tls.version() in ("TLSv1.2", "TLSv1.3")
         plain = ssl.create_default_context()  # CA を登録していなければ、つながらない
+        plain.minimum_version = ssl.TLSVersion.TLSv1_2
         with socket.create_connection(("127.0.0.1", server.port), timeout=5) as raw:
             with pytest.raises(ssl.SSLCertVerificationError):
                 plain.wrap_socket(raw, server_hostname="127.0.0.1")
+    finally:
+        server.stop()
+
+
+def test_https_listener_sets_the_minimum_tls_version(tmp_path, monkeypatch):
+    # TLS 1.2 より古い版を受け付けないことを、Python・OpenSSL の既定に任せず設定に明示する。
+    # 既定もすでに TLS 1.2 のため、決めた値がそのまま設定に入ることを TLS 1.3 に変えて確かめる
+    # （手元の OpenSSL は別の設定（セキュリティレベル）でも古い版を断るため、接続を試す形では確かめられない）
+    import api.server as server_module
+
+    assert server_module.MINIMUM_TLS_VERSION == ssl.TLSVersion.TLSv1_2
+    monkeypatch.setattr(server_module, "MINIMUM_TLS_VERSION", ssl.TLSVersion.TLSv1_3)
+    ca = _ca(tmp_path)
+    server = server_module.ApiServer(
+        create_app(ApiTokens(tmp_path / "api")), 0, name="WebUI", event_tag="web",
+        tls=(str(ca.path(local_ca.SERVER_CERT)), str(ca.path(local_ca.SERVER_KEY))))
+    server.start()
+    try:
+        assert server._server.config.ssl.minimum_version == ssl.TLSVersion.TLSv1_3
     finally:
         server.stop()
 

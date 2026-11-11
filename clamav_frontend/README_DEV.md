@@ -1722,3 +1722,11 @@ v0.10.0 の公開側の CodeQL が、`api/web_static.py` の `static_file` を�
 
 - 配るファイルのパスを読み込みのときに作っておき（`_FILE_PATHS`）、要求の名前はその表を引く鍵にだけ使う。表に無い名前は、これまでどおり 404
 - 動きは変わらない
+
+## 91. WebUI の HTTPS で受け付ける TLS の最も古い版を明示する
+
+v0.10.0 の後の公開側の CodeQL が、テスト（`tests/unit/test_webui_https.py`）の接続する側の TLS の設定を「TLS 1.0・1.1 を許している」と指摘した。Python 3.10 以降の既定は接続する側・待ち受ける側とも TLS 1.2 以上のため、実際には古い版は使われないが、本番の WebUI の HTTPS（`api/server.py`、uvicorn）も最も古い版を自分では決めておらず、Python・OpenSSL の既定に任せていた。
+
+- `api/server.py`: `require_modern_tls()` で、HTTPS のときは SSL の設定の `minimum_version` を `MINIMUM_TLS_VERSION`（TLS 1.2）にする。uvicorn の `ssl_context_factory` は新しい版にしか無いため、先に `config.load()` で設定を読み込んでから変える（uvicorn は読み込み済みなら読み直さない）
+- テストの接続する側も TLS 1.2 以上を明示する
+- テストは、決めた値がそのまま設定に入ることを、値を TLS 1.3 に変えて確かめる。TLS 1.1 で接続して断られることを確かめる形は、手元の OpenSSL 3.5 が別の設定（セキュリティレベル）でも古い版を断り、こちらの設定を外しても通ってしまったため採らなかった
