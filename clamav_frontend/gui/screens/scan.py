@@ -40,7 +40,7 @@ from core.clamav_service import (
 )
 from core.exceptions import AppError
 from core.logger import CATEGORY_SCAN, log_event
-from core.scan_history_service import MAX_ERRORS
+from core.records import SCAN_HISTORY_MAX_ERRORS as MAX_ERRORS
 from core.text_safety import visible_controls
 from gui.error_dialog import show_confirm_dialog, show_error_dialog
 from gui.plain_text import plain, plain_tooltip

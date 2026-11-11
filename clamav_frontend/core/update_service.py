@@ -19,7 +19,6 @@ import os
 import platform
 import shutil
 import subprocess
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -37,6 +36,7 @@ from core.exec_path import (
     windows_clamav_dirs,
 )
 from core.logger import CATEGORY_UPDATE, log_event
+from core.records import UpdateHistoryRecord
 from db.database import DatabaseService
 from db.models import UpdateHistory
 
@@ -59,16 +59,6 @@ _FRESHCLAM_LOG_OVERRIDE = "--log=/dev/null"
 _PKEXEC_AUTH_FAILED_CODES = (126, 127)
 #: 失敗時の詳細に含めるfreshclamのエラー行の最大数
 _MAX_ERROR_LINES = 3
-
-
-@dataclass
-class UpdateHistoryRecord:
-    id: int
-    executed_at: str
-    result: str  # "success" | "failure" | "no_change" | "skipped"（skippedは履歴に記録しない）
-    before_version: str
-    after_version: str
-    detail: str = ""  # 失敗・スキップの理由（DBには保存しない。画面・通知・ログ用）
 
 
 def _to_record(row: UpdateHistory) -> UpdateHistoryRecord:

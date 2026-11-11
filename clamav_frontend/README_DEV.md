@@ -1742,3 +1742,11 @@ v0.10.0 の後に回した設計書の改訂（§86）。インストーラ・�
 - `docs/テスト仕様書.md` 9 章: 実行方法、段階 12 のテストの一覧、セキュリティの試験（何を守るか）、実機の確認のチェックリスト
 
 改訂していない設計書（config.json スキーマ定義書・通知機能詳細仕様書・リアルタイム監視の詳細設計書・DB マイグレーション設計書・要件定義書）は、段階 12 で変わった点を README_DEV の各節に記録している。改訂するかは別に決める。
+
+## 93. トレイGUI がサービスだけの部品を読み込まないようにする
+
+Rust の検証（`trial/rust`、internal の `docs/dig/2026-11-11-rust-verification.md`）の計測で見つけた。トレイGUI は、表示用の型（`ScheduleRecord`・`UpdateHistoryRecord`・`WatchTargetRecord`）と cron 式の解釈（`cron_trigger`）、スキャン履歴の上限（`MAX_ERRORS`）を、サービスの部品（`core.scheduler_service` など）から取り出していた。そのため、トレイGUI では使わない SQLAlchemy・Alembic（と、その先の Mako・pygments）・APScheduler・DB のモデルまで読み込んでいた。
+
+- 型と上限は `core/records.py`、cron 式の解釈は `core/cron.py`（APScheduler は呼んだときにだけ読み込む）に移した。元のモジュールからも同じ名前で使える（サービスの側は変えていない）
+- 開発の環境（Windows、Python 3.15）での `tray_main` の読み込み: RSS 117.5 MB → 52.8 MB、時間 0.93 秒 → 0.23 秒
+- テスト（`tests/unit/test_tray_light_imports.py`）: トレイGUI・昇格ヘルパーの読み込みで、SQLAlchemy・Alembic・APScheduler・FastAPI・uvicorn・pydantic・watchdog・`db` を読み込まないこと

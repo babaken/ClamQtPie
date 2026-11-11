@@ -25,9 +25,7 @@ from core.config_model import ConfigModel
 from core.gui_config import gui_config_path, read_gui_general, save_gui_general
 from core.exceptions import AppError
 from core.log_reader_service import LogEntry, LogReaderService
-from core.scheduler_service import ScheduleRecord
-from core.update_service import UpdateHistoryRecord
-from core.watch_target_service import WatchTargetRecord
+from core.records import ScheduleRecord, UpdateHistoryRecord, WatchTargetRecord
 
 logger = logging.getLogger("clamav_frontend")
 
