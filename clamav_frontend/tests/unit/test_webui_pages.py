@@ -43,8 +43,18 @@ def test_only_the_page_files_are_served(env):
     script = env.browser.get("/web/app.js")
     assert script.status_code == 200 and script.headers["content-type"].startswith("text/javascript")
     assert script.headers["x-content-type-options"] == "nosniff"
+    style = env.browser.get("/web/style.css")
+    assert style.status_code == 200 and style.headers["content-type"].startswith("text/css")
     for name in ("index.html.bak", "..%2Fapi%2Fauth.py", "config.json", "%2e%2e/app.py"):
         assert env.browser.get(f"/web/{name}").status_code == 404
+
+
+def test_served_paths_are_fixed_in_advance():
+    # 要求の名前は表を引く鍵にだけ使い、パスの組み立てには使わない
+    from api import web_static
+
+    assert set(web_static._FILE_PATHS) == set(web_static.FILES)
+    assert all(path.parent == WEB_DIR and path.is_file() for path in web_static._FILE_PATHS.values())
 
 
 def test_api_errors_on_the_webui_also_get_the_headers(env):
