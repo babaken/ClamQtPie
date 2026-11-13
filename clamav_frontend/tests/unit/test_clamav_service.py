@@ -426,3 +426,19 @@ def test_stream_fallback_does_not_wait_on_named_pipe(fake_clamd_server, tmp_path
     assert results[0].detail == NOT_REGULAR_FILE_DETAIL
     assert error_reason(results[0].detail) != "permission"
     assert "INSTREAM" not in fake_clamd_server.commands
+
+
+def test_clamd_stream_limit_is_classified_as_size_limit(fake_clamd_server, tmp_path):
+    # clamd の StreamMaxLength がアプリの上限より小さいとき、そのファイルは上限を超えて未検査になる
+    from core.clamav_service import ERROR_REASON_SIZE_LIMIT, error_reason
+
+    target = tmp_path / "big.bin"
+    target.write_bytes(b"x" * 1000)
+    fake_clamd_server.response_map["SCAN"] = f"{target}: Access denied. ERROR"
+    fake_clamd_server.response_map["INSTREAM"] = "INSTREAM size limit exceeded. ERROR"
+
+    results = _service_for(fake_clamd_server).scan_file(str(target))
+
+    assert results[0].path == str(target)
+    assert results[0].status == "ERROR"
+    assert error_reason(results[0].detail) == ERROR_REASON_SIZE_LIMIT

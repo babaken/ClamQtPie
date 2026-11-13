@@ -198,6 +198,8 @@ class ScanWorker(QObject):
                 scanned += 1
                 continue
             except Exception as exc:  # noqa: BLE001 - 1ファイルの想定外の失敗でスキャン全体を止めない
+                if self._stop_requested:
+                    break  # 停止操作で通信を打ち切った結果のエラーは、想定外のエラーとして扱わない
                 # 止まると完了の合図も出ず、画面が「スキャン中」のまま戻らなくなる
                 logger.exception(f"スキャン中に想定外のエラーが発生しました: {visible_controls(str(path))}",
                                  extra={"error_code": "E9001"})

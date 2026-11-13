@@ -1803,3 +1803,12 @@ Windows のリアルタイム監視は、パスごとに `threading.Timer`（1 �
 - `api_client/proxies.py`: `ScanDispatcherProxy.resync()` で、サービスの実行中のスキャン（`GET /scans/current`）を取り直して状態を合わせる。イベントの受信がつながってから 1 秒後に呼ぶ（先に、切れていた間のイベントの送り直しを受け取るため）。実行中のスキャンが無ければ、ジョブの結果（無ければ中断）で `finished` を出し、画面を戻す。切れていた間に始まったスキャンがあれば実行中にする
 - ［停止］で E8104 が返ったら、エラーを出さずに `resync()` で状態を合わせる。合わせられなかったとき（サービスにつながらないなど）だけ、これまでどおりエラーを出す
 - テスト: 起動し直した後の番号が前より大きいこと、古い番号でつなぎ直しても新しいイベントが届くこと、状態の取り直し（無い・終わっていた・始まっていた）、［停止］の E8104、つながった後に取り直すこと
+
+## 100. スキャンを［停止］しても、応答待ちのファイルを想定外のエラーにしない
+
+スキャンを［停止］すると、clamd の応答を待っていたファイルが E9001（想定外のエラー）になり、ERROR のログとトレースバックが残っていた。エラーの数も 1 つ増え、そのファイルが「想定外のエラー: OSError」になった（#72。Linux 実機の確認で発見）。
+
+- 原因: ［停止］は、応答待ちのソケットを `ClamdClient.abort_thread()` で閉じる。FILDES（Linux の既定）で、閉じた後に結果の待ちに入ると `settimeout(None)` が `OSError`（EBADF）になり、`ClamdConnectionError` に置き換えられていなかった。`ScanWorker._run` は `ClamdConnectionError`・`AppError` では停止を確かめて抜けるが、`except Exception`（E9001）の分かれ道には、その確かめが無かった
+- `core/clamd_client.py`: 送信（`_sendall`）と結果の待ちに入るところ（`_wait_without_timeout`）の `OSError` を `ClamdConnectionError`（タイムアウトは `ClamdTimeoutError`）にする。INSTREAM の送信の失敗も、これまでは `ClamAVService._scan_by_stream` が「アプリ自身も読めない」と取り違え、元の権限エラーの結果を返していた。今は、送れなくても応答を読んでから決める（FILDES と同じ）。clamd は受け取った量が `StreamMaxLength` を超えると応答（`INSTREAM size limit exceeded. ERROR`）を返して閉じるため、応答があればそのファイルだけの結果にし、上限を超えて未検査（`size_limit`）に分ける。clamd の `StreamMaxLength` をアプリの `clamd.max_stream_size_mb` より小さくしている環境で、大きいファイル 1 つでフルスキャン全体が中断しないように（PR #76 の Linux 実機の確認で指摘）。応答が無ければ（停止操作での打ち切り・clamd の終了）SCAN と同じく接続のエラーにする
+- `core/scan_dispatcher.py`: `except Exception` でも、先に停止の要求を確かめて抜ける
+- テスト: 閉じたソケットでの送信・待ちが接続のエラーになること（SCAN・INSTREAM・PING・結果の待ち）、停止の後の想定外の例外を E9001 として扱わないこと、INSTREAM で送れなくなっても clamd の上限の応答があればそのファイルの結果（上限を超えて未検査）になり、応答が無ければ接続のエラーになること

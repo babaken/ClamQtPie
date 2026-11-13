@@ -373,3 +373,30 @@ def test_without_mount_list_folders_are_walked_as_before(fake_clamd_server, tmp_
     (tmp_path / "sub" / "a.txt").write_text("x")
     monkeypatch.setattr(_sd, "_read_mount_types", lambda: None)
     assert _scan_paths(fake_clamd_server, [tmp_path]) == [str(tmp_path / "sub" / "a.txt")]
+
+
+def test_stop_while_waiting_does_not_report_unexpected_error(fake_clamd_server, tmp_path, caplog):
+    # 応答待ちに停止して通信が打ち切られ、想定外の例外（OSError など）になっても、E9001 として扱わない
+    # （ERROR のログ・エラーの数・「想定外のエラー」の結果を残さない。README_DEV §100）
+    import logging
+
+    for i in range(3):
+        (tmp_path / f"f{i}.txt").write_text(str(i))
+    worker = ScanWorker(_service_for(fake_clamd_server), [str(tmp_path)])
+
+    def scan_one(_path):
+        worker.stop()
+        raise OSError(9, "Bad file descriptor")
+
+    worker._scan_one = scan_one
+    scanned, summary = [], {}
+    worker.file_scanned.connect(lambda *args: scanned.append(args))
+    worker.finished.connect(summary.update)
+
+    with caplog.at_level(logging.ERROR, logger="clamav_frontend"):
+        worker.run()
+
+    assert summary["cancelled"] is True
+    assert summary["errors"] == 0
+    assert scanned == []
+    assert not [r for r in caplog.records if getattr(r, "error_code", None) == "E9001"]

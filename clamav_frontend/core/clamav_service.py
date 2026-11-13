@@ -21,6 +21,7 @@ from typing import BinaryIO, Callable
 from core.clamd_client import (
     ClamdClient,
     ClamdPathEncodingError,
+    STREAM_SIZE_LIMIT_RESPONSE,
     FdPassUnsupportedError,
     ScanResult,
     fdpass_available,
@@ -331,6 +332,13 @@ class ClamAVService:
             # 中断させないよう、ファイル単位のERROR結果として返す
             return ScanResult(
                 path=str(path), status="ERROR", detail=f"{SIZE_LIMIT_DETAIL_PREFIX}（{exc.message}。{original.detail}）"
+            )
+        if result.status == "ERROR" and STREAM_SIZE_LIMIT_RESPONSE in result.detail.lower():
+            # clamd の StreamMaxLength がアプリの上限（clamd.max_stream_size_mb）より小さい。そのファイルだけ
+            # 上限を超えて未検査にする（スキャン全体は止めない）
+            return ScanResult(
+                path=str(path), status="ERROR",
+                detail=f"{SIZE_LIMIT_DETAIL_PREFIX}（clamd の StreamMaxLength を超えました。{original.detail}）",
             )
         return ScanResult(path=str(path), status=result.status, detail=result.detail)
 
