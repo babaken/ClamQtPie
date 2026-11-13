@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -32,6 +32,7 @@ from core.exceptions import AppError
 from core.logger import CATEGORY_QUARANTINE, CATEGORY_REALTIME, CATEGORY_SCAN, CATEGORY_UPDATE
 from gui import icons
 from gui.error_dialog import CTL_STATUS_HINT
+from gui.flow_layout import FlowLayout
 from gui.plain_text import plain, plain_tooltip
 from gui.screens.base import BaseScreen, make_card, wrap_layout
 from gui.theme import COLOR_NG, COLOR_OK, COLOR_TEXT_MUTED, COLOR_WARN, set_accent, set_variant
@@ -75,15 +76,30 @@ class _StatusCard(QFrame):
         layout.setSpacing(4)
         title_label = QLabel(f"{title}:")
         title_label.setObjectName("cardText")
+        self._title_label = title_label
         self.value_label = plain(QLabel(value))  # clamdの応答等を文字のまま表示する
         self.value_label.setObjectName("value_label")
+        # 定義DB の版と日時は長いため、狭いときは折り返す（最小の幅で右が切れた。#85）
+        self.value_label.setWordWrap(True)
         self.set_value(value)
         layout.addWidget(title_label)
-        layout.addWidget(self.value_label)
+        layout.addWidget(self.value_label, stretch=1)  # 余った幅は値に回す（項目名は広げない）
 
     def set_value(self, text: str, color: str | None = None) -> None:
         self.value_label.setText(text)
         self.value_label.setStyleSheet("font-weight: bold;" + (f" color: {color};" if color else ""))
+        self.updateGeometry()
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qtのオーバーライド
+        # 望ましい大きさは、値を 1 行に並べたとき。折り返す QLabel の sizeHint は、入る幅があっても 2 行の
+        # 高さを返すことがあり、FlowLayout の行の間が空いて見えた（#85）
+        self.value_label.ensurePolished()
+        margins = self.value_label.contentsMargins()
+        value_width = (self.value_label.fontMetrics().horizontalAdvance(self.value_label.text())
+                       + margins.left() + margins.right() + 2 * self.value_label.margin() + 1)
+        width = self._title_label.sizeHint().width() + self.layout().spacing() + value_width
+        height = self.heightForWidth(width)
+        return QSize(width, height if height > 0 else super().sizeHint().height())
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qtのオーバーライド
         self.clicked.emit()
@@ -118,14 +134,14 @@ class HomeScreen(BaseScreen):
         self.hero_detail_label.setWordWrap(True)
         hero_text.addWidget(self.hero_title_label)
         hero_text.addWidget(self.hero_detail_label)
-        meta = QHBoxLayout()
-        meta.setSpacing(18)
+        # 狭いときは次の行へ折り返す（定義DB の日時が長く、最小の幅で右が切れた。#85）
+        # 横は離して並べ、折り返した行の間は詰める（横と同じ 18 ピクセルだと、1 行分ほど空いて見えた）
+        meta = FlowLayout(spacing=18, line_spacing=4)
         self.clamd_status_card = _StatusCard("エンジン", "確認中...")
         self.db_version_card = _StatusCard("定義DB", "-")
         self.realtime_status_card = _StatusCard("リアルタイム監視", "OFF")
         for card in (self.clamd_status_card, self.db_version_card, self.realtime_status_card):
             meta.addWidget(card)
-        meta.addStretch(1)
         hero_text.addLayout(meta)
         hero.addLayout(hero_text, stretch=1)
         self.add_layout_widget(wrap_layout(hero))
@@ -137,6 +153,9 @@ class HomeScreen(BaseScreen):
 
         # 2. 操作カード（2列）
         grid = QGridLayout()
+        # 左右の列を半分ずつにする（見出しが折り返せるようになって右の列の要る幅が小さくなり、余った幅が左に回った。#85）
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(16)
         self.scan_now_button = set_variant(QPushButton("クイック スキャン"), "primary")
@@ -370,6 +389,7 @@ def _action_card(icon_name: str, title: str, text: str, buttons) -> QFrame:
     icon_label.setPixmap(icons.pixmap(icon_name, 26))
     title_label = QLabel(title)
     title_label.setObjectName("cardTitle")
+    title_label.setWordWrap(True)
     header.addWidget(icon_label)
     header.addWidget(title_label, stretch=1)
     layout.addLayout(header)
@@ -378,9 +398,8 @@ def _action_card(icon_name: str, title: str, text: str, buttons) -> QFrame:
     text_label.setWordWrap(True)
     layout.addWidget(text_label)
     layout.addStretch(1)
-    row = QHBoxLayout()
+    row = FlowLayout()  # 狭いときは次の行へ折り返す（#85）
     for button in buttons:
         row.addWidget(button)
-    row.addStretch(1)
     layout.addLayout(row)
     return card

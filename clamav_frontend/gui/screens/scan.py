@@ -87,7 +87,9 @@ class ScanScreen(BaseScreen):
         self._row_paths = []
         # 1. スキャン対象選択エリア
         self.begin_card("スキャン対象の選択")
-        self.quick_radio = QRadioButton("クイックスキャン（デスクトップ・ダウンロード・ドキュメント・一時フォルダ等）")
+        # ラジオボタンの文字は折り返せないため短くし、対象の全部はツールチップに出す（最小の幅で右が切れないように。#85）
+        self.quick_radio = QRadioButton("クイックスキャン（デスクトップ・ダウンロードなど）")
+        self.quick_radio.setToolTip("デスクトップ・ダウンロード・ドキュメント・一時フォルダなどを検査します")
         self.full_radio = QRadioButton("フルスキャン（システムドライブ全体）")
         self.custom_radio = QRadioButton("カスタム（ファイル/フォルダ選択）")
         self.quick_radio.setChecked(True)
@@ -137,6 +139,7 @@ class ScanScreen(BaseScreen):
         self.progress_bar = QProgressBar()
         self.current_file_label = plain(QLabel(""))  # ファイル名を文字のまま表示する
         self.counter_label = QLabel(_counter_text(0, 0, 0))
+        self.counter_label.setWordWrap(True)  # 件数が増えても画面を広げない（#85）
         self.add_layout_widget(self.progress_bar)
         self.add_layout_widget(self.current_file_label)
         self.add_layout_widget(self.counter_label)

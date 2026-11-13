@@ -101,7 +101,9 @@ class BaseScreen(QWidget):
         scroll.setObjectName("screenScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # ふだんは横のスクロールバーを出さない（中身は表示の幅に収める。#85）。それでも収まらない（大きな文字の設定など）
+        # ときに、はみ出した部分を見られるよう、必要なときだけ出す
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         outer.addWidget(scroll)
 
         viewport = QWidget()
