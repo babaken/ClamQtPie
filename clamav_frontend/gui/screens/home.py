@@ -11,7 +11,6 @@ Phase 11: 直近アクティビティ（ログから最大10件）、カード�
 """
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -32,13 +31,11 @@ from core.definitions import definitions_age_days
 from core.exceptions import AppError
 from core.logger import CATEGORY_QUARANTINE, CATEGORY_REALTIME, CATEGORY_SCAN, CATEGORY_UPDATE
 from gui import icons
+from gui.error_dialog import CTL_STATUS_HINT
 from gui.plain_text import plain, plain_tooltip
 from gui.screens.base import BaseScreen, make_card, wrap_layout
 from gui.theme import COLOR_NG, COLOR_OK, COLOR_TEXT_MUTED, COLOR_WARN, set_accent, set_variant
 
-# サービスにつながらないときの案内。clamqtpie-ctl は root（Windows は管理者）で動かす
-_CTL_STATUS_HINT = ("管理者のコマンドプロンプトで clamqtpie-ctl status" if sys.platform == "win32"
-                    else "端末で sudo clamqtpie-ctl status")
 #: 直近アクティビティの最大件数（画面設計書1章）
 ACTIVITY_LIMIT = 10
 #: 直近アクティビティで読む過去のログの日数
@@ -283,7 +280,7 @@ class HomeScreen(BaseScreen):
         if self._service_down is not None:
             title = "ClamQtPie サービスにつながりません"
             detail = (f"サービスが止まっているか、起動の途中です。つながると表示が戻ります（{self._service_down}）。"
-                      f"止まったままのときは、{_CTL_STATUS_HINT}を実行して状態を確かめてください。")
+                      f"止まったままのときは、{CTL_STATUS_HINT}を実行して状態を確かめてください。")
             color = COLOR_NG
         elif status.clamd_running is None:
             title, detail, color = "状態を確認しています...", "", COLOR_TEXT_MUTED

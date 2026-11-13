@@ -1831,3 +1831,12 @@ Windows のリアルタイム監視は、パスごとに `threading.Timer`（1 �
 - `gui/screens/scan.py`: `show_started_elsewhere()` は、画面がすでにスキャン中を表示しているとき（［停止］を押せるとき）だけ何もしない。それ以外は、画面を開いていても「スキャン中」にする
 - `tray_main.py`: 開始の知らせは、画面を開いているかどうかにかかわらず画面に渡す
 - テスト: 開いたまま「中断」の表示で開始の知らせが届くと「スキャン中」になり［停止］を押せること、画面から始めたスキャンでは結果の表が消えないこと
+
+## 102. サービスにつながらないときのダイアログに、状態を確かめるコマンドを添える
+
+§77 では、サービスにつながらないときに `clamqtpie-ctl status` の案内を添えると決めたが、案内はホーム画面の上の表示にしか出ていなかった。［停止］などの操作で出るダイアログ（E8105「ClamQtPie サービスに接続できません」）には無く、起動の回数の上限で止まっていることが `systemctl status` を見るまで分からなかった（#73。Linux 実機の確認で発見）。
+
+- `gui/error_dialog.py`: `ServiceUnavailableError`（E8105）のダイアログに、ホーム画面と同じ案内（Linux は「端末で sudo clamqtpie-ctl status」、Windows は「管理者のコマンドプロンプトで clamqtpie-ctl status」）を添える。案内の文言は `CTL_STATUS_HINT` にまとめ、ホーム画面もこれを使う
+- トレイアイコンのツールチップ（「サービスにつながりません（E8105）」）は短いままにする
+- 確認の手順（PR の本文）でサービスを起動し直すときは、`sudo systemctl reset-failed clamqtpie && sudo systemctl restart clamqtpie` の形で書く（上限は §77 のまま変えない）
+- テスト: E8105 のダイアログに案内が出ること

@@ -159,3 +159,22 @@ def test_hamburger_collapses_and_expands_sidebar(qtbot):
     window.hamburger_button.click()
     assert window.sidebar_collapsed is False
     assert first.text() == "ホーム"
+
+
+def test_service_unavailable_dialog_shows_ctl_status_hint(qtbot, monkeypatch):
+    # サービスにつながらないときのダイアログに、状態を確かめるコマンドの案内を添える（#73・README_DEV §102）
+    from core.exceptions import ServiceUnavailableError
+    from gui.error_dialog import CTL_STATUS_HINT
+
+    captured = {}
+
+    def fake_exec(self):
+        captured["informative"] = self.informativeText()
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    show_error_dialog(None, ServiceUnavailableError(detail="サービスが動いていません"))
+
+    assert captured["informative"].startswith("エラーコード: E8105\n")
+    assert CTL_STATUS_HINT in captured["informative"]
+    assert "clamqtpie-ctl status" in CTL_STATUS_HINT

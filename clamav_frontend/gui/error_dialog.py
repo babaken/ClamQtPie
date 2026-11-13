@@ -7,11 +7,17 @@
 """
 from __future__ import annotations
 
+import sys
 from typing import Callable
 
 from PySide6.QtWidgets import QMessageBox, QPushButton, QWidget
 
-from core.exceptions import AppError, ElevationCancelledError
+from core.exceptions import AppError, ElevationCancelledError, ServiceUnavailableError
+
+#: サービスにつながらないときの案内（README_DEV §77・§102）。clamqtpie-ctl は root（Windows は管理者）で動かす。
+#: Linux では、起動の回数の上限で止まっているかどうかも status で分かる
+CTL_STATUS_HINT = ("管理者のコマンドプロンプトで clamqtpie-ctl status" if sys.platform == "win32"
+                   else "端末で sudo clamqtpie-ctl status")
 
 #: 「詳細を見る」の既定動作（MainWindowがログ画面への遷移を登録する）。各画面はコールバックを
 #: 個別に渡さなくても、画面設計書「共通仕様」のログ画面へのリンク付きダイアログになる
@@ -41,7 +47,11 @@ def show_error_dialog(
     box.setIcon(QMessageBox.Icon.Critical)
     box.setWindowTitle("エラー")
     box.setText(error.message)
-    box.setInformativeText(f"エラーコード: {error.code}")
+    informative = f"エラーコード: {error.code}"
+    if isinstance(error, ServiceUnavailableError):
+        # 操作のたびに出るのはこのダイアログで、ホームの案内を見ないまま止まった理由が分からなかった（#73）
+        informative += f"\nサービスが止まったままのときは、{CTL_STATUS_HINT}を実行して状態を確かめてください。"
+    box.setInformativeText(informative)
 
     detail_button: QPushButton | None = None
     if on_show_detail is not None:
