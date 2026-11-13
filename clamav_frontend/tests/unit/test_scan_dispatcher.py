@@ -237,3 +237,139 @@ def test_stop_while_queued(fake_clamd_server, tmp_path):
     assert not thread.is_alive()
     assert summary["cancelled"] is True
     service._ondemand_semaphore.release()
+
+
+def test_scan_does_not_keep_the_whole_file_list(fake_clamd_server, tmp_path, monkeypatch):
+    # 対象のファイルの一覧をメモリに作らない（フルスキャンで数百万件になってもメモリが増えない）。
+    # 数えるときと検査するときに 1 件ずつたどり、検査は数え終わってから始まる
+    for i in range(5):
+        (tmp_path / f"f{i}.txt").write_text("x")
+    fake_clamd_server.response_map["SCAN"] = "dummy: OK"
+    worker = ScanWorker(_service_for(fake_clamd_server), [str(tmp_path)])
+    passes = []
+    original = ScanWorker._iter_files
+
+    def tracking(self, is_excluded):
+        passes.append(type(original(self, is_excluded)).__name__)
+        return original(self, is_excluded)
+
+    monkeypatch.setattr(ScanWorker, "_iter_files", tracking)
+    progress = []
+    worker.progress.connect(lambda a, b, c: progress.append((a, b)))
+    worker.run()
+
+    assert passes == ["generator", "generator"]
+    assert progress[1:] == [(i, 5) for i in range(5)]
+
+
+def test_file_created_after_counting_is_scanned_and_total_follows(fake_clamd_server, tmp_path):
+    # 数えた後に増えたファイルも検査し、進み具合の分母が検査した数を下回らない
+    (tmp_path / "a.txt").write_text("x")
+    (tmp_path / "sub").mkdir()  # 上のフォルダの後にたどるフォルダ
+    fake_clamd_server.response_map["SCAN"] = "dummy: OK"
+    worker = ScanWorker(_service_for(fake_clamd_server), [str(tmp_path)])
+    progress = []
+
+    def on_progress(scanned, total, _path):
+        progress.append((scanned, total))
+        if total == 1 and scanned == 0:
+            (tmp_path / "sub" / "b.txt").write_text("x")  # 数え終わった後に増える
+
+    worker.progress.connect(on_progress)
+    summaries = []
+    worker.finished.connect(summaries.append)
+    worker.run()
+
+    assert summaries[0]["scanned"] == 2
+    assert all(scanned < total for scanned, total in progress[1:])
+
+
+def test_stop_while_counting_files_ends_without_scanning(fake_clamd_server, tmp_path):
+    # 数えている途中で止めても、検査を始めずに終わる
+    for i in range(3):
+        (tmp_path / f"f{i}.txt").write_text("x")
+    fake_clamd_server.response_map["SCAN"] = "dummy: OK"
+    worker = ScanWorker(_service_for(fake_clamd_server), [str(tmp_path)])
+    worker.progress.connect(lambda scanned, total, _path: worker.stop() if total == 0 else None)
+    summaries = []
+    worker.finished.connect(summaries.append)
+    worker.run()
+
+    assert summaries[0]["scanned"] == 0 and summaries[0]["cancelled"] is True
+    assert "SCAN" not in fake_clamd_server.commands
+
+
+# --- マウントした先のたどり方（README_DEV §96） ---------------------------------------------
+
+import logging as _logging  # noqa: E402
+import os as _os  # noqa: E402
+
+import core.scan_dispatcher as _sd  # noqa: E402
+
+
+def test_parse_mountinfo_reads_mount_points_and_types():
+    text = (
+        "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n"
+        "30 22 0:40 / /mnt/my\\040nas rw shared:5 - nfs4 server:/share rw\n"
+        "31 22 8:3 / /home rw - btrfs /dev/sda3 rw\n"
+        "32 22 0:41 / /home rw - tmpfs tmpfs rw\n"
+        "broken line\n"
+    )
+    assert _sd.parse_mountinfo(text) == {"/": "ext4", "/mnt/my nas": "nfs4", "/home": "tmpfs"}
+
+
+def _scan_paths(server, targets):
+    server.response_map["SCAN"] = "dummy: OK"
+    worker = ScanWorker(_service_for(server), [str(t) for t in targets])
+    scanned = []
+    worker.file_scanned.connect(lambda path, *_rest: scanned.append(str(path)))
+    worker.run()
+    return scanned
+
+
+def test_network_mounts_are_entered_only_when_specified_directly(fake_clamd_server, tmp_path, monkeypatch, caplog):
+    # たどる途中ではローカルのディスクのマウントにだけ入る。ネットワークのマウントは、その場所を直接指定したときだけ検査する
+    for rel in ("top.txt", "disk/a.txt", "nas/b.txt", "nas/inner/c.txt"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x")
+    real = _os.path.realpath(str(tmp_path))
+    mounts = {
+        _os.path.join(real, "disk"): "ext4",
+        _os.path.join(real, "nas"): "nfs4",
+        _os.path.join(real, "nas", "inner"): "cifs",
+    }
+    monkeypatch.setattr(_sd, "_read_mount_types", lambda: dict(mounts))
+
+    with caplog.at_level(_logging.INFO, logger="clamav_frontend"):
+        scanned = _scan_paths(fake_clamd_server, [tmp_path])
+    assert sorted(scanned) == sorted([str(tmp_path / "top.txt"), str(tmp_path / "disk" / "a.txt")])
+    # 数えるときと検査するときの 2 回たどっても、入らなかったログは 1 回だけ
+    assert sum("nfs4" in r.getMessage() for r in caplog.records) == 1
+
+    scanned = _scan_paths(fake_clamd_server, [tmp_path / "nas"])
+    assert scanned == [str(tmp_path / "nas" / "b.txt")]  # 中に重ねた cifs には入らない
+
+
+def test_same_folder_seen_from_two_places_is_scanned_once(fake_clamd_server, tmp_path, monkeypatch):
+    # バインドマウントなどで同じフォルダが 2 か所に見えても、検査は 1 回
+    for rel in ("orig/a.txt", "view/a.txt"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x")
+    monkeypatch.setattr(_sd, "_read_mount_types", lambda: {})
+    real_stat = _os.stat
+    orig = str(tmp_path / "orig")
+    view = str(tmp_path / "view")
+
+    def fake_stat(path, *args, **kwargs):
+        return real_stat(orig if str(path) == view else path, *args, **kwargs)
+
+    monkeypatch.setattr(_sd.os, "stat", fake_stat)
+    assert len(_scan_paths(fake_clamd_server, [tmp_path])) == 1
+
+
+def test_without_mount_list_folders_are_walked_as_before(fake_clamd_server, tmp_path, monkeypatch):
+    # マウントの一覧が無いとき（Windows・読めないとき）は、これまでどおりたどる
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "a.txt").write_text("x")
+    monkeypatch.setattr(_sd, "_read_mount_types", lambda: None)
+    assert _scan_paths(fake_clamd_server, [tmp_path]) == [str(tmp_path / "sub" / "a.txt")]
