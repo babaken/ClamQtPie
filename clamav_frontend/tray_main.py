@@ -352,8 +352,7 @@ class TrayApp:
         p.update.finished.connect(lambda _record: home_screen.refresh_status())
         p.realtime.detected.connect(lambda _path, _virus: (
             self.tray_icon.set_state(TrayIconState.DETECTION_PENDING, True), home_screen.refresh_status()))
-        p.scan.started.connect(lambda _label: scan_screen.show_started_elsewhere()
-                               if not scan_screen.isVisible() else None)
+        p.scan.started.connect(lambda _label: scan_screen.show_started_elsewhere())
 
         def on_event(name: str, _data) -> None:
             # サービスで変わった内容を画面に反映する（ほかのトレイGUI・WebUI・スケジュールが変えたもの）

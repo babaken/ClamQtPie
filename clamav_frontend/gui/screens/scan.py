@@ -305,7 +305,11 @@ class ScanScreen(BaseScreen):
         return True
 
     def show_started_elsewhere(self) -> None:
-        """画面以外（Web API）から始めたスキャンを、実行中として表示する（結果はシグナルで届く）"""
+        """画面以外（ほかのトレイGUI・WebUI・スケジュール）から始めたスキャンを、実行中として表示する（結果は
+        シグナルで届く）。すでにスキャン中を表示しているとき（画面から始めた）は、結果の表を消さないよう何もしない。
+        画面を開いているかどうかでは決めない（開いたまま「中断」の表示のときに始まったスキャンを止められなくなる）"""
+        if self.stop_button.isEnabled():
+            return
         self._show_running()
 
     def _show_running(self) -> None:
