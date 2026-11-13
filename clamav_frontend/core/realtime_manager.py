@@ -22,6 +22,8 @@ watchdogの抽象化により同一コードでLinux上でも動作する。た�
 """
 from __future__ import annotations
 
+import heapq
+import itertools
 import logging
 import os
 import queue
@@ -48,55 +50,100 @@ logger = logging.getLogger("clamav_frontend")
 
 
 class _DebounceManager:
-    """パスごとのデバウンスタイマー管理（5章・7章）"""
+    """パスごとのデバウンス（5章・7章）。待ちは 1 本のスレッドでまとめて扱う
+    （以前はパスごとに threading.Timer のスレッドを作っていたため、ファイルが一度に増えると、
+    その数だけスレッドが増えていた。README_DEV §97）"""
 
-    def __init__(self, interval_sec: float, max_pending: int, on_fire) -> None:
+    #: cancel_all() で、待ちのスレッドの終わりを待つ上限（秒）
+    _JOIN_TIMEOUT_SEC = 2.0
+
+    def __init__(self, interval_sec: float, max_pending: int, on_fire, clock=time.monotonic) -> None:
         self._interval_sec = interval_sec
         self._max_pending = max_pending
         self._on_fire = on_fire
-        self._timers: dict[str, threading.Timer] = {}
-        self._order: list[str] = []  # 挿入順（最古のタイマー特定用、7章）
-        self._lock = threading.RLock()
+        self._clock = clock
+        # パス → 発火する時刻。dict の順は最初に積んだ順（上限のときに最古を即時発火する、7章）。
+        # 待ちの間に同じパスのイベントが来ても順は変えない（書き込みが続くファイルも、上限のときには検査する）
+        self._deadlines: dict[str, float] = {}
+        # 発火する時刻の順のヒープ。同じパスの古い時刻の項目は、取り出したときに捨てる
+        self._heap: list[tuple[float, int, str]] = []
+        self._seq = itertools.count()
+        self._cond = threading.Condition()
+        self._thread: threading.Thread | None = None
+        self._closed = False
+
+    @property
+    def pending_count(self) -> int:
+        with self._cond:
+            return len(self._deadlines)
 
     def notify(self, path: str) -> None:
-        with self._lock:
-            existing = self._timers.get(path)
-            if existing is not None:
-                existing.cancel()
-            else:
-                self._order.append(path)
-                if len(self._order) > self._max_pending:
-                    oldest = self._order.pop(0)
-                    oldest_timer = self._timers.pop(oldest, None)
-                    if oldest_timer is not None:
-                        oldest_timer.cancel()
-                        # エラーコード一覧E2003: GUI非表示・ログのみ
-                        log_event(
-                            CATEGORY_REALTIME,
-                            f"デバウンスタイマーが上限（{self._max_pending}件）に達したため即時スキャンします: {oldest}",
-                            level=logging.DEBUG,
-                            error_code="E2003",
-                        )
-                        self._fire(oldest)
+        evicted = None
+        with self._cond:
+            if self._closed:
+                return
+            deadline = self._clock() + self._interval_sec
+            self._deadlines[path] = deadline
+            heapq.heappush(self._heap, (deadline, next(self._seq), path))
+            if len(self._deadlines) > self._max_pending:
+                evicted = next(iter(self._deadlines))
+                del self._deadlines[evicted]
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._run, name="realtime-debounce", daemon=True,
+                )
+                self._thread.start()
+            self._cond.notify()
+        if evicted is not None:
+            # エラーコード一覧E2003: GUI非表示・ログのみ
+            log_event(
+                CATEGORY_REALTIME,
+                f"デバウンスタイマーが上限（{self._max_pending}件）に達したため即時スキャンします: {evicted}",
+                level=logging.DEBUG,
+                error_code="E2003",
+            )
+            self._call(evicted)
 
-            timer = threading.Timer(self._interval_sec, self._fire, args=(path,))
-            timer.daemon = True
-            self._timers[path] = timer
-            timer.start()
+    def _run(self) -> None:
+        while True:
+            due: list[str] = []
+            with self._cond:
+                while True:
+                    if self._closed:
+                        return
+                    now = self._clock()
+                    while self._heap:
+                        deadline, _seq, path = self._heap[0]
+                        if self._deadlines.get(path) != deadline:
+                            heapq.heappop(self._heap)  # 後のイベントで時刻が延びた・上限で発火済み
+                        elif deadline <= now:
+                            heapq.heappop(self._heap)
+                            del self._deadlines[path]
+                            due.append(path)
+                        else:
+                            break
+                    if due:
+                        break
+                    self._cond.wait(self._heap[0][0] - now if self._heap else None)
+            # 検査の待ち行列に積むだけだが、ロックの外で呼ぶ（notify() を待たせない）
+            for path in due:
+                self._call(path)
 
-    def _fire(self, path: str) -> None:
-        with self._lock:
-            self._timers.pop(path, None)
-            if path in self._order:
-                self._order.remove(path)
-        self._on_fire(path)
+    def _call(self, path: str) -> None:
+        try:
+            self._on_fire(path)
+        except Exception:  # noqa: BLE001 — 1 件の失敗で、ほかのパスの待ちを止めない
+            logger.exception("リアルタイム監視の検査の受け付けに失敗しました: %s", path)
 
     def cancel_all(self) -> None:
-        with self._lock:
-            for timer in self._timers.values():
-                timer.cancel()
-            self._timers.clear()
-            self._order.clear()
+        with self._cond:
+            self._closed = True
+            self._deadlines.clear()
+            self._heap.clear()
+            thread = self._thread
+            self._cond.notify_all()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=self._JOIN_TIMEOUT_SEC)
 
 
 class _EventHandler(FileSystemEventHandler):
