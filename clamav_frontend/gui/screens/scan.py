@@ -71,6 +71,9 @@ _HISTORY_TYPES = {"quick": "クイック", "full": "フル", "custom": "カス�
 _HISTORY_SOURCES = {"gui": "画面", "api": "Web API", "schedule": "スケジュール"}
 _HISTORY_RESULTS = {"completed": "完了", "cancelled": "中断", "failed": "失敗"}
 _HISTORY_ACTIONS = {"quarantined": "隔離しました", "notified": "通知のみ"}
+#: スキャン履歴の「種類」の列と、中身に合わせて広げるときの上限（ピクセル）
+_HISTORY_TYPE_COLUMN = 1
+_HISTORY_TYPE_MAX_WIDTH = 260
 _HISTORY_REASONS = {"size_limit": "サイズの上限", "permission": "権限なし", "vanished": "削除済み", "other": "エラー"}
 
 
@@ -226,6 +229,12 @@ class ScanScreen(BaseScreen):
                 item.setToolTip(plain_tooltip(value))
                 self.history_table.setItem(row, col, item)
             self.history_table.item(row, 0).setData(_PATH_INDEX_ROLE, record.id)
+        # 「種類」（「カスタムスキャン」・スケジュールの名前など）が省かれないように、中身に合わせて広げる。
+        # 長いスケジュールの名前で表が広がりすぎないよう、上限を設ける（切れた分はツールチップで読める）
+        width = self.history_table.columnWidth(_HISTORY_TYPE_COLUMN)
+        self.history_table.resizeColumnToContents(_HISTORY_TYPE_COLUMN)
+        fitted = min(self.history_table.columnWidth(_HISTORY_TYPE_COLUMN), _HISTORY_TYPE_MAX_WIDTH)
+        self.history_table.setColumnWidth(_HISTORY_TYPE_COLUMN, max(width, fitted))
 
     def _on_history_detail_clicked(self) -> None:
         row = self.history_table.currentRow()

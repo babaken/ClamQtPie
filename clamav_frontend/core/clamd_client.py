@@ -70,6 +70,15 @@ def _connect_without_timeout(host: str) -> bool:
     return platform.system() == "Windows" and _is_loopback(host)
 
 
+class ClamdStreamRejectedError(ClamdConnectionError):
+    """INSTREAM の内容を送っている途中で送れなくなり、応答も読めなかった（README_DEV §106）
+
+    clamd が StreamMaxLength を超えて応答を書いて閉じた場合も、TCP では、こちらがまだ送っていると応答が
+    捨てられて（RST）読めないことがある。clamd が止まった場合と見分けられないため、呼び出し側が clamd に
+    PING して決める。それ以外の呼び出し側には、これまでどおり接続のエラーとして見える
+    """
+
+
 class ClamdPathEncodingError(ClamdProtocolError):
     """パスを clamd に送れない（呼び出し側は、ファイルの内容を送る INSTREAM で検査する）"""
 
@@ -331,7 +340,7 @@ class ClamdClient:
 
         text = raw.decode("utf-8", errors="replace").rstrip("\x00").strip()
         if send_error is not None and not text:
-            raise ClamdConnectionError(detail=f"INSTREAMの送信に失敗しました ({send_error})") from send_error
+            raise ClamdStreamRejectedError(detail=f"INSTREAMの送信に失敗しました ({send_error})") from send_error
         if STREAM_SIZE_LIMIT_RESPONSE in text.lower():
             # 「パス: 結果」の形ではないため、応答をそのまま詳細にする
             return ScanResult(path="stream", status="ERROR", detail=text)

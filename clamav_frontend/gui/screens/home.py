@@ -272,7 +272,10 @@ class HomeScreen(BaseScreen):
         """トレイGUI: サービスにつながらない（code はエラーコード）・つながった（None）"""
         self._service_down = code
         if code is not None:
+            # 最後に読めた値を残さない（定義DB・リアルタイム監視も、つながらない間は分からない）
             self.clamd_status_card.set_value("不明", COLOR_TEXT_MUTED)
+            self.db_version_card.set_value("-")
+            self.realtime_status_card.set_value("-")
             self._update_hero()
 
     def _update_hero(self) -> None:

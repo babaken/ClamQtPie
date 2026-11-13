@@ -82,6 +82,9 @@ class MainWindow(QMainWindow):
 
         self._screens: dict[str, QWidget] = {}
         self._sidebar_collapsed = False
+        #: サービスにつながらない間のエラーコード（トレイGUI。つながっていれば None）
+        self._service_down: str | None = None
+        self._last_status = None
         self._build_central_widget()
         self._build_status_bar()
 
@@ -205,8 +208,28 @@ class MainWindow(QMainWindow):
     def _set_pill(self, text: str, color: str) -> None:
         self.status_pill.setText(f"<span style='color:{color};'>●</span>&nbsp; {text}")
 
+    def set_service_down(self, code: str | None) -> None:
+        """トレイGUI: サービスにつながらない（code はエラーコード）・つながった（None）。つながらない間は、最後に
+        読めた clamd の状態を「準備ができています」と出さない（スキャンはサービスを通すため、できるように見えた。#80）"""
+        self._service_down = code
+        if self._last_status is not None:
+            self.update_status_bar(self._last_status)
+        elif code is not None:
+            self._show_service_down()
+
+    def _show_service_down(self) -> None:
+        self._set_pill("ClamQtPie サービスにつながりません", COLOR_NG)
+        self.clamd_status_label.setText("clamd: -")
+        self.db_update_label.setText("定義DB更新: -")
+        self.footer_db_label.setText("定義DB: -")
+        self.realtime_status_label.setText("リアルタイム監視: -")
+
     def update_status_bar(self, status) -> None:
         """ヘッダー右上・左ナビ下部・ステータスバー3項目を更新する（画面設計書「共通仕様」）。statusはhome.AppStatus"""
+        self._last_status = status
+        if self._service_down is not None:
+            self._show_service_down()
+            return
         if status.clamd_running is None:
             clamd_text = "確認中..."
             self._set_pill("確認中...", COLOR_TEXT_MUTED)

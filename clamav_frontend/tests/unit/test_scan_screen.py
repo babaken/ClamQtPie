@@ -252,3 +252,35 @@ def test_tray_shows_scan_started_elsewhere_regardless_of_visibility():
     line = next(l for l in source.splitlines() if "p.scan.started.connect" in l)
     assert "show_started_elsewhere" in line
     assert "isVisible" not in source.split("p.scan.started.connect", 1)[1].split("\n\n", 1)[0]
+
+
+# --- 表の見出し（README_DEV §105） ------------------------------------------------------------
+
+def test_table_columns_are_not_narrower_than_headers(qtbot):
+    # 列を見出しの文字より細くしない（狭いウィンドウで「ウイルス名 / 内容」の左右が切れて重なった。#81）
+    screen = _make_screen(qtbot)
+    screen.resize(600, 600)
+    screen.show()
+    for table in (screen.result_table, screen.history_table):
+        metrics = table.horizontalHeader().fontMetrics()
+        for col in range(table.columnCount()):
+            text = table.horizontalHeaderItem(col).text()
+            assert table.columnWidth(col) >= metrics.horizontalAdvance(text), text
+
+
+_LONG_TYPE = "毎週月曜日の夜のカスタムスキャン"
+
+
+def test_history_type_column_fits_its_contents(qtbot):
+    # 「種類」の中身（「カスタムスキャン」など）が省かれない幅にする（PR #84 の確認で指摘）
+    from types import SimpleNamespace
+
+    screen = _make_screen(qtbot)
+    record = SimpleNamespace(id=1, started_at="2026-11-13T21:00:00+09:00", label=_LONG_TYPE, scan_type="schedule",
+                             source="gui", result="cancelled", scanned=0, detected=0, errors=0)
+    screen._history_service = SimpleNamespace(list_recent=lambda: [record])
+    screen.reload_history()
+    table = screen.history_table
+    assert table.fontMetrics().horizontalAdvance(_LONG_TYPE) > 100  # 既定の幅（100 ピクセル）では入らない長さ
+    assert table.columnWidth(1) >= table.fontMetrics().horizontalAdvance(_LONG_TYPE)
+    assert table.columnWidth(1) <= 260

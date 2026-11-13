@@ -121,6 +121,7 @@ th { background: var(--surface); color: var(--muted); font-weight: normal; font-
 tbody tr:nth-child(even) { background: var(--card-alt); }
 td.path { word-break: break-all; font-family: Consolas, "Noto Sans Mono", monospace; font-size: 12px; }
 td.empty { color: var(--muted); text-align: center; }
+th, td.nowrap { white-space: nowrap; }
 .unsaved { color: var(--warn); }
 
 pre.detail, pre.log-box {

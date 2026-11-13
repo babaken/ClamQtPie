@@ -74,10 +74,15 @@ def test_home_shows_that_the_service_is_unreachable(qtbot):
     clamav.ping.assert_not_called()  # clamd が止まったようには表示しない
     assert screen.hero_title_label.text() == "ClamQtPie サービスにつながりません"
     assert screen.clamd_status_card.findChild(QLabel, "value_label").text() == "不明"
+    # 最後に読めた定義DB・リアルタイム監視の値も残さない
+    assert screen.db_version_card.findChild(QLabel, "value_label").text() == "-"
+    assert screen.realtime_status_card.findChild(QLabel, "value_label").text() == "-"
 
     screen.set_service_down(None)
     screen.refresh_status()
     assert screen.hero_title_label.text() == "スキャンの準備ができています"
+    assert screen.db_version_card.findChild(QLabel, "value_label").text().startswith("28172 / ")
+    assert screen.realtime_status_card.findChild(QLabel, "value_label").text() == "OFF"
 
 
 def test_tray_logs_unreachable_once_and_keeps_the_tooltip(qtbot, tmp_path, caplog):
@@ -93,6 +98,23 @@ def test_tray_logs_unreachable_once_and_keeps_the_tooltip(qtbot, tmp_path, caplo
     assert "サービスにつながりません（E8105）" in tray.tray_icon.toolTip()
     tray.shutdown()
 
+
+def test_tray_tells_main_window_when_service_is_unreachable(qtbot, tmp_path):
+    # つながらない・つながったことを、ホーム画面だけでなくメイン画面（右上・下の帯）にも伝える（#80・README_DEV §104）
+    from unittest.mock import MagicMock
+
+    import tray_main
+    from PySide6.QtWidgets import QApplication
+    from core.exceptions import ServiceUnavailableError
+
+    tray = tray_main.TrayApp(QApplication.instance(), SimpleNamespace(api_dir=tmp_path))
+    tray.window = MagicMock()
+    tray._show_unreachable(ServiceUnavailableError(detail="止まっています"))
+    tray.window.set_service_down.assert_called_with("E8105")
+    tray._on_connected()
+    tray.window.set_service_down.assert_called_with(None)
+    tray.window = None
+    tray.shutdown()
 
 def test_forbidden_requests_are_logged_by_the_service(qapp, service, caplog):  # noqa: F811
     import pytest

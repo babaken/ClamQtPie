@@ -22,12 +22,13 @@ from core.clamd_client import (
     ClamdClient,
     ClamdPathEncodingError,
     STREAM_SIZE_LIMIT_RESPONSE,
+    ClamdStreamRejectedError,
     FdPassUnsupportedError,
     ScanResult,
     fdpass_available,
 )
 from core.config_model import ClamdConfig
-from core.exceptions import ClamdConnectionError, ClamdProcessError, ClamdStreamSizeError
+from core.exceptions import AppError, ClamdConnectionError, ClamdProcessError, ClamdStreamSizeError
 
 logger = logging.getLogger("clamav_frontend")
 
@@ -321,6 +322,21 @@ class ClamAVService:
                 return ScanResult(path=str(path), status="ERROR", detail=NOT_REGULAR_FILE_DETAIL)
             with f:
                 result = self._client.scan_stream(f)
+        except ClamdStreamRejectedError:
+            # 送っている途中で送れなくなり、応答も読めなかった。clamd が動いていれば、clamd がこのファイルの受け取りを
+            # やめた（StreamMaxLength を超えた。TCP では上限の応答が捨てられることがある）とみなし、このファイルだけ
+            # 未検査にする。動いていなければ、これまでどおり接続のエラーとしてスキャンを中断する
+            try:
+                alive = self._client.ping()
+            except AppError:
+                alive = False
+            if not alive:
+                raise
+            return ScanResult(
+                path=str(path), status="ERROR",
+                detail=f"{SIZE_LIMIT_DETAIL_PREFIX}（clamd が途中で受け取りをやめました。StreamMaxLength を超えた可能性があります。"
+                       f"{original.detail}）",
+            )
         except FileNotFoundError:
             # 一時ファイル等がスキャン前に削除・移動された（clamdは読めないため元のERRORは
             # Permission deniedになり、原因が分かりにくかった。Linux実機で発見）

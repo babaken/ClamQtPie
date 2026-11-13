@@ -317,5 +317,7 @@ def test_stream_send_failure_without_reply_is_connection_error(monkeypatch):
     client = ClamdClient(ClamdConfig(connection_type="tcp", tcp_host="127.0.0.1", tcp_port=1))
     monkeypatch.setattr(client, "_connect", lambda: _ClosingClamd(b""))
 
-    with pytest.raises(ClamdConnectionError):
+    from core.clamd_client import ClamdStreamRejectedError
+
+    with pytest.raises(ClamdStreamRejectedError):  # 呼び出し側が clamd に PING して決める（README_DEV §106）
         client.scan_stream(io.BytesIO(b"x" * 10))

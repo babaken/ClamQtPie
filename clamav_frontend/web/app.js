@@ -464,8 +464,9 @@ async function startScan() {
 }
 
 async function cancelScan() {
-  const done = await adminCall(["実行中のスキャンを中止します"], () => api("/scans/current/cancel", "POST"));
-  if (done) toast("スキャンの中止を頼みました。");
+  // 止めるのは利用者の操作（require_user）で、再確認（E8108）は求められない。止まった知らせは scan.finished で届く
+  await api("/scans/current/cancel", "POST");
+  toast("スキャンの停止を頼みました。");
 }
 
 function addScanResult(item) {
@@ -492,6 +493,10 @@ function addScanResult(item) {
 const SOURCE_LABELS = { gui: "トレイGUI", api: "WebUI・API", schedule: "スケジュール" };
 const RESULT_LABELS = { completed: "完了", cancelled: "中断", failed: "失敗" };
 
+// スキャン履歴の列: 終了日時・実行元・種類・対象・結果・検査・検知・操作
+const HISTORY_NOWRAP_COLUMNS = [1, 2, 4, 5, 6, 7];
+const HISTORY_TARGET_COLUMN = 3;
+
 async function loadScanHistory() {
   const data = await api("/scans/history?limit=50");
   const tbody = $("scan-history");
@@ -499,16 +504,22 @@ async function loadScanHistory() {
     emptyRow(tbody, 8, "スキャン履歴はありません");
     return;
   }
-  tbody.replaceChildren(...data.items.map((h) => cells(el("tr"), [
-    localTime(h.finished_at),
-    SOURCE_LABELS[h.source] || h.source,
-    h.label || h.scan_type,
-    (h.targets || []).join(", "),
-    RESULT_LABELS[h.result] || h.result,
-    h.scanned,
-    h.detected,
-    button("詳細", guarded(() => showScanHistory(h.id))),
-  ])));
+  tbody.replaceChildren(...data.items.map((h) => {
+    const row = cells(el("tr"), [
+      localTime(h.finished_at),
+      SOURCE_LABELS[h.source] || h.source,
+      h.label || h.scan_type,
+      (h.targets || []).join(", "),
+      RESULT_LABELS[h.result] || h.result,
+      h.scanned,
+      h.detected,
+      button("詳細", guarded(() => showScanHistory(h.id))),
+    ]);
+    // 短い列は折り返さず、長いパスの「対象」の列を折り返す（パスが列の幅を取り、短い列が 1 文字ずつ折り返した）
+    HISTORY_NOWRAP_COLUMNS.forEach((col) => row.children[col].classList.add("nowrap"));
+    row.children[HISTORY_TARGET_COLUMN].classList.add("path");
+    return row;
+  }));
 }
 
 async function showScanHistory(id) {
@@ -1105,7 +1116,7 @@ const EVENT_HANDLERS = {
   "scan.file": (d) => addScanResult(d),
   "scan.finished": (d) => {
     scanBusy(false);
-    const text = d.cancelled ? "スキャンを中止しました" : `スキャンが終わりました（検査 ${d.scanned} 件、検知 ${d.detected} 件）`;
+    const text = d.cancelled ? "スキャンを中断しました" : `スキャンが終わりました（検査 ${d.scanned} 件、検知 ${d.detected} 件）`;
     $("scan-progress").textContent = text;
     toast(text, d.detected ? "error" : "ok");
     if (state.screen === "scan") loadScanHistory().catch(() => {});

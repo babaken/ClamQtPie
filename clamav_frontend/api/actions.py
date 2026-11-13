@@ -479,7 +479,7 @@ def start_scan(ctx: ApiContext, scan_type: str, targets: list[str] | None, inclu
 def cancel_scan(ctx: ApiContext) -> None:
     if not ctx.scan_dispatcher.is_running:
         raise ApiConflictError("実行中のスキャンはありません")
-    audit(CATEGORY_SCAN, "スキャンの中止を要求しました")
+    audit(CATEGORY_SCAN, "スキャンの停止を要求しました")
     ctx.scan_dispatcher.stop()
 
 

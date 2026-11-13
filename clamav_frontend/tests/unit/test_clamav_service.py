@@ -442,3 +442,48 @@ def test_clamd_stream_limit_is_classified_as_size_limit(fake_clamd_server, tmp_p
     assert results[0].path == str(target)
     assert results[0].status == "ERROR"
     assert error_reason(results[0].detail) == ERROR_REASON_SIZE_LIMIT
+
+
+# --- TCP で INSTREAM の途中に受け取りをやめられたとき（README_DEV §106） -------------------------
+
+def _stream_rejected(_file_obj):
+    from core.clamd_client import ClamdStreamRejectedError
+
+    raise ClamdStreamRejectedError(detail="INSTREAMの送信に失敗しました ([Errno 104] Connection reset by peer)")
+
+
+def test_stream_rejected_while_clamd_is_alive_is_file_result(fake_clamd_server, tmp_path, monkeypatch):
+    # 送っている途中で送れなくなり応答も読めなくても、clamd が PING に答えれば、そのファイルだけ未検査にする（#82）
+    from core.clamav_service import ERROR_REASON_SIZE_LIMIT, error_reason
+
+    target = tmp_path / "big.bin"
+    target.write_bytes(b"x" * 1000)
+    fake_clamd_server.response_map["SCAN"] = f"{target}: Access denied. ERROR"
+    fake_clamd_server.response_map["PING"] = "PONG"
+    service = _service_for(fake_clamd_server)
+    monkeypatch.setattr(service._client, "scan_stream", _stream_rejected)
+
+    results = service.scan_file(str(target))
+
+    assert results[0].path == str(target)
+    assert results[0].status == "ERROR"
+    assert error_reason(results[0].detail) == ERROR_REASON_SIZE_LIMIT
+
+
+def test_stream_rejected_while_clamd_is_down_is_connection_error(fake_clamd_server, tmp_path, monkeypatch):
+    # clamd も答えないときは、これまでどおり接続のエラー（スキャンを中断する）
+    from core.exceptions import ClamdConnectionError
+
+    target = tmp_path / "big.bin"
+    target.write_bytes(b"x" * 1000)
+    fake_clamd_server.response_map["SCAN"] = f"{target}: Access denied. ERROR"
+    service = _service_for(fake_clamd_server)
+    monkeypatch.setattr(service._client, "scan_stream", _stream_rejected)
+
+    def ping():
+        raise ClamdConnectionError(detail="Connection refused")
+
+    monkeypatch.setattr(service._client, "ping", ping)
+
+    with pytest.raises(ClamdConnectionError):
+        service.scan_file(str(target))

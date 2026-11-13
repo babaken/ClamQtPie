@@ -197,6 +197,7 @@ class TrayApp:
         self.tray_icon.set_state(TrayIconState.ERROR, True)
         self.tray_icon.set_warning(f"サービスにつながりません（{code}）")
         if self.window is not None:
+            self.window.set_service_down(code)
             self.window.get_screen("home").set_service_down(code)
         if self.window is None and not self._reconnect.isActive():
             self._reconnect.start(_RECONNECT_MS)
@@ -208,6 +209,7 @@ class TrayApp:
         self.tray_icon.set_warning(None)
         self.tray_icon.set_state(TrayIconState.ERROR, False)
         if self.window is not None:
+            self.window.set_service_down(None)
             self.window.get_screen("home").set_service_down(None)
             self.window.get_screen("home").refresh_status()
         if self.notifier is not None:
