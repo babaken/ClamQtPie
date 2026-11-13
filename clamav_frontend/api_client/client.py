@@ -81,6 +81,18 @@ class ApiReply(QObject):
         # （呼び出し側がクライアントを持っていないと、ガベージコレクションで消えてプロセスが落ちた）
         self._client = client
 
+    def finish(self, data, error) -> None:
+        """結果を知らせて、この結果のオブジェクトを片付ける。クライアントの子のため、片付けないと要求のたびに
+        （つないだ関数と応答の中身ごと）溜まり、トレイGUI のメモリが増え続けた（README_DEV §99）"""
+        try:
+            self.finished.emit(data, error)
+        finally:
+            self.deleteLater()
+            # クライアントへの参照は、片付けの外（次のイベントの処理）で手放す。呼び出し側がクライアントを持って
+            # いないとき、片付けの途中で手放すと、子（通信中の QNetworkReply）を片付けている間にクライアントが消えて落ちる
+            client, self._client = self._client, None
+            QTimer.singleShot(0, lambda: client)
+
 
 class ApiClient(QObject):
     def __init__(self, api_dir: Path, default_port: int = DEFAULT_PORT,
@@ -153,7 +165,7 @@ class ApiClient(QObject):
         def done(data, error):
             if error is None and (not isinstance(data, dict) or data.get("api_version") != API_VERSION):
                 error = ServiceVersionMismatchError(detail=f"サービスの API: {data!r}"[:200])
-            result.finished.emit(data if error is None else None, error)
+            result.finish(data if error is None else None, error)
 
         self.request("GET", "/version").finished.connect(done)
         return result
@@ -163,7 +175,7 @@ class ApiClient(QObject):
             request = self.authorized_request(path)
         except AppError as exc:
             # 呼び出し側が finished をつないでから知らせる（except を出ると exc の名前は消えるため、値を渡しておく）
-            QTimer.singleShot(0, lambda error=exc: reply.finished.emit(None, error))
+            QTimer.singleShot(0, lambda error=exc: reply.finish(None, error))
             return
         request.setTransferTimeout(timeout_ms or self._timeout_ms)
         data = QByteArray()
@@ -179,7 +191,7 @@ class ApiClient(QObject):
             if status is None:
                 # つながらない・待ちきれない（サービスの停止・再起動中）
                 error = ServiceUnavailableError(detail=network_reply.errorString())
-                reply.finished.emit(None, error)
+                reply.finish(None, error)
                 return
             if status == 401 and not retried:
                 # サービスが起動し直してトークンが変わった。読み直して 1 回だけやり直す
@@ -190,11 +202,11 @@ class ApiClient(QObject):
                 try:
                     result = json.loads(payload.decode("utf-8")) if payload else None
                 except ValueError:
-                    reply.finished.emit(None, exceptions.ApiError(detail="応答を読めません"))
+                    reply.finish(None, exceptions.ApiError(detail="応答を読めません"))
                     return
-                reply.finished.emit(result, None)
+                reply.finish(result, None)
                 return
-            reply.finished.emit(None, error_from_body(status, payload))
+            reply.finish(None, error_from_body(status, payload))
 
         network_reply.finished.connect(finished)
 

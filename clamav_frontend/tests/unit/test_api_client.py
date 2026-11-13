@@ -213,3 +213,38 @@ def test_tray_uses_a_per_session_mutex(monkeypatch):
     assert lock.acquire()
     lock.release()
     assert names == [TRAY_MUTEX_NAME] and TRAY_MUTEX_NAME.startswith("Local\\")
+
+
+# --- 要求の結果のオブジェクトを溜めない（README_DEV §99） --------------------------------------
+
+def test_finished_replies_are_cleaned_up(qtbot, service):
+    # 要求のたびに作る結果のオブジェクトは、結果を知らせた後に片付ける（溜まるとトレイGUI のメモリが増え続けた）
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    from api_client.client import ApiReply
+
+    client = _client(service)
+    before = len(client.findChildren(ApiReply))
+    for _ in range(5):
+        _wait(qtbot, client.get("/scans/current"))
+    _wait(qtbot, client.check_version())
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert len(client.findChildren(ApiReply)) == before
+
+
+def test_sync_calls_leave_nothing_behind(qtbot, service):
+    # 同期的な呼び出しを何度しても、結果のオブジェクトが残らない
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    from api_client.client import ApiReply
+    from api_client.sync import SyncCaller
+
+    client = _client(service)
+    caller = SyncCaller(client)
+    caller.call("GET", "/scans/current")
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    replies = len(client.findChildren(ApiReply))
+    for _ in range(20):
+        assert caller.call("GET", "/scans/current") == {"job": None}
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert len(client.findChildren(ApiReply)) == replies
