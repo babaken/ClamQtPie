@@ -42,9 +42,10 @@ from core.exceptions import AppError
 from core.logger import CATEGORY_SCAN, log_event
 from core.records import SCAN_HISTORY_MAX_ERRORS as MAX_ERRORS
 from core.text_safety import visible_controls
+from gui.elided_label import ElidedLabel
 from gui.error_dialog import show_confirm_dialog, show_error_dialog
 from gui.plain_text import plain, plain_tooltip
-from gui.screens.base import BaseScreen, wrap_layout
+from gui.screens.base import BaseScreen, stretch_path_column, wrap_layout
 from gui.theme import set_variant
 from gui.time_text import local_time_text
 
@@ -132,12 +133,14 @@ class ScanScreen(BaseScreen):
         self.state_label = plain(QLabel("状態: 待機中"))
         control_layout.addWidget(self.start_button)
         control_layout.addWidget(self.stop_button)
-        control_layout.addWidget(self.state_label)
-        control_layout.addStretch(1)
+        # 終わったときの文（検査できなかったファイルの案内）は長いので、画面を広げずに折り返す
+        self.state_label.setWordWrap(True)
+        control_layout.addWidget(self.state_label, stretch=1)
         self._add_hlayout(control_layout)
 
         self.progress_bar = QProgressBar()
-        self.current_file_label = plain(QLabel(""))  # ファイル名を文字のまま表示する
+        # 検査中のファイルのパス。長いパスでも画面を広げず、途中を「…」にする（全体はツールチップ）
+        self.current_file_label = ElidedLabel("")
         self.counter_label = QLabel(_counter_text(0, 0, 0))
         self.counter_label.setWordWrap(True)  # 件数が増えても画面を広げない（#85）
         self.add_layout_widget(self.progress_bar)
@@ -149,6 +152,7 @@ class ScanScreen(BaseScreen):
         self.result_table = QTableWidget(0, 4)
         self.result_table.setHorizontalHeaderLabels(["ファイルパス", "判定", "ウイルス名 / 内容", "検知日時"])
         self.add_layout_widget(self.result_table)
+        stretch_path_column(self.result_table)
 
         result_action_layout = QHBoxLayout()
         self.quarantine_button = QPushButton("隔離する")

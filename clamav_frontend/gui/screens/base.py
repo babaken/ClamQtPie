@@ -60,6 +60,22 @@ def configure_table(table: QTableWidget) -> None:
             table.setColumnWidth(col, needed)
 
 
+def stretch_path_column(table: QTableWidget, column: int = 0) -> None:
+    """パスの列に表の残りの幅を回し、入り切らないパスは途中を「…」にする"""
+    # 既定（最後の列を伸ばす）のままだと、パスの列は 100 ピクセルほどで「C:...」としか見えなかった
+    header = table.horizontalHeader()
+    header.setStretchLastSection(False)
+    header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+    # 伸ばす列も、見出しの文字より細くしない（#81。表が狭いときは横にスクロールする）
+    item = table.horizontalHeaderItem(column)
+    if item is not None:
+        needed = header.fontMetrics().horizontalAdvance(item.text()) + _HEADER_PADDING
+        header.setMinimumSectionSize(max(header.minimumSectionSize(), needed))
+    table.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+    # 折り返しが有効（既定）だと、パスは「\」の所で折れて 1 行目だけが残り、「C:...」としか見えなかった
+    table.setWordWrap(False)
+
+
 def wrap_layout(layout) -> QWidget:
     """レイアウトを余白なしのウィジェットに包む（カードの中に横並びのボタン列等を置くため）"""
     widget = QWidget()

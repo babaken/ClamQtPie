@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QPushButton, QScrollArea, QWidget
 
 from gui.flow_layout import FlowLayout
@@ -118,3 +119,50 @@ def test_flow_layout_line_spacing_is_separate_from_item_spacing(qtbot):
     layout.setGeometry(container.rect().adjusted(0, 0, width - container.width(), 0))
     first, second = (b.geometry() for b in buttons)
     assert second.y() - (first.y() + first.height()) == 4
+
+
+_LONG_PATH = "C:/Users/someone/AppData/Local/Temp/abcd1234/Microsoft.DiagnosticsHub.Runtime.Resources." + "0" * 120 + ".vsix"
+
+
+def test_scan_screen_does_not_widen_while_scanning(qtbot, larger_font):
+    """スキャン中の長いパス・終わったときの長い状態の文でも、スキャン画面は最小の幅に収まる（v0.10.1 の確認で見つけた）"""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.resize(window.minimumWidth(), window.minimumHeight())
+    window.show()
+    screen = window.get_screen("scan")
+    window.stacked_widget.setCurrentWidget(screen)
+    scroll = screen.findChild(QScrollArea, "screenScroll")
+
+    screen.current_file_label.setText(_LONG_PATH)
+    screen.state_label.setText("状態: 完了（検査できなかったファイルが 4 件あります。スキャン結果の一覧を確認してください）")
+    screen._add_result_row(_LONG_PATH, "ERROR", "Bad file descriptor.", "2026-11-14T07:00:27+09:00")
+    QApplication.processEvents()
+
+    assert scroll.widget().minimumSizeHint().width() <= scroll.viewport().width()
+    assert not scroll.horizontalScrollBar().isVisible()
+    # パスは途中を「…」にして見せ、全体はツールチップと text() で読める
+    label = screen.current_file_label
+    assert label.text() == _LONG_PATH
+    assert label.shown_text() != _LONG_PATH and "…" in label.shown_text()
+    assert label.shown_text().startswith("C:/Users") and label.shown_text().endswith(".vsix")
+    assert "DiagnosticsHub" in label.toolTip()
+
+
+def test_path_column_takes_the_spare_width(qtbot):
+    """スキャン結果・隔離の表は、パスの列に残りの幅を回す（100 ピクセルほどで「C:...」としか見えなかった）"""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.resize(1200, 800)
+    window.show()
+    for key, attr in (("scan", "result_table"), ("quarantine", "quarantine_table")):
+        screen = window.get_screen(key)
+        window.stacked_widget.setCurrentWidget(screen)
+        QApplication.processEvents()
+        table = getattr(screen, attr)
+        widths = [table.columnWidth(c) for c in range(table.columnCount())]
+        assert widths[0] == max(widths), (key, widths)
+        assert widths[0] > 200, (key, widths)
+        # 1 行で、途中を「…」にする（折り返すと「C:...」しか見えなかった。v0.10.1 の Windows 実機の確認で指摘）
+        assert not table.wordWrap()
+        assert table.textElideMode() == Qt.TextElideMode.ElideMiddle
