@@ -1750,3 +1750,11 @@ Rust の検証（`trial/rust`、internal の `docs/dig/2026-11-11-rust-verificat
 - 型と上限は `core/records.py`、cron 式の解釈は `core/cron.py`（APScheduler は呼んだときにだけ読み込む）に移した。元のモジュールからも同じ名前で使える（サービスの側は変えていない）
 - 開発の環境（Windows、Python 3.15）での `tray_main` の読み込み: RSS 117.5 MB → 52.8 MB、時間 0.93 秒 → 0.23 秒
 - テスト（`tests/unit/test_tray_light_imports.py`）: トレイGUI・昇格ヘルパーの読み込みで、SQLAlchemy・Alembic・APScheduler・FastAPI・uvicorn・pydantic・watchdog・`db` を読み込まないこと
+
+## 94. スキャンで通常のファイル以外を読まない・止めるときにスキャンを待つ
+
+Linux 実機のフルスキャン（Rust の検証の計測）で見つけた。clamd が権限エラーを返したファイルを、アプリが自分で開き直して INSTREAM で送るとき、通常のファイルかを確かめずに開いていた。名前付きパイプでは開く処理から戻らず、スキャンが止まり、［停止］も効かなかった。また、スキャンの途中でサービスを止めると、スキャンのスレッドが動いたまま破棄され、サービスが異常終了していた。
+
+- `core/clamav_service.py`: 開き直すときは `O_NONBLOCK` で開き、開いた後に通常のファイルかを確かめる（`_open_regular_file`）。通常のファイル以外は内容を読まず、「通常のファイルではないため検査していません」の ERROR を返す（clamd の権限エラーのままだと「権限なし」と出て、権限を直せば検査できるように見えるため）。シンボリックリンクはたどらない（`O_NOFOLLOW`。開けなければ clamd の結果のまま返す。`O_NOFOLLOW` の無い Windows では、開く前にシンボリックリンク・ジャンクションかを確かめる）。FILDES で渡すとき（Linux の既定）と同じ扱いにそろえた
+- `core/scan_dispatcher.py`: `ScanDispatcher.shutdown()` で、実行中のスキャンを止め、スレッドが終わるのを待つ（上限 10 秒。過ぎたら警告を残す）。`Runtime.shutdown()` の最初に呼ぶ
+- テスト: 権限エラーの後でも、フォルダ・名前付きパイプ・リンクの先の内容は読まず、スキャンが止まらないこと。名前付きパイプは「権限なし」に分けないこと。サービスの終了時に、応答待ちのスキャンを止めてスレッドの終わりを待つこと

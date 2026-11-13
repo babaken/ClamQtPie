@@ -2,12 +2,19 @@
 テスト仕様書3.1節: CLM-I02、およびClamAVService固有の
 リトライ・自動再起動ロジックのテスト（clamdソケット通信プロトコル設計書4章）
 """
+import os
 import threading
 import time
 
 import pytest
 
-from core.clamav_service import FILE_VANISHED_DETAIL, UNEXPECTED_RESPONSE_DETAIL, ClamAVService
+from core.clamav_service import (
+    FILE_VANISHED_DETAIL,
+    NOT_REGULAR_FILE_DETAIL,
+    UNEXPECTED_RESPONSE_DETAIL,
+    ClamAVService,
+    error_reason,
+)
 from core.clamd_client import ScanResult
 from core.config_model import ClamdConfig
 
@@ -41,7 +48,7 @@ def test_scan_file_keeps_error_when_app_cannot_read_either(fake_clamd_server, tm
     def deny(*args, **kwargs):
         raise PermissionError("denied")
 
-    monkeypatch.setattr("core.clamav_service.open", deny, raising=False)
+    monkeypatch.setattr("core.clamav_service.os.open", deny)
     results = _service_for(fake_clamd_server).scan_file(str(target))
 
     assert results[0].status == "ERROR"
@@ -357,3 +364,65 @@ def test_stream_size_over_is_classified_as_size_limit(fake_clamd_server, tmp_pat
     results = _service_for(fake_clamd_server, max_stream_size_mb=1).scan_file(str(big))
 
     assert error_reason(results[0].detail) == ERROR_REASON_SIZE_LIMIT
+
+
+def test_stream_fallback_does_not_read_non_regular_files(fake_clamd_server, tmp_path):
+    # 通常のファイル以外（フォルダ等）は、clamd が権限エラーを返してもアプリ自身で内容を読まない
+    target = tmp_path / "folder"
+    target.mkdir()
+    fake_clamd_server.response_map["SCAN"] = f"{target}: lstat() failed: Permission denied. ERROR"
+
+    results = _service_for(fake_clamd_server).scan_file(str(target))
+
+    assert results[0].status == "ERROR"
+    assert "INSTREAM" not in fake_clamd_server.commands
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="O_NOFOLLOW が無い環境")
+def test_stream_fallback_does_not_follow_symlinks(fake_clamd_server, tmp_path):
+    # 管理者の権限で動くサービスは、リンクの先をアプリ自身で読まない（clamd の結果のまま返す）
+    real = tmp_path / "real.txt"
+    real.write_text("content")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    fake_clamd_server.response_map["SCAN"] = f"{link}: lstat() failed: Permission denied. ERROR"
+
+    results = _service_for(fake_clamd_server).scan_file(str(link))
+
+    assert results[0].status == "ERROR" and "Permission denied" in results[0].detail
+    assert "INSTREAM" not in fake_clamd_server.commands
+
+
+def test_stream_fallback_does_not_follow_links_without_nofollow(fake_clamd_server, tmp_path, monkeypatch):
+    # O_NOFOLLOW の無い環境（Windows）でも、リンク（シンボリックリンク・ジャンクション）の先は読まない
+    target = tmp_path / "link.txt"
+    target.write_text("content")
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    monkeypatch.setattr("core.clamav_service._is_link_path", lambda path: str(path) == str(target))
+    fake_clamd_server.response_map["SCAN"] = f"{target}: lstat() failed: Permission denied. ERROR"
+
+    results = _service_for(fake_clamd_server).scan_file(str(target))
+
+    assert results[0].status == "ERROR" and "Permission denied" in results[0].detail
+    assert "INSTREAM" not in fake_clamd_server.commands
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="名前付きパイプ（mkfifo）が無い環境")
+def test_stream_fallback_does_not_wait_on_named_pipe(fake_clamd_server, tmp_path):
+    # 名前付きパイプは、相手がいなくても開く処理で待たされず、スキャンが止まらない
+    target = tmp_path / "pipe"
+    os.mkfifo(target)
+    fake_clamd_server.response_map["SCAN"] = f"{target}: lstat() failed: Permission denied. ERROR"
+    service = _service_for(fake_clamd_server)
+    results: list = []
+
+    worker = threading.Thread(target=lambda: results.extend(service.scan_file(str(target))), daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert results[0].status == "ERROR"
+    # 権限を直せば検査できるようには見せない（「権限なし」に分けない）
+    assert results[0].detail == NOT_REGULAR_FILE_DETAIL
+    assert error_reason(results[0].detail) != "permission"
+    assert "INSTREAM" not in fake_clamd_server.commands

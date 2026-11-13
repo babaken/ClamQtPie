@@ -350,6 +350,28 @@ class ScanDispatcher(QObject):
         if self._worker is not None:
             self._worker.stop()
 
+    #: サービスを止めるときに、スキャンのスレッドが終わるのを待つ上限（ミリ秒）
+    SHUTDOWN_WAIT_MS = 10_000
+
+    def shutdown(self) -> bool:
+        """サービスの終了時に、実行中のスキャンを止めてスレッドの終わりを待つ（終わったら True）
+
+        終了の処理ではイベントループがもう回らないため、finished から _on_finished が呼ばれず、
+        QThread が動いたまま破棄されてプロセスが異常終了していた（Linux 実機で発見）。
+        ここでは停止を求めた後、スレッドのイベントループに終わりを伝えて待つ。
+        """
+        thread = self._thread
+        if thread is None:
+            return True
+        self.stop()
+        thread.quit()  # run() から戻った後に、スレッドのイベントループを終える
+        if not thread.wait(self.SHUTDOWN_WAIT_MS):
+            logger.warning(f"スキャンのスレッドが {self.SHUTDOWN_WAIT_MS // 1000} 秒以内に終わりませんでした")
+            return False
+        self._thread = None
+        self._worker = None
+        return True
+
     def _on_finished(self, summary: dict) -> None:
         self.finished.emit(summary)
         if self._thread is not None:
