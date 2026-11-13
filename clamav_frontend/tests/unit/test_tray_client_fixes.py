@@ -19,6 +19,7 @@ class _Events:
             pass
 
     event = _Signal()
+    connected = _Signal()
 
 
 class _Api:
@@ -115,3 +116,103 @@ def test_times_are_shown_in_local_time():
 
 
 from tests.unit.test_api_proxies import service  # noqa: E402,F401 - 本物の API を待ち受けるフィクスチャ
+
+
+# --- サービスにつながり直したときのスキャンの状態（README_DEV §98） -----------------------------
+
+class _JobApi:
+    """GET /scans/current の答えと、中止（POST /scans/current/cancel）の答えを決められる"""
+
+    def __init__(self, job=None, cancel_error=None):
+        self.job = job
+        self.cancel_error = cancel_error
+        self.calls = []
+
+    def call(self, method, path, body=None, params=None):
+        self.calls.append((method, path))
+        if path == "/scans/current":
+            return {"job": self.job}
+        if path == "/scans/current/cancel" and self.cancel_error is not None:
+            raise self.cancel_error
+        return {}
+
+
+def _proxy_with(api):
+    proxy = ScanDispatcherProxy(api, _Events())
+    finished, started, errors = [], [], []
+    proxy.finished.connect(finished.append)
+    proxy.started.connect(started.append)
+    proxy.error.connect(errors.append)
+    return proxy, finished, started, errors
+
+
+def test_resync_ends_a_scan_the_restarted_service_no_longer_runs(qapp):
+    # 起動し直したサービスには実行中のスキャンが無い。画面を「スキャン中」のままにしない
+    proxy, finished, _started, _errors = _proxy_with(_JobApi(job=None))
+    proxy._running = True
+    proxy.resync()
+    assert proxy.is_running is False
+    assert finished == [{"scanned": 0, "detected": 0, "errors": 0, "cancelled": True,
+                         "history_id": None, "state": "cancelled"}]
+
+
+def test_resync_uses_the_result_of_a_scan_that_ended_while_disconnected(qapp):
+    job = {"state": "finished", "label": "フルスキャン", "history_id": 7,
+           "progress": {"scanned": 5, "total": 5, "detected": 1, "errors": 0}}
+    proxy, finished, _started, _errors = _proxy_with(_JobApi(job=job))
+    proxy._running = True
+    proxy.resync()
+    assert finished[0]["cancelled"] is False and finished[0]["scanned"] == 5 and finished[0]["history_id"] == 7
+
+
+def test_resync_picks_up_a_scan_started_while_disconnected(qapp):
+    job = {"state": "running", "label": "スケジュールスキャン", "progress": {}}
+    proxy, finished, started, _errors = _proxy_with(_JobApi(job=job))
+    proxy.resync()
+    assert proxy.is_running is True and started == ["スケジュールスキャン"] and finished == []
+    proxy.resync()  # 状態が合っていれば何もしない
+    assert started == ["スケジュールスキャン"]
+
+
+def test_stop_without_a_running_scan_returns_the_screen_to_idle(qapp):
+    # ［停止］で「実行中のスキャンはありません」（E8104）が返ったら、エラーを出さずに状態を合わせる
+    from core.exceptions import ApiConflictError
+
+    api = _JobApi(job=None, cancel_error=ApiConflictError("実行中のスキャンはありません"))
+    proxy, finished, _started, errors = _proxy_with(api)
+    proxy._running = True
+    proxy.stop()
+    assert proxy.is_running is False and len(finished) == 1 and errors == []
+
+
+def test_stop_error_is_shown_when_the_state_cannot_be_checked(qapp):
+    from core.exceptions import ApiConflictError, ServiceUnavailableError
+
+    class _Down(_JobApi):
+        def call(self, method, path, body=None, params=None):
+            if path == "/scans/current":
+                raise ServiceUnavailableError()
+            return super().call(method, path, body, params)
+
+    proxy, finished, _started, errors = _proxy_with(_Down(cancel_error=ApiConflictError()))
+    proxy._running = True
+    proxy.stop()
+    assert proxy.is_running is True and finished == [] and [e.code for e in errors] == ["E8104"]
+
+
+def test_resync_runs_after_the_event_stream_connects(qtbot, monkeypatch):
+    # つながった後、切れていた間のイベントの送り直しを受け取ってから取り直す
+    from PySide6.QtCore import QObject, Signal
+
+    class _Stream(QObject):
+        event = Signal(str, object)
+        connected = Signal()
+
+    monkeypatch.setattr(ScanDispatcherProxy, "RESYNC_DELAY_MS", 10)
+    stream = _Stream()
+    api = _JobApi(job=None)
+    proxy = ScanDispatcherProxy(api, stream)
+    proxy._running = True
+    with qtbot.waitSignal(proxy.finished, timeout=2000):
+        stream.connected.emit()
+    assert ("GET", "/scans/current") in api.calls

@@ -17,7 +17,7 @@ from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from api_client.events import EventStream
 from api_client.sync import SyncCaller
@@ -421,15 +421,43 @@ class ScanDispatcherProxy(QObject):
     activity = Signal(str, object, int)
     started = Signal(str)
 
+    #: つながってから、実行中のスキャンを取り直すまでの待ち（ミリ秒）。先に、切れていた間のイベント
+    #: （scan.finished など）の送り直しを受け取るため
+    RESYNC_DELAY_MS = 1000
+
     def __init__(self, api: SyncCaller, events: EventStream) -> None:
         super().__init__()
         self._api = api
         self._running = False
         events.event.connect(self._on_event)
+        events.connected.connect(lambda: QTimer.singleShot(self.RESYNC_DELAY_MS, self.resync))
 
     @property
     def is_running(self) -> bool:
         return self._running
+
+    def resync(self) -> None:
+        """サービスの実行中のスキャンを取り直して、状態を合わせる。サービスが起動し直すと、止まったスキャンの
+        scan.finished が届かず、画面が「スキャン中」のまま戻らなかった（README_DEV §98）"""
+        try:
+            job = (self._api.call("GET", "/scans/current") or {}).get("job")
+        except AppError as exc:
+            logger.info(f"実行中のスキャンを取り直せませんでした ({exc.code})")
+            return
+        running = isinstance(job, dict) and job.get("state") == "running"
+        if running and not self._running:
+            self._running = True
+            self.started.emit(job.get("label", ""))
+        elif not running and self._running:
+            self._running = False
+            job = job if isinstance(job, dict) else {}
+            progress = job.get("progress") or {}
+            state = job.get("state") or "cancelled"
+            self.finished.emit({
+                "scanned": progress.get("scanned", 0), "detected": progress.get("detected", 0),
+                "errors": progress.get("errors", 0), "cancelled": state != "finished",
+                "history_id": job.get("history_id"), "state": state,
+            })
 
     def start(self, targets, include_subfolders: bool = True, apply_exclude: bool = True, label: str = "",
               skip_dirs=(), scan_type: str = "custom", **_kwargs) -> None:
@@ -457,6 +485,11 @@ class ScanDispatcherProxy(QObject):
         try:
             self._api.call("POST", "/scans/current/cancel")
         except AppError as exc:
+            if exc.code == "E8104":
+                # 実行中のスキャンが無い（画面の状態が古い）。状態を合わせ、合わせられたら知らせない
+                self.resync()
+                if not self._running:
+                    return
             self.error.emit(exc)
 
     def _on_event(self, name: str, data) -> None:

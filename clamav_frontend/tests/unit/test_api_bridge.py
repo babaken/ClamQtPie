@@ -103,7 +103,7 @@ def test_published_data_is_copied():
 
 
 def test_events_since_returns_only_newer_kept_events():
-    hub = EventHub()
+    hub = EventHub(first_id=1)
     for n in range(EVENT_HISTORY_SIZE + 10):
         hub.publish("e", {"n": n})
     newer = hub.events_since(EVENT_HISTORY_SIZE + 5)
@@ -140,3 +140,15 @@ def test_publish_after_subscriber_loop_closed_does_not_raise():
     asyncio.run(main())  # ループはここで閉じる
     hub.publish("e")
     assert hub.subscriber_count == 0
+
+
+def test_event_ids_start_above_the_ids_of_a_previous_start():
+    # 起動し直す前のサービスで受け取った番号より、新しいサービスの番号が大きい（トレイGUI がつなぎ直したときに、
+    # 新しいイベントを「送った分」として捨てられないように。README_DEV §98）
+    import time
+
+    before = int(time.time() * 1000)
+    hub = EventHub()
+    first = hub.publish("e")
+    assert first.id >= before and hub.latest_id == first.id
+    assert EventHub(first_id=1).latest_id == 0
