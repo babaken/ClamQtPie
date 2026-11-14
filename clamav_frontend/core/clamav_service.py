@@ -9,6 +9,7 @@ ClamAVService — ClamdClientをラップした上位サービス層
 """
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import stat
@@ -20,12 +21,14 @@ from typing import BinaryIO, Callable
 from core.clamd_client import (
     ClamdClient,
     ClamdPathEncodingError,
+    STREAM_SIZE_LIMIT_RESPONSE,
+    ClamdStreamRejectedError,
     FdPassUnsupportedError,
     ScanResult,
     fdpass_available,
 )
 from core.config_model import ClamdConfig
-from core.exceptions import ClamdConnectionError, ClamdProcessError, ClamdStreamSizeError
+from core.exceptions import AppError, ClamdConnectionError, ClamdProcessError, ClamdStreamSizeError
 
 logger = logging.getLogger("clamav_frontend")
 
@@ -33,6 +36,8 @@ logger = logging.getLogger("clamav_frontend")
 FILE_VANISHED_DETAIL = "ファイルが見つかりません（スキャンの前に削除または移動されました）"
 #: 1ファイルのSCANに対して、clamdの応答が1件の結果として解釈できなかった場合のERRORの詳細
 UNEXPECTED_RESPONSE_DETAIL = "clamdの応答を1件の結果として解釈できませんでした"
+#: 通常のファイルでない（名前付きパイプ・デバイスなど）ため、アプリが内容を読まなかった場合のERRORの詳細
+NOT_REGULAR_FILE_DETAIL = "通常のファイルではないため検査していません（名前付きパイプ・デバイスなど）"
 #: サイズ等の上限を超えて検査していないファイルのERRORの詳細の先頭
 SIZE_LIMIT_DETAIL_PREFIX = "サイズ等の上限を超えたため検査していません"
 #: clamdがスキャンの上限（MaxFileSize等）を超えたファイルを報告するときの名前（clamd.confのAlertExceedsMax yes）。
@@ -78,6 +83,39 @@ def _bind_to_requested_path(results: list[ScanResult], path: str | Path) -> list
     if len(results) != 1:
         return [ScanResult(path=str(path), status="ERROR", detail=UNEXPECTED_RESPONSE_DETAIL)]
     return [ScanResult(path=str(path), status=results[0].status, detail=results[0].detail)]
+
+
+def _open_regular_file(path: str | Path) -> BinaryIO | None:
+    """アプリ自身が内容を読むためにファイルを開く。通常のファイルでなければ None
+
+    名前付きパイプなどを普通に開くと、相手が現れるまで開く処理から戻らず、スキャンが止まり、
+    停止の操作も効かなくなる（Linux 実機のフルスキャンで発見）。O_NONBLOCK で開いて待たされない
+    ようにし、開いた後に通常のファイルかを確かめる（FILDES で渡すときと同じ扱い）。
+    サービスは管理者 / root で動くため、シンボリックリンクはたどらない（O_NOFOLLOW。FILDES と同じ。
+    リンクは開けずに OSError になり、呼び出し側は clamd の結果のまま返す）。O_NOFOLLOW の無い Windows
+    では、開く前にリンク（シンボリックリンク・ジャンクション）かを確かめて同じ扱いにする。
+    開けないときの OSError（FileNotFoundError を含む）はそのまま呼び出し側に返す。
+    """
+    nonblock = getattr(os, "O_NONBLOCK", 0)  # Windows には無い（名前付きパイプをこの形で開かない）
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow and _is_link_path(path):
+        raise OSError(errno.ELOOP, "リンクはたどりません", str(path))
+    flags = os.O_RDONLY | nonblock | nofollow | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+        if nonblock:
+            os.set_blocking(fd, True)  # 読む間は普通の（待つ）読み込みに戻す
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _is_link_path(path: str | Path) -> bool:
+    return os.path.islink(path) or (hasattr(os.path, "isjunction") and os.path.isjunction(path))
 
 
 def _is_permission_error(result: ScanResult) -> bool:
@@ -277,8 +315,28 @@ class ClamAVService:
 
     def _scan_by_stream(self, path: str | Path, original: ScanResult) -> ScanResult:
         try:
-            with open(path, "rb") as f:
+            f = _open_regular_file(path)
+            if f is None:
+                # 通常のファイル以外は内容を読まない。clamd の権限エラーのままだと、権限を直せば
+                # 検査できるように見えるため、理由を分けて返す
+                return ScanResult(path=str(path), status="ERROR", detail=NOT_REGULAR_FILE_DETAIL)
+            with f:
                 result = self._client.scan_stream(f)
+        except ClamdStreamRejectedError:
+            # 送っている途中で送れなくなり、応答も読めなかった。clamd が動いていれば、clamd がこのファイルの受け取りを
+            # やめた（StreamMaxLength を超えた。TCP では上限の応答が捨てられることがある）とみなし、このファイルだけ
+            # 未検査にする。動いていなければ、これまでどおり接続のエラーとしてスキャンを中断する
+            try:
+                alive = self._client.ping()
+            except AppError:
+                alive = False
+            if not alive:
+                raise
+            return ScanResult(
+                path=str(path), status="ERROR",
+                detail=f"{SIZE_LIMIT_DETAIL_PREFIX}（clamd が途中で受け取りをやめました。StreamMaxLength を超えた可能性があります。"
+                       f"{original.detail}）",
+            )
         except FileNotFoundError:
             # 一時ファイル等がスキャン前に削除・移動された（clamdは読めないため元のERRORは
             # Permission deniedになり、原因が分かりにくかった。Linux実機で発見）
@@ -290,6 +348,13 @@ class ClamAVService:
             # 中断させないよう、ファイル単位のERROR結果として返す
             return ScanResult(
                 path=str(path), status="ERROR", detail=f"{SIZE_LIMIT_DETAIL_PREFIX}（{exc.message}。{original.detail}）"
+            )
+        if result.status == "ERROR" and STREAM_SIZE_LIMIT_RESPONSE in result.detail.lower():
+            # clamd の StreamMaxLength がアプリの上限（clamd.max_stream_size_mb）より小さい。そのファイルだけ
+            # 上限を超えて未検査にする（スキャン全体は止めない）
+            return ScanResult(
+                path=str(path), status="ERROR",
+                detail=f"{SIZE_LIMIT_DETAIL_PREFIX}（clamd の StreamMaxLength を超えました。{original.detail}）",
             )
         return ScanResult(path=str(path), status=result.status, detail=result.detail)
 

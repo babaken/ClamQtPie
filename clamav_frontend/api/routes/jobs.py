@@ -156,6 +156,8 @@ async def events(request: Request, last_event_id: str | None = Header(None, max_
     # 先に購読してから再送分を読む（その間に出たイベントを取りこぼさないように。重なった分は id で除く）
     subscription = hub.subscribe(getattr(request.app.state, "listener", "internal"))
     last_id = _parse_last_id(last_event_id)
+    if last_id is not None and last_id > hub.latest_id:
+        last_id = None  # このサービスが出していない番号（時計が戻った後の起動し直しなど）。送り直す分は無い
     backlog = hub.events_since(last_id) if last_id is not None else []
 
     async def stream():

@@ -70,6 +70,9 @@ class Runtime:
     keep: list = field(default_factory=list)
 
     def shutdown(self) -> None:
+        if self.scan_dispatcher is not None:
+            # スキャンの途中で止めても、スレッドが動いたまま破棄されないよう、先に止めて待つ
+            self.scan_dispatcher.shutdown()
         if self.realtime_manager.is_running:
             self.realtime_manager.stop()
         self.scheduler_service.shutdown()

@@ -70,8 +70,14 @@ class SyncCaller(QObject):
         reply = self.client.request(method, path, body, timeout_ms=self._timeout_ms)
         reply.finished.connect(done)
         if "error" not in outcome:
-            QTimer.singleShot(self._timeout_ms + 1000, loop.quit)  # 念のため（通常は転送のタイムアウトで終わる）
+            # 念のため（通常は転送のタイムアウトで終わる）。待ち終わったら止める（singleShot だと、呼ぶたびに
+            # 待ちの間ずっとタイマーとループが残る）
+            guard = QTimer()
+            guard.setSingleShot(True)
+            guard.timeout.connect(lambda: loop.quit())
+            guard.start(self._timeout_ms + 1000)
             loop.exec()
+            guard.stop()
         if "error" not in outcome:
             raise ServiceUnavailableError(detail="サービスの応答がありません")
         if outcome["error"] is not None:

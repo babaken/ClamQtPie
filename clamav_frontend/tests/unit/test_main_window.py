@@ -159,3 +159,55 @@ def test_hamburger_collapses_and_expands_sidebar(qtbot):
     window.hamburger_button.click()
     assert window.sidebar_collapsed is False
     assert first.text() == "ホーム"
+
+
+def test_service_unavailable_dialog_shows_ctl_status_hint(qtbot, monkeypatch):
+    # サービスにつながらないときのダイアログに、状態を確かめるコマンドの案内を添える（#73・README_DEV §102）
+    from core.exceptions import ServiceUnavailableError
+    from gui.error_dialog import CTL_STATUS_HINT
+
+    captured = {}
+
+    def fake_exec(self):
+        captured["informative"] = self.informativeText()
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    show_error_dialog(None, ServiceUnavailableError(detail="サービスが動いていません"))
+
+    assert captured["informative"].startswith("エラーコード: E8105\n")
+    assert CTL_STATUS_HINT in captured["informative"]
+    assert "clamqtpie-ctl status" in CTL_STATUS_HINT
+
+
+def test_status_pill_shows_service_down_instead_of_last_clamd_state(qtbot):
+    # サービスにつながらない間は、最後に読めた clamd の状態を「準備ができています」と出さない（#80・README_DEV §104）
+    from gui.screens.home import AppStatus
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.update_status_bar(AppStatus(clamd_running=True, db_version="28157", db_date="Sun Oct 18 2026"))
+    assert "準備ができています" in window.status_pill.text()
+
+    window.set_service_down("E8105")
+    assert "ClamQtPie サービスにつながりません" in window.status_pill.text()
+    assert window.clamd_status_label.text() == "clamd: -"
+    assert window.db_update_label.text() == "定義DB更新: -"
+    assert window.footer_db_label.text() == "定義DB: -"
+    assert window.realtime_status_label.text() == "リアルタイム監視: -"
+
+    # つながらない間に古い状態が届いても、つながらない表示のまま
+    window.update_status_bar(AppStatus(clamd_running=True, db_version="28157", db_date="Sun Oct 18 2026"))
+    assert "ClamQtPie サービスにつながりません" in window.status_pill.text()
+
+    window.set_service_down(None)
+    assert "準備ができています" in window.status_pill.text()
+    assert window.clamd_status_label.text() == "clamd: 稼働中"
+
+
+def test_status_pill_shows_service_down_before_first_status(qtbot):
+    # 状態を一度も読めないうちにつながらなくなったときも、つながらない表示にする
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.set_service_down("E8105")
+    assert "ClamQtPie サービスにつながりません" in window.status_pill.text()

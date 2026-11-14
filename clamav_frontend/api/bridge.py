@@ -13,6 +13,7 @@ import asyncio
 import concurrent.futures
 import itertools
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -114,10 +115,18 @@ class Subscription:
             pass  # 満杯なら、読み出し側は closed を見て終わる
 
 
+def _first_event_id() -> int:
+    """最初のイベントの番号。起動した時刻（ミリ秒）から始め、起動し直す前の番号より大きくする
+    （トレイGUI は、つなぎ直すときに前のサービスで受け取った最後の番号を Last-Event-ID で送る。1 から数え直すと、
+    その番号以下の新しいイベントが「送った分」として捨てられ、届かなかった。README_DEV §98）"""
+    return int(time.time() * 1000)
+
+
 class EventHub:
-    def __init__(self) -> None:
+    def __init__(self, first_id: int | None = None) -> None:
         self._lock = threading.Lock()
-        self._ids = itertools.count(1)
+        self._ids = itertools.count(_first_event_id() if first_id is None else first_id)
+        self._latest_id = 0
         self._history: deque[Event] = deque(maxlen=EVENT_HISTORY_SIZE)
         self._subscribers: list[Subscription] = []
 
@@ -125,6 +134,7 @@ class EventHub:
         """任意のスレッドから呼べる"""
         with self._lock:
             event = Event(next(self._ids), name, dict(data or {}))
+            self._latest_id = event.id
             self._history.append(event)
             subscribers = list(self._subscribers)
         for subscription in subscribers:
@@ -145,6 +155,12 @@ class EventHub:
         with self._lock:
             if subscription in self._subscribers:
                 self._subscribers.remove(subscription)
+
+    @property
+    def latest_id(self) -> int:
+        """最後に出したイベントの番号（まだ無ければ 0）"""
+        with self._lock:
+            return self._latest_id
 
     def events_since(self, last_id: int) -> list[Event]:
         """last_id より後のイベント（再接続時の再送用）。保持している範囲のものだけ"""

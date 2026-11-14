@@ -50,7 +50,7 @@ ADMIN_ROUTES: tuple[tuple[str, re.Pattern], ...] = tuple((m, re.compile(f"^{p}$"
     ("POST", "/web/totp"),
     ("DELETE", "/web/totp"),
     ("POST", "/web/unlock"),
-    # user のトークンでは断られることのあるもの（フルスキャン・自分のフォルダの外・スケジュールのスキャンの中止）
+    # user のトークンでは断られることのあるもの（フルスキャン・自分のフォルダの外・スケジュールのスキャンの停止）
     ("POST", "/scans"),
     ("POST", "/scans/current/cancel"),
     ("POST", "/quarantine"),
@@ -301,5 +301,5 @@ def describe(op: Operation, lookup: Lookup | None = None) -> list[str]:
             lines.append(f"  ほかに {len(targets) - 20} 件")
         return lines
     if (m, p) == ("POST", "/scans/current/cancel"):
-        return ["実行中のスキャンを中止します"]
+        return ["実行中のスキャンを停止します"]
     return [f"{m} {p}"]

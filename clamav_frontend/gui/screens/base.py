@@ -29,6 +29,8 @@ _DATETIME_COLUMN_WIDTH = 165
 #: 画面の内容の最大幅（横長のウィンドウで表やボタンが間延びしないように左寄せで止める）
 _CONTENT_MAX_WIDTH = 1100
 _TABLE_MIN_HEIGHT = 150
+#: 見出しの文字の左右に足す幅（区切りの線・余白・並べ替えの印の分）
+_HEADER_PADDING = 28
 
 
 def configure_table(table: QTableWidget) -> None:
@@ -44,10 +46,34 @@ def configure_table(table: QTableWidget) -> None:
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
     else:
         table.horizontalHeader().setStretchLastSection(True)
+    metrics = table.horizontalHeader().fontMetrics()
     for col in range(table.columnCount()):
         header = table.horizontalHeaderItem(col)
-        if header is not None and "日時" in header.text():
+        if header is None:
+            continue
+        if "日時" in header.text():
             table.setColumnWidth(col, _DATETIME_COLUMN_WIDTH)
+        # 列を見出しの文字より細くしない。既定の幅（100 ピクセル）のままだと、長い見出し（「ウイルス名 / 内容」など）は
+        # 中央にそろえたまま左右が切れ、隣の見出しと重なって見えた（#81）。入り切らないときは表を横にスクロールする
+        needed = metrics.horizontalAdvance(header.text()) + _HEADER_PADDING
+        if table.columnWidth(col) < needed:
+            table.setColumnWidth(col, needed)
+
+
+def stretch_path_column(table: QTableWidget, column: int = 0) -> None:
+    """パスの列に表の残りの幅を回し、入り切らないパスは途中を「…」にする"""
+    # 既定（最後の列を伸ばす）のままだと、パスの列は 100 ピクセルほどで「C:...」としか見えなかった
+    header = table.horizontalHeader()
+    header.setStretchLastSection(False)
+    header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+    # 伸ばす列も、見出しの文字より細くしない（#81。表が狭いときは横にスクロールする）
+    item = table.horizontalHeaderItem(column)
+    if item is not None:
+        needed = header.fontMetrics().horizontalAdvance(item.text()) + _HEADER_PADDING
+        header.setMinimumSectionSize(max(header.minimumSectionSize(), needed))
+    table.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+    # 折り返しが有効（既定）だと、パスは「\」の所で折れて 1 行目だけが残り、「C:...」としか見えなかった
+    table.setWordWrap(False)
 
 
 def wrap_layout(layout) -> QWidget:
@@ -91,7 +117,9 @@ class BaseScreen(QWidget):
         scroll.setObjectName("screenScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # ふだんは横のスクロールバーを出さない（中身は表示の幅に収める。#85）。それでも収まらない（大きな文字の設定など）
+        # ときに、はみ出した部分を見られるよう、必要なときだけ出す
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         outer.addWidget(scroll)
 
         viewport = QWidget()

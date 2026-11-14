@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 from core.exceptions import AppError
 from core.log_reader_service import LOG_CATEGORIES
 from gui.error_dialog import show_confirm_dialog, show_error_dialog
+from gui.flow_layout import FlowLayout
 from gui.screens.base import BaseScreen
 
 
@@ -45,7 +46,7 @@ class LogScreen(BaseScreen):
         date_layout.addWidget(self.date_to_edit)
         filter_layout.addLayout(date_layout)
 
-        level_layout = QHBoxLayout()
+        level_layout = FlowLayout()  # 狭いときは次の行へ折り返す（#85）
         self.level_checks: dict[str, QCheckBox] = {}
         for level in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
             cb = QCheckBox(level)
@@ -56,7 +57,7 @@ class LogScreen(BaseScreen):
         filter_layout.addLayout(level_layout)
 
         # 画面設計書7章: カテゴリ（チェックボックス群、既定は全選択）
-        category_layout = QHBoxLayout()
+        category_layout = FlowLayout()  # 狭いときは次の行へ折り返す（#85）
         self.category_checks: dict[str, QCheckBox] = {}
         for category in LOG_CATEGORIES:
             cb = QCheckBox(category)

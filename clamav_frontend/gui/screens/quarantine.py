@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from core.exceptions import AppError, QuarantineWriteError
 from gui.error_dialog import show_confirm_dialog, show_error_dialog
 from gui.plain_text import plain, plain_tooltip
-from gui.screens.base import BaseScreen, wrap_layout
+from gui.screens.base import BaseScreen, stretch_path_column, wrap_layout
 
 STATUS_QUARANTINED = "隔離中"
 STATUS_RESTORED = "復元済"
@@ -85,6 +85,7 @@ class QuarantineScreen(BaseScreen):
         self.quarantine_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.quarantine_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.add_layout_widget(self.quarantine_table)
+        stretch_path_column(self.quarantine_table)
 
         action_layout = QHBoxLayout()
         self.restore_button = QPushButton("復元")

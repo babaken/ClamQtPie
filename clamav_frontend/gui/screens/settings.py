@@ -327,6 +327,9 @@ class SettingsScreen(BaseScreen):
         if not _IS_WINDOWS:  # WindowsのclamdはUNIXソケットで待ち受けられない
             self.connection_type_combo.addItem("UNIX ソケット", "unix")
         self.connection_type_combo.currentIndexChanged.connect(self._update_engine_fields)
+        # 長い選択肢（「自動（Windows: TCP / Linux: UNIX ソケット）」）の幅で画面を広げない。開いた一覧には全部出る（#85）
+        self.connection_type_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.connection_type_combo.setMinimumContentsLength(16)
         self.tcp_host_edit = QLineEdit()
         self.tcp_host_edit.setPlaceholderText(_DEFAULT_CLAMD.tcp_host)
         self.tcp_port_spin = QSpinBox()

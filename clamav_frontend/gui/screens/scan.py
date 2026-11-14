@@ -40,11 +40,12 @@ from core.clamav_service import (
 )
 from core.exceptions import AppError
 from core.logger import CATEGORY_SCAN, log_event
-from core.scan_history_service import MAX_ERRORS
+from core.records import SCAN_HISTORY_MAX_ERRORS as MAX_ERRORS
 from core.text_safety import visible_controls
+from gui.elided_label import ElidedLabel
 from gui.error_dialog import show_confirm_dialog, show_error_dialog
 from gui.plain_text import plain, plain_tooltip
-from gui.screens.base import BaseScreen, wrap_layout
+from gui.screens.base import BaseScreen, stretch_path_column, wrap_layout
 from gui.theme import set_variant
 from gui.time_text import local_time_text
 
@@ -71,6 +72,9 @@ _HISTORY_TYPES = {"quick": "クイック", "full": "フル", "custom": "カス�
 _HISTORY_SOURCES = {"gui": "画面", "api": "Web API", "schedule": "スケジュール"}
 _HISTORY_RESULTS = {"completed": "完了", "cancelled": "中断", "failed": "失敗"}
 _HISTORY_ACTIONS = {"quarantined": "隔離しました", "notified": "通知のみ"}
+#: スキャン履歴の「種類」の列と、中身に合わせて広げるときの上限（ピクセル）
+_HISTORY_TYPE_COLUMN = 1
+_HISTORY_TYPE_MAX_WIDTH = 260
 _HISTORY_REASONS = {"size_limit": "サイズの上限", "permission": "権限なし", "vanished": "削除済み", "other": "エラー"}
 
 
@@ -84,7 +88,9 @@ class ScanScreen(BaseScreen):
         self._row_paths = []
         # 1. スキャン対象選択エリア
         self.begin_card("スキャン対象の選択")
-        self.quick_radio = QRadioButton("クイックスキャン（デスクトップ・ダウンロード・ドキュメント・一時フォルダ等）")
+        # ラジオボタンの文字は折り返せないため短くし、対象の全部はツールチップに出す（最小の幅で右が切れないように。#85）
+        self.quick_radio = QRadioButton("クイックスキャン（デスクトップ・ダウンロードなど）")
+        self.quick_radio.setToolTip("デスクトップ・ダウンロード・ドキュメント・一時フォルダなどを検査します")
         self.full_radio = QRadioButton("フルスキャン（システムドライブ全体）")
         self.custom_radio = QRadioButton("カスタム（ファイル/フォルダ選択）")
         self.quick_radio.setChecked(True)
@@ -127,13 +133,16 @@ class ScanScreen(BaseScreen):
         self.state_label = plain(QLabel("状態: 待機中"))
         control_layout.addWidget(self.start_button)
         control_layout.addWidget(self.stop_button)
-        control_layout.addWidget(self.state_label)
-        control_layout.addStretch(1)
+        # 終わったときの文（検査できなかったファイルの案内）は長いので、画面を広げずに折り返す
+        self.state_label.setWordWrap(True)
+        control_layout.addWidget(self.state_label, stretch=1)
         self._add_hlayout(control_layout)
 
         self.progress_bar = QProgressBar()
-        self.current_file_label = plain(QLabel(""))  # ファイル名を文字のまま表示する
+        # 検査中のファイルのパス。長いパスでも画面を広げず、途中を「…」にする（全体はツールチップ）
+        self.current_file_label = ElidedLabel("")
         self.counter_label = QLabel(_counter_text(0, 0, 0))
+        self.counter_label.setWordWrap(True)  # 件数が増えても画面を広げない（#85）
         self.add_layout_widget(self.progress_bar)
         self.add_layout_widget(self.current_file_label)
         self.add_layout_widget(self.counter_label)
@@ -143,6 +152,7 @@ class ScanScreen(BaseScreen):
         self.result_table = QTableWidget(0, 4)
         self.result_table.setHorizontalHeaderLabels(["ファイルパス", "判定", "ウイルス名 / 内容", "検知日時"])
         self.add_layout_widget(self.result_table)
+        stretch_path_column(self.result_table)
 
         result_action_layout = QHBoxLayout()
         self.quarantine_button = QPushButton("隔離する")
@@ -226,6 +236,12 @@ class ScanScreen(BaseScreen):
                 item.setToolTip(plain_tooltip(value))
                 self.history_table.setItem(row, col, item)
             self.history_table.item(row, 0).setData(_PATH_INDEX_ROLE, record.id)
+        # 「種類」（「カスタムスキャン」・スケジュールの名前など）が省かれないように、中身に合わせて広げる。
+        # 長いスケジュールの名前で表が広がりすぎないよう、上限を設ける（切れた分はツールチップで読める）
+        width = self.history_table.columnWidth(_HISTORY_TYPE_COLUMN)
+        self.history_table.resizeColumnToContents(_HISTORY_TYPE_COLUMN)
+        fitted = min(self.history_table.columnWidth(_HISTORY_TYPE_COLUMN), _HISTORY_TYPE_MAX_WIDTH)
+        self.history_table.setColumnWidth(_HISTORY_TYPE_COLUMN, max(width, fitted))
 
     def _on_history_detail_clicked(self) -> None:
         row = self.history_table.currentRow()
@@ -305,7 +321,11 @@ class ScanScreen(BaseScreen):
         return True
 
     def show_started_elsewhere(self) -> None:
-        """画面以外（Web API）から始めたスキャンを、実行中として表示する（結果はシグナルで届く）"""
+        """画面以外（ほかのトレイGUI・WebUI・スケジュール）から始めたスキャンを、実行中として表示する（結果は
+        シグナルで届く）。すでにスキャン中を表示しているとき（画面から始めた）は、結果の表を消さないよう何もしない。
+        画面を開いているかどうかでは決めない（開いたまま「中断」の表示のときに始まったスキャンを止められなくなる）"""
+        if self.stop_button.isEnabled():
+            return
         self._show_running()
 
     def _show_running(self) -> None:

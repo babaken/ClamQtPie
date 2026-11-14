@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,6 +33,43 @@ from core.logger import CATEGORY_SCAN, log_event
 from core.text_safety import visible_controls
 
 logger = logging.getLogger("clamav_frontend")
+
+
+#: フォルダをたどる途中で入ってよいマウントのファイルシステム（ローカルのディスクとメモリ）。
+#: ネットワーク（nfs・cifs・sshfs などの fuse）・疑似ファイルシステム・イメージ（squashfs・overlay など）には入らない。
+#: マウントした場所そのものを対象に指定したときは、種類にかかわらず検査する（README_DEV §96）
+LOCAL_DISK_FILESYSTEMS = frozenset({
+    "ext2", "ext3", "ext4", "xfs", "btrfs", "f2fs", "jfs", "reiserfs", "zfs",
+    "vfat", "exfat", "ntfs", "ntfs3", "fuseblk", "tmpfs",
+})
+
+_MOUNTINFO_PATH = "/proc/self/mountinfo"
+_MOUNTINFO_ESCAPE = re.compile(r"\\([0-7]{3})")
+
+
+def parse_mountinfo(text: str) -> dict[str, str]:
+    """/proc/self/mountinfo の中身から「マウントした場所 → ファイルシステムの種類」を作る。
+    同じ場所に重ねてマウントしたときは、後の行（上に見えているもの）を使う"""
+    mounts: dict[str, str] = {}
+    for line in text.splitlines():
+        left, sep, right = line.partition(" - ")
+        fields = left.split(" ")
+        if not sep or len(fields) < 5 or not right:
+            continue
+        point = _MOUNTINFO_ESCAPE.sub(lambda m: chr(int(m.group(1), 8)), fields[4])
+        mounts[point] = right.split(" ")[0]
+    return mounts
+
+
+def _read_mount_types() -> dict[str, str] | None:
+    """今のマウントの一覧。Windows や、一覧が読めないときは None（マウントでは分けずにたどる）"""
+    if os.name == "nt":
+        return None
+    try:
+        with open(_MOUNTINFO_PATH, encoding="utf-8", errors="surrogateescape") as f:
+            return parse_mountinfo(f.read())
+    except OSError:
+        return None
 
 
 def _now_iso() -> str:
@@ -74,6 +113,7 @@ class ScanWorker(QObject):
         self._apply_exclude = apply_exclude
         self._exclude_service = exclude_service
         self._skip_dirs = {os.path.normcase(os.path.normpath(d)) for d in skip_dirs}
+        self._reported_mounts: set[str] = set()  # 入らなかったマウントのログは 1 回だけ残す（2 回たどるため）
         self._stop_requested = False
         self._thread_ident: int | None = None
         self._current: tuple[str, float] | None = None  # (スキャン中のパス, 開始時刻)
@@ -113,23 +153,27 @@ class ScanWorker(QObject):
         targets_text = ", ".join(str(t) for t in self._targets)
         log_event(CATEGORY_SCAN, f"{self._label}を開始しました: {targets_text}")
         self.progress.emit(0, 0, "スキャン対象のファイルを確認しています...")
+        # 対象のファイルの一覧はメモリに持たない（フルスキャンでは数百万件になり、サービスのメモリが
+        # 数 GB に増えていた）。先に数だけ数え（進み具合の分母）、検査ではもう一度たどりながら 1 件ずつ渡す
         try:
-            files = self._enumerate_files()
+            is_excluded = self._make_exclude_matcher()
+            total = sum(1 for _ in self._iter_files(is_excluded))
         except AppError as exc:
             self.error.emit(exc)
             self._finish({"scanned": 0, "detected": 0, "errors": 0, "cancelled": False})
             return
 
-        total = len(files)
         scanned = 0
         detected = 0
         errors = 0
         aborted = False
 
-        for path in files:
+        for path in self._iter_files(is_excluded):
             if self._stop_requested:
                 break
 
+            # 数えた後に増えたファイルがあっても、分母が検査した数を下回らないようにする
+            total = max(total, scanned + 1)
             self.progress.emit(scanned, total, str(path))
 
             try:
@@ -154,6 +198,8 @@ class ScanWorker(QObject):
                 scanned += 1
                 continue
             except Exception as exc:  # noqa: BLE001 - 1ファイルの想定外の失敗でスキャン全体を止めない
+                if self._stop_requested:
+                    break  # 停止操作で通信を打ち切った結果のエラーは、想定外のエラーとして扱わない
                 # 止まると完了の合図も出ず、画面が「スキャン中」のまま戻らなくなる
                 logger.exception(f"スキャン中に想定外のエラーが発生しました: {visible_controls(str(path))}",
                                  extra={"error_code": "E9001"})
@@ -229,44 +275,95 @@ class ScanWorker(QObject):
         )
         self.finished.emit(summary)
 
-    def _enumerate_files(self) -> list[Path]:
+    def _make_exclude_matcher(self):
         # 除外ルールはスキャン開始時に1回だけ読み込む（ファイルごとにDBを読むとフルスキャンで極端に遅くなる）
         if self._apply_exclude and self._exclude_service is not None:
-            is_excluded = self._exclude_service.make_matcher()
-        else:
-            is_excluded = lambda _path: False  # noqa: E731
+            return self._exclude_service.make_matcher()
+        return lambda _path: False
 
-        files: list[Path] = []
+    def _iter_files(self, is_excluded) -> Iterator[Path]:
+        """検査するファイルを 1 件ずつ返す（一覧は作らない。数えるときと検査するときの 2 回呼ぶ）"""
+        # マウントの一覧はたどるたびに読み直す。Linux では同じフォルダを 2 回たどらないように、
+        # たどったフォルダ（デバイス番号・inode）を覚える（バインドマウント・btrfs のサブボリューム）
+        mounts = _read_mount_types()
+        seen_dirs: set[tuple[int, int]] | None = set() if mounts is not None else None
         for target in self._targets:
             if self._stop_requested:
                 break
             if target.is_file():
                 if not is_excluded(str(target)):
-                    files.append(target)
+                    yield target
                 continue
 
             if not target.is_dir():
                 continue
 
             if self._include_subfolders:
+                target_str = str(target)
+                # マウントの一覧と比べるための本当のパス（対象をリンクで指定したとき）。たどる途中のフォルダは
+                # リンクをたどらないため、対象の本当のパスに続きをつなげれば本当のパスになる
+                real_target = os.path.realpath(target_str) if mounts is not None else target_str
+                if seen_dirs is not None:
+                    _remember_dir(target_str, seen_dirs)
                 for root, dirs, filenames in os.walk(target):
                     if self._stop_requested:
                         break
-                    # 立ち入らないフォルダ（Linuxの/proc等）とリンク・ジャンクションはos.walkの探索対象から外す
+                    # 立ち入らないフォルダ（Linuxの/proc等）・リンク・ジャンクション・ローカルのディスク以外の
+                    # マウントは os.walk の探索対象から外す
                     dirs[:] = [
                         d for d in dirs
-                        if os.path.normcase(os.path.normpath(os.path.join(root, d))) not in self._skip_dirs
-                        and not _is_link(os.path.join(root, d))
+                        if self._should_descend(
+                            os.path.join(root, d), target_str, real_target, mounts, seen_dirs,
+                        )
                     ]
                     for name in filenames:
                         candidate = Path(root) / name
                         if not _is_link(str(candidate)) and not is_excluded(str(candidate)):
-                            files.append(candidate)
+                            yield candidate
             else:
                 for entry in target.iterdir():
+                    if self._stop_requested:
+                        break
                     if not _is_link(str(entry)) and entry.is_file() and not is_excluded(str(entry)):
-                        files.append(entry)
-        return files
+                        yield entry
+
+    def _should_descend(
+        self,
+        path: str,
+        target: str,
+        real_target: str,
+        mounts: dict[str, str] | None,
+        seen_dirs: set[tuple[int, int]] | None,
+    ) -> bool:
+        """たどる途中のフォルダに入るか（対象に指定したフォルダそのものには使わない）"""
+        if os.path.normcase(os.path.normpath(path)) in self._skip_dirs or _is_link(path):
+            return False
+        if mounts is None:
+            return True
+        real = os.path.normpath(real_target + path[len(target):])
+        fstype = mounts.get(real)
+        if fstype is not None and fstype not in LOCAL_DISK_FILESYSTEMS:
+            if real not in self._reported_mounts:
+                self._reported_mounts.add(real)
+                logger.info(
+                    "ローカルのディスクではないマウント（%s）には入りません: %s（検査するには、この場所を直接指定してください）",
+                    fstype, path,
+                )
+            return False
+        return seen_dirs is None or _remember_dir(path, seen_dirs)
+
+
+def _remember_dir(path: str, seen_dirs: set[tuple[int, int]]) -> bool:
+    """初めてたどるフォルダなら覚えて True。同じフォルダを別の場所から見ている（すでにたどった）なら False"""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return True  # 開けないフォルダは os.walk に任せる（中身を読めなければ何も返さない）
+    key = (st.st_dev, st.st_ino)
+    if key in seen_dirs:
+        return False
+    seen_dirs.add(key)
+    return True
 
 
 def _is_link(path: str) -> bool:
@@ -349,6 +446,28 @@ class ScanDispatcher(QObject):
     def stop(self) -> None:
         if self._worker is not None:
             self._worker.stop()
+
+    #: サービスを止めるときに、スキャンのスレッドが終わるのを待つ上限（ミリ秒）
+    SHUTDOWN_WAIT_MS = 10_000
+
+    def shutdown(self) -> bool:
+        """サービスの終了時に、実行中のスキャンを止めてスレッドの終わりを待つ（終わったら True）
+
+        終了の処理ではイベントループがもう回らないため、finished から _on_finished が呼ばれず、
+        QThread が動いたまま破棄されてプロセスが異常終了していた（Linux 実機で発見）。
+        ここでは停止を求めた後、スレッドのイベントループに終わりを伝えて待つ。
+        """
+        thread = self._thread
+        if thread is None:
+            return True
+        self.stop()
+        thread.quit()  # run() から戻った後に、スレッドのイベントループを終える
+        if not thread.wait(self.SHUTDOWN_WAIT_MS):
+            logger.warning(f"スキャンのスレッドが {self.SHUTDOWN_WAIT_MS // 1000} 秒以内に終わりませんでした")
+            return False
+        self._thread = None
+        self._worker = None
+        return True
 
     def _on_finished(self, summary: dict) -> None:
         self.finished.emit(summary)

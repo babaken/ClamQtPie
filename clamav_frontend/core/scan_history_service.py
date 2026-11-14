@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from core.clamav_service import error_reason
 from core.exceptions import ClamdConnectionError
+from core.records import SCAN_HISTORY_MAX_ERRORS
 from core.text_safety import visible_controls
 from db.database import DatabaseService
 from db.models import ScanHistory, ScanHistoryDetection, ScanHistoryError
@@ -30,8 +31,8 @@ RESULT_FAILED = "failed"
 ACTION_QUARANTINED = "quarantined"
 ACTION_NOTIFIED = "notified"
 
-#: 1回のスキャンで記録する、検査できなかったファイルの上限
-MAX_ERRORS = 1000
+#: 1回のスキャンで記録する、検査できなかったファイルの上限（画面でも使うため core.records に置く）
+MAX_ERRORS = SCAN_HISTORY_MAX_ERRORS
 
 
 @dataclass

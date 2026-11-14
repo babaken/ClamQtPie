@@ -19,7 +19,6 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
-    QHBoxLayout,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -29,6 +28,7 @@ from api_client.admin_ops import Operation
 from core.exceptions import AppError, ElevationCancelledError
 from gui.dialogs.job_edit_dialog import SCAN_TYPE_LABELS, JobEditDialog
 from gui.error_dialog import show_error_dialog
+from gui.flow_layout import FlowLayout
 from gui.pending_edits import MARK_UNSAVED, PendingEdits, SaveBar, failure_text
 from gui.screens.base import BaseScreen, wrap_layout
 
@@ -106,7 +106,7 @@ class ScheduleScreen(BaseScreen):
         self.job_table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self.add_layout_widget(self.job_table)
 
-        action_layout = QHBoxLayout()
+        action_layout = FlowLayout()  # 狭いときは次の行へ折り返す（#85）
         self.add_job_button = QPushButton("新規ジョブ追加")
         self.edit_job_button = QPushButton("編集")
         self.delete_job_button = QPushButton("削除")

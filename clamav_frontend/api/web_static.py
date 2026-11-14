@@ -28,6 +28,8 @@ FILES = {
     "app.js": "text/javascript; charset=utf-8",
     "style.css": "text/css; charset=utf-8",
 }
+#: 配るファイルのパス（要求の名前は、この表を引く鍵にだけ使い、パスの組み立てには使わない）
+_FILE_PATHS = {name: WEB_DIR / name for name in FILES}
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
@@ -95,11 +97,12 @@ def ca_info(request: Request) -> dict:
 
 @router.get("/web/{name}", include_in_schema=False)
 def static_file(name: str):
-    if name not in FILES:
+    path = _FILE_PATHS.get(name)
+    if path is None:
         from core.exceptions import ApiNotFoundError
 
         raise ApiNotFoundError()
-    return FileResponse(WEB_DIR / name, media_type=FILES[name])
+    return FileResponse(path, media_type=FILES[path.name])
 
 
 def add_security_headers(response) -> None:

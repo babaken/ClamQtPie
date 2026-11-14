@@ -34,6 +34,8 @@ ScanStatus = Literal["OK", "FOUND", "ERROR"]
 
 #: 1回の応答で受け取る上限（スキャンは1ファイルずつ行うため、通常の応答はこれよりずっと小さい）
 MAX_RESPONSE_BYTES = 1024 * 1024
+#: clamd の StreamMaxLength を超えたときの INSTREAM の応答（小文字で比べる）
+STREAM_SIZE_LIMIT_RESPONSE = "size limit exceeded"
 
 _SCAN_LINE_RE = re.compile(r"^(?P<path>.*): (?:(?P<ok>OK)|(?P<detail>.+) (?P<status>FOUND|ERROR))$")
 
@@ -66,6 +68,15 @@ def _is_loopback(host: str) -> bool:
 def _connect_without_timeout(host: str) -> bool:
     """TCP の接続にタイムアウトを付けないか（Windows で、接続先がこのPC 自身のときだけ）"""
     return platform.system() == "Windows" and _is_loopback(host)
+
+
+class ClamdStreamRejectedError(ClamdConnectionError):
+    """INSTREAM の内容を送っている途中で送れなくなり、応答も読めなかった（README_DEV §106）
+
+    clamd が StreamMaxLength を超えて応答を書いて閉じた場合も、TCP では、こちらがまだ送っていると応答が
+    捨てられて（RST）読めないことがある。clamd が止まった場合と見分けられないため、呼び出し側が clamd に
+    PING して決める。それ以外の呼び出し側には、これまでどおり接続のエラーとして見える
+    """
 
 
 class ClamdPathEncodingError(ClamdProtocolError):
@@ -199,7 +210,27 @@ class ClamdClient:
 
     # -- 送受信 ---------------------------------------------------------
     def _send_command(self, sock: socket.socket, command: str) -> None:
-        sock.sendall(_encode_command(command))
+        self._sendall(sock, _encode_command(command))
+
+    @staticmethod
+    def _sendall(sock: socket.socket, data: bytes) -> None:
+        """送信の失敗（スキャンの停止操作でソケットを閉じた・clamd の終了）は ClamdConnectionError にする。
+        OSError のままだと、呼び出し側がファイルの読み込みの失敗や想定外のエラーと取り違える"""
+        try:
+            sock.sendall(data)
+        except socket.timeout as exc:
+            raise ClamdTimeoutError(detail=str(exc)) from exc
+        except OSError as exc:
+            raise ClamdConnectionError(detail=str(exc)) from exc
+
+    @staticmethod
+    def _wait_without_timeout(sock: socket.socket) -> None:
+        """検査結果の待ちはスキャン系のため無制限（プロトコル設計書4章）。停止操作でソケットが閉じられた後なら
+        OSError（EBADF）になるため、ClamdConnectionError にする"""
+        try:
+            sock.settimeout(None)
+        except OSError as exc:
+            raise ClamdConnectionError(detail=str(exc)) from exc
 
     def _recv_until_close(self, sock: socket.socket) -> bytes:
         chunks: list[bytes] = []
@@ -226,7 +257,7 @@ class ClamdClient:
         sock = self._connect()
         try:
             if no_read_timeout:
-                sock.settimeout(None)
+                self._wait_without_timeout(sock)
             self._send_command(sock, command)
             raw = self._recv_until_close(sock)
         finally:
@@ -263,8 +294,15 @@ class ClamdClient:
         return self._parse_scan_response(response)
 
     def scan_stream(self, file_obj: BinaryIO) -> ScanResult:
-        """INSTREAM（3.3節: 長さプレフィックス方式のチャンク送信）"""
+        """INSTREAM（3.3節: 長さプレフィックス方式のチャンク送信）
+
+        送信に失敗しても、すぐには接続のエラーにしない。clamd は受け取った量が StreamMaxLength を超えると、
+        応答（「INSTREAM size limit exceeded. ERROR」）を返して接続を閉じるため、応答を読んでから判断する
+        （FILDES と同じ）。応答があればそのファイルの結果にし、無ければ（停止操作での打ち切り・clamd の終了）
+        ClamdConnectionError にする
+        """
         sock = self._connect()
+        send_error: OSError | None = None
         try:
             self._send_command(sock, "INSTREAM")
             total_sent = 0
@@ -281,16 +319,31 @@ class ClamdClient:
                     raise ClamdStreamSizeError(
                         detail=f"送信サイズ {total_sent} バイトが上限 {max_bytes} バイトを超過"
                     )
-                sock.sendall(len(chunk).to_bytes(4, byteorder="big") + chunk)
+                try:
+                    sock.sendall(len(chunk).to_bytes(4, byteorder="big") + chunk)
+                except OSError as exc:
+                    send_error = exc
+                    break
 
-            # ストリーム終端: 長さ0のチャンク
-            sock.sendall((0).to_bytes(4, byteorder="big"))
-            sock.settimeout(None)  # 検査結果の待ちはスキャン系のため無制限（プロトコル設計書4章）
+            if send_error is None:
+                try:
+                    # ストリーム終端: 長さ0のチャンク
+                    sock.sendall((0).to_bytes(4, byteorder="big"))
+                except OSError as exc:
+                    send_error = exc
+            if send_error is None:
+                self._wait_without_timeout(sock)
+            # 送れなかったときは、相手が応答を返して閉じた場合だけ読める。待ちは通常の読み取りのタイムアウトのまま
             raw = self._recv_until_close(sock)
         finally:
             self._close(sock)
 
         text = raw.decode("utf-8", errors="replace").rstrip("\x00").strip()
+        if send_error is not None and not text:
+            raise ClamdStreamRejectedError(detail=f"INSTREAMの送信に失敗しました ({send_error})") from send_error
+        if STREAM_SIZE_LIMIT_RESPONSE in text.lower():
+            # 「パス: 結果」の形ではないため、応答をそのまま詳細にする
+            return ScanResult(path="stream", status="ERROR", detail=text)
         results = self._parse_scan_response(text)
         return results[0] if results else ScanResult(path="stream", status="ERROR", detail=text)
 
@@ -316,7 +369,7 @@ class ClamdClient:
             except OSError as exc:
                 # 非対応のclamdは応答を返して接続を閉じるため、送信に失敗しても応答を読んでから判断する
                 send_error = exc
-            sock.settimeout(None)  # 検査結果の待ちはスキャン系のため無制限（プロトコル設計書4章）
+            self._wait_without_timeout(sock)
             raw = self._recv_until_close(sock)
         finally:
             self._close(sock)

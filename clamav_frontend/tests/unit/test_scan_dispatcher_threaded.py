@@ -43,3 +43,31 @@ def test_scan_dispatcher_double_start_is_ignored(fake_clamd_server, tmp_path, qt
         first_thread = dispatcher._thread
         dispatcher.start([str(file_path)])  # 排他制御により無視される
         assert dispatcher._thread is first_thread
+
+
+def test_shutdown_stops_running_scan_and_waits_for_thread(fake_clamd_server, tmp_path, qtbot):
+    # サービスの終了時（イベントループが止まった後）にスキャンが動いていても、スレッドを止めて待ち、
+    # 動いたままの QThread を破棄しない（プロセスが異常終了しない）
+    import time
+
+    file_path = tmp_path / "a.txt"
+    file_path.write_text("hello")
+    fake_clamd_server.response_map["SCAN"] = f"{file_path}: OK"
+    fake_clamd_server.delay_sec = 30  # clamd の応答を待っている途中で止める
+
+    dispatcher = ScanDispatcher(_service_for(fake_clamd_server))
+    dispatcher.start([str(file_path)])
+    qtbot.waitUntil(lambda: dispatcher._worker is not None and dispatcher._worker._current is not None, timeout=5000)
+    thread = dispatcher._thread
+
+    started = time.monotonic()
+    assert dispatcher.shutdown() is True
+    assert time.monotonic() - started < 5
+    assert not thread.isRunning()
+    assert dispatcher.is_running is False
+
+
+def test_shutdown_without_scan_does_nothing():
+    from types import SimpleNamespace
+
+    assert ScanDispatcher(SimpleNamespace()).shutdown() is True

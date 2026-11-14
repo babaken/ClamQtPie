@@ -23,11 +23,11 @@ from PySide6.QtWidgets import (
     QPushButton,
 )
 
-from core.scheduler_service import cron_trigger
+from core.cron import cron_trigger
 from gui.plain_text import plain
 
 #: プリセット周期とcron式の対応（画面設計書4章「実行周期」）。曜日は標準のcron式の数え方（0=日曜）
-#: （APSchedulerへはcore.scheduler_service.cron_triggerで変換して渡す）
+#: （APSchedulerへはcore.cron.cron_triggerで変換して渡す）
 _CRON_PRESETS = {
     "毎日 3:00": "0 3 * * *",
     "毎週日曜 3:00": "0 3 * * 0",

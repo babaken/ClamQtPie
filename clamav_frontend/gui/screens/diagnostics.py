@@ -13,10 +13,11 @@
 from __future__ import annotations
 
 from PySide6.QtGui import QFontDatabase
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QTextEdit
 
 from core.background_task import BackgroundTask
 from core.diagnostics_service import LEVEL_NG, LEVEL_OK, LEVEL_WARN, mask_report
+from gui.flow_layout import FlowLayout
 from gui.screens.base import BaseScreen, wrap_layout
 from gui.theme import COLOR_NG, COLOR_OK, COLOR_WARN, set_variant
 from gui.plain_text import plain
@@ -28,7 +29,7 @@ class DiagnosticsScreen(BaseScreen):
 
     def build_content(self) -> None:
         self.begin_card()
-        buttons = QHBoxLayout()
+        buttons = FlowLayout()  # 狭いときは次の行へ折り返す（#85）
         self.run_button = set_variant(QPushButton("ヘルスチェックを実行"), "primary")
         self.copy_masked_button = QPushButton("レポートをコピー（パス伏せ字）")
         self.copy_masked_button.setToolTip(
@@ -42,7 +43,6 @@ class DiagnosticsScreen(BaseScreen):
         self.copy_full_button.clicked.connect(lambda: self._copy(masked=False))
         for button in (self.run_button, self.copy_masked_button, self.copy_full_button):
             buttons.addWidget(button)
-        buttons.addStretch(1)
         self.add_layout_widget(wrap_layout(buttons))
         self.summary_label = plain(QLabel("「ヘルスチェックを実行」をクリックすると診断レポートを作成します。"))
         self.summary_label.setObjectName("cardText")

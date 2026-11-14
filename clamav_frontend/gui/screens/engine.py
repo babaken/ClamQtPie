@@ -18,6 +18,7 @@ from core.background_task import BackgroundTask
 from core.exceptions import AppError, ClamdConnectionError
 from core.logger import CATEGORY_SYSTEM, log_event
 from gui import icons
+from gui.flow_layout import FlowLayout
 from gui.error_dialog import show_confirm_dialog, show_error_dialog
 from gui.screens.base import BaseScreen, wrap_layout
 from gui.theme import COLOR_NG, COLOR_OK, COLOR_TEXT_MUTED, set_accent, set_variant
@@ -52,7 +53,8 @@ class EngineScreen(BaseScreen):
 
         # 2. 操作カード
         self.begin_card("サービスの操作")
-        buttons = QHBoxLayout()
+        # 狭いときは次の行へ折り返す（横 1 列のままだと、最小の幅で右が切れて押せなかった。#85）
+        buttons = FlowLayout()
         self.start_button = set_variant(QPushButton("▶ サービスを開始"), "primary")
         self.stop_button = QPushButton("■ サービスを停止")
         self.reload_button = QPushButton("定義データベースを再読み込み")
@@ -63,7 +65,6 @@ class EngineScreen(BaseScreen):
         self.ping_button.clicked.connect(self._on_ping_clicked)
         for button in (self.start_button, self.stop_button, self.reload_button, self.ping_button):
             buttons.addWidget(button)
-        buttons.addStretch(1)
         self.add_layout_widget(wrap_layout(buttons))
         hint = QLabel(
             "停止中はオンデマンド スキャン・スケジュール スキャン・リアルタイム監視の検査ができません。"

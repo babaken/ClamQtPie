@@ -207,3 +207,80 @@ def test_unscanned_files_are_labeled_by_reason_and_counted(qtbot):
     assert "検査できなかったファイルが 3 件" in screen.state_label.text()
     screen.result_table.selectAll()  # 検知以外の行は「隔離する」の対象にならない
     assert screen._selected_detection_rows() == []
+
+
+# --- ほかから始まったスキャンの表示（README_DEV §101） -----------------------------------------
+
+def test_scan_started_elsewhere_is_shown_while_screen_is_open(qtbot):
+    # 画面を開いたまま「中断」の表示のときに、ほかから始まったスキャンも「スキャン中」になり、［停止］を押せる
+    screen = _make_screen(qtbot)
+    screen.bind_services(MagicMock(), MagicMock())
+    screen.show()
+    screen._on_finished({"scanned": 3, "cancelled": True})
+    assert screen.state_label.text().startswith("状態: 中断")
+
+    screen.show_started_elsewhere()
+
+    assert screen.state_label.text() == "状態: スキャン中"
+    assert screen.stop_button.isEnabled() is True
+    assert screen.start_button.isEnabled() is False
+
+
+def test_scan_started_from_screen_keeps_results(qtbot, tmp_path):
+    # 画面から始めたスキャン（すでにスキャン中の表示）では、サービスからの開始の知らせで結果の表を消さない
+    screen = _make_screen(qtbot)
+    dispatcher = MagicMock()
+    dispatcher.is_running = False
+    screen.bind_services(dispatcher, MagicMock())
+    screen.custom_radio.setChecked(True)
+    screen.custom_path_list.addItem(str(tmp_path))
+    screen.start_button.click()
+    screen._on_file_scanned("/tmp/eicar.txt", "FOUND", "Eicar-Test-Signature", "2026-11-13T00:00:00")
+    qtbot.waitUntil(lambda: screen.result_table.rowCount() == 1, timeout=1000)
+
+    screen.show_started_elsewhere()
+
+    assert screen.result_table.rowCount() == 1
+    assert screen.stop_button.isEnabled() is True
+
+
+def test_tray_shows_scan_started_elsewhere_regardless_of_visibility():
+    # トレイGUI は、スキャン画面を開いているかどうかで開始の知らせを捨てない（判断は画面に任せる）
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[2] / "tray_main.py").read_text(encoding="utf-8")
+    line = next(l for l in source.splitlines() if "p.scan.started.connect" in l)
+    assert "show_started_elsewhere" in line
+    assert "isVisible" not in source.split("p.scan.started.connect", 1)[1].split("\n\n", 1)[0]
+
+
+# --- 表の見出し（README_DEV §105） ------------------------------------------------------------
+
+def test_table_columns_are_not_narrower_than_headers(qtbot):
+    # 列を見出しの文字より細くしない（狭いウィンドウで「ウイルス名 / 内容」の左右が切れて重なった。#81）
+    screen = _make_screen(qtbot)
+    screen.resize(600, 600)
+    screen.show()
+    for table in (screen.result_table, screen.history_table):
+        metrics = table.horizontalHeader().fontMetrics()
+        for col in range(table.columnCount()):
+            text = table.horizontalHeaderItem(col).text()
+            assert table.columnWidth(col) >= metrics.horizontalAdvance(text), text
+
+
+_LONG_TYPE = "毎週月曜日の夜のカスタムスキャン"
+
+
+def test_history_type_column_fits_its_contents(qtbot):
+    # 「種類」の中身（「カスタムスキャン」など）が省かれない幅にする（PR #84 の確認で指摘）
+    from types import SimpleNamespace
+
+    screen = _make_screen(qtbot)
+    record = SimpleNamespace(id=1, started_at="2026-11-13T21:00:00+09:00", label=_LONG_TYPE, scan_type="schedule",
+                             source="gui", result="cancelled", scanned=0, detected=0, errors=0)
+    screen._history_service = SimpleNamespace(list_recent=lambda: [record])
+    screen.reload_history()
+    table = screen.history_table
+    assert table.fontMetrics().horizontalAdvance(_LONG_TYPE) > 100  # 既定の幅（100 ピクセル）では入らない長さ
+    assert table.columnWidth(1) >= table.fontMetrics().horizontalAdvance(_LONG_TYPE)
+    assert table.columnWidth(1) <= 260

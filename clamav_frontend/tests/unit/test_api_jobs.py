@@ -413,3 +413,33 @@ def test_stopping_with_an_open_subscription_ends_it_cleanly(env, monkeypatch):
     assert time.monotonic() - started < 0.9  # 打ち切りの待ち（1 秒）まで待たない
     assert ended.wait(5)  # クライアント側も配信の終わりを受け取る
     assert logged == []
+
+
+def test_events_after_a_restart_reach_a_client_with_an_old_last_event_id(env):
+    # 起動し直す前のサービスの番号（今の番号より大きい）で再接続しても、新しいイベントが届く
+    import httpx2 as httpx
+
+    from api.server import LOOPBACK_HOST, ApiServer
+
+    env.hub.publish("scan.started", {"n": 1})  # 送り直さない（このサービスの前の番号ではないため）
+    stale_id = env.hub.latest_id + 10_000
+    server = ApiServer(create_app(env.tokens, env.context), 0)
+    server.start()
+    received = []
+    try:
+        with httpx.stream("GET", f"http://{LOOPBACK_HOST}:{server.port}{API_PREFIX}/events",
+                          headers={**env.user, "Last-Event-ID": str(stale_id)}, timeout=10) as response:
+            assert response.status_code == 200
+
+            def publish_later():
+                time.sleep(0.3)
+                env.hub.publish("scan.finished", {"n": 2})
+
+            threading.Thread(target=publish_later, daemon=True).start()
+            for line in response.iter_lines():
+                if line.startswith("data: "):
+                    received.append(line)
+                    break
+    finally:
+        server.stop()
+    assert received == ['data: {"n": 2}']

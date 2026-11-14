@@ -197,6 +197,7 @@ class TrayApp:
         self.tray_icon.set_state(TrayIconState.ERROR, True)
         self.tray_icon.set_warning(f"サービスにつながりません（{code}）")
         if self.window is not None:
+            self.window.set_service_down(code)
             self.window.get_screen("home").set_service_down(code)
         if self.window is None and not self._reconnect.isActive():
             self._reconnect.start(_RECONNECT_MS)
@@ -208,6 +209,7 @@ class TrayApp:
         self.tray_icon.set_warning(None)
         self.tray_icon.set_state(TrayIconState.ERROR, False)
         if self.window is not None:
+            self.window.set_service_down(None)
             self.window.get_screen("home").set_service_down(None)
             self.window.get_screen("home").refresh_status()
         if self.notifier is not None:
@@ -352,8 +354,7 @@ class TrayApp:
         p.update.finished.connect(lambda _record: home_screen.refresh_status())
         p.realtime.detected.connect(lambda _path, _virus: (
             self.tray_icon.set_state(TrayIconState.DETECTION_PENDING, True), home_screen.refresh_status()))
-        p.scan.started.connect(lambda _label: scan_screen.show_started_elsewhere()
-                               if not scan_screen.isVisible() else None)
+        p.scan.started.connect(lambda _label: scan_screen.show_started_elsewhere())
 
         def on_event(name: str, _data) -> None:
             # サービスで変わった内容を画面に反映する（ほかのトレイGUI・WebUI・スケジュールが変えたもの）

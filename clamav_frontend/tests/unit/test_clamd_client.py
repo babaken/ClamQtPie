@@ -246,3 +246,78 @@ def test_windows_loopback_connection_still_fails_fast_when_clamd_is_stopped(monk
     client = ClamdClient(ClamdConfig(connection_type="tcp", tcp_host="127.0.0.1", tcp_port=port))
     with pytest.raises(ClamdConnectionError):
         client._connect()
+
+
+# --- 停止操作で閉じたソケットの扱い（README_DEV §100） -----------------------------------------
+
+def _closed_socket():
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.close()
+    return sock
+
+
+@pytest.mark.parametrize("call", [
+    lambda client: client.scan_path("/tmp/a.txt"),
+    lambda client: client.scan_stream(io.BytesIO(b"data")),
+    lambda client: client.ping(),
+])
+def test_closed_socket_is_reported_as_connection_error(call, monkeypatch):
+    # 停止操作でソケットが閉じられた後の送信の失敗は、OSError のままにせず接続のエラーとして伝える
+    # （OSError のままだと、ファイルの読み込みの失敗や想定外のエラーと取り違えられる）
+    client = ClamdClient(ClamdConfig(connection_type="tcp", tcp_host="127.0.0.1", tcp_port=1))
+    monkeypatch.setattr(client, "_connect", _closed_socket)
+    with pytest.raises(ClamdConnectionError):
+        call(client)
+
+
+def test_waiting_on_closed_socket_is_reported_as_connection_error():
+    # FILDES・INSTREAM で結果を待つ前に、停止操作でソケットが閉じられていた場合
+    with pytest.raises(ClamdConnectionError):
+        ClamdClient._wait_without_timeout(_closed_socket())
+
+
+class _ClosingClamd:
+    """clamd が StreamMaxLength を超えたところで応答を返して閉じた接続（送信は失敗し、応答は読める）"""
+
+    def __init__(self, response: bytes):
+        self.response = response
+        self.sent = 0
+
+    def settimeout(self, _value):
+        pass
+
+    def sendall(self, data):
+        self.sent += 1
+        if self.sent > 1:  # コマンドは届き、内容の途中で閉じられた
+            raise BrokenPipeError(32, "Broken pipe")
+
+    def recv(self, _size):
+        data, self.response = self.response, b""
+        return data
+
+    def close(self):
+        pass
+
+
+def test_stream_limit_reply_after_send_failure_is_file_result(monkeypatch):
+    # clamd が上限で応答を返して閉じたときは、送信に失敗してもそのファイルの結果にする（スキャン全体を止めない）
+    client = ClamdClient(ClamdConfig(connection_type="tcp", tcp_host="127.0.0.1", tcp_port=1))
+    monkeypatch.setattr(client, "_connect", lambda: _ClosingClamd(b"INSTREAM size limit exceeded. ERROR\0"))
+
+    result = client.scan_stream(io.BytesIO(b"x" * 10))
+
+    assert result.status == "ERROR"
+    assert "size limit exceeded" in result.detail
+
+
+def test_stream_send_failure_without_reply_is_connection_error(monkeypatch):
+    # 応答が無いまま送れなくなったとき（停止操作での打ち切り・clamd の終了）は接続のエラー
+    client = ClamdClient(ClamdConfig(connection_type="tcp", tcp_host="127.0.0.1", tcp_port=1))
+    monkeypatch.setattr(client, "_connect", lambda: _ClosingClamd(b""))
+
+    from core.clamd_client import ClamdStreamRejectedError
+
+    with pytest.raises(ClamdStreamRejectedError):  # 呼び出し側が clamd に PING して決める（README_DEV §106）
+        client.scan_stream(io.BytesIO(b"x" * 10))

@@ -5,18 +5,11 @@ WatchTargetService — リアルタイム監視対象パス（watch_target テ�
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from core.records import WatchTargetRecord
 from db.database import DatabaseService
 from db.models import WatchTarget
-
-
-@dataclass
-class WatchTargetRecord:
-    id: int
-    path: str
-    enabled: bool
 
 
 def _to_record(row: WatchTarget) -> WatchTargetRecord:

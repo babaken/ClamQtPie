@@ -84,6 +84,7 @@ class RealtimeScreen(BaseScreen):
             "監視するフォルダがありません。「フォルダを追加」から監視するフォルダを追加してください。"
         )
         self.no_target_hint_label.setObjectName("cardText")
+        self.no_target_hint_label.setWordWrap(True)
         self.add_layout_widget(self.no_target_hint_label)
 
         # 3. 除外設定タブ
